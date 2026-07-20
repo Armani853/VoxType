@@ -55,4 +55,3 @@ class EventBus:
     @property
     def size(self) -> int:
         return self._queue.qsize()
-

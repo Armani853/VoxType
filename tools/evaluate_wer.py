@@ -98,7 +98,9 @@ def main() -> int:
     parser.add_argument("audio", type=Path)
     parser.add_argument("reference", type=Path, help="UTF-8 reference transcript")
     parser.add_argument("--language", choices=("ru", "en"), required=True)
-    parser.add_argument("--profile", choices=("fast", "balanced", "maximum_accuracy"), required=True)
+    parser.add_argument(
+        "--profile", choices=("fast", "balanced", "maximum_accuracy"), required=True
+    )
     parser.add_argument("--model", default=None, help="Override profile model name/path")
     parser.add_argument("--keep-yo", action="store_true")
     parser.add_argument("--normalize-numbers", action="store_true")

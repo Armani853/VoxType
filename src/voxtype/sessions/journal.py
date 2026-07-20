@@ -31,4 +31,3 @@ class SessionJournal:
                 raise RuntimeError(f"Duplicate journal sequence {sequence}")
             self._sequence += 1
             return sequence
-

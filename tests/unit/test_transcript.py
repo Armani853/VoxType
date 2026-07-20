@@ -17,8 +17,7 @@ def fragment(
     chunk_end: float,
 ) -> TranscriptFragment:
     stamps = tuple(
-        WordStamp(word, index * 0.4, (index + 1) * 0.4, 0.95)
-        for index, word in enumerate(words)
+        WordStamp(word, index * 0.4, (index + 1) * 0.4, 0.95) for index, word in enumerate(words)
     )
     return TranscriptFragment(
         sequence=sequence,
@@ -33,9 +32,7 @@ def fragment(
 def test_merger_removes_exact_timed_overlap() -> None:
     merger = TranscriptMerger()
     merger.merge(fragment(0, "Hello from VoxType", ["Hello", "from", "VoxType"], 0.0, 1.2))
-    result = merger.merge(
-        fragment(1, "from VoxType today", ["from", "VoxType", "today"], 0.4, 1.6)
-    )
+    result = merger.merge(fragment(1, "from VoxType today", ["from", "VoxType", "today"], 0.4, 1.6))
     assert result.skipped_prefix_words == 2
     assert result.insertion_text == " today"
     assert result.committed_text == "Hello from VoxType today"
@@ -51,9 +48,7 @@ def test_merger_ignores_punctuation_and_case_at_overlap() -> None:
 
 def test_merger_handles_one_word_disagreement_in_long_overlap() -> None:
     merger = TranscriptMerger()
-    merger.merge(
-        fragment(0, "one two three four", ["one", "two", "three", "four"], 0.0, 1.6)
-    )
+    merger.merge(fragment(0, "one two three four", ["one", "two", "three", "four"], 0.0, 1.6))
     result = merger.merge(
         fragment(1, "one too three four five", ["one", "too", "three", "four", "five"], 0.2, 2.2)
     )

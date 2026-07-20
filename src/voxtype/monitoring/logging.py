@@ -27,4 +27,3 @@ def configure_logging(log_dir: Path | None = None, verbose: bool = False) -> Pat
     root.addHandler(handler)
     root.propagate = False
     return path
-

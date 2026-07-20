@@ -27,4 +27,3 @@ def cleanup_retention(
                 shutil.rmtree(child)
                 deleted_directories += 1
     return deleted_sessions, deleted_directories
-

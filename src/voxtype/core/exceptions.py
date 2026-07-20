@@ -31,4 +31,3 @@ class SettingsError(VoxTypeError):
 
 class SessionError(VoxTypeError):
     """Raised when a session journal transaction fails."""
-

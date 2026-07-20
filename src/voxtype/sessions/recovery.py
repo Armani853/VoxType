@@ -9,4 +9,3 @@ def recoverable_sessions(repository: SessionRepository) -> tuple[SessionRecord, 
 
 def mark_recovered(repository: SessionRepository, session_id: str) -> None:
     repository.finish(session_id, status="recovered")
-

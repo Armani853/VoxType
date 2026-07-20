@@ -236,4 +236,3 @@ class SessionRepository:
             dropped_frames=int(row["dropped_frames"]),
             status=row["status"],
         )
-

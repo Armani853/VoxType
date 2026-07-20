@@ -90,7 +90,11 @@ class TranscriptMerger:
             and min(word.start_s for word in words) >= -0.05
             and max(word.end_s for word in words) <= duration + 0.5
         )
-        return [word.shifted(fragment.chunk_start_s) for word in words] if timestamps_look_relative else words
+        return (
+            [word.shifted(fragment.chunk_start_s) for word in words]
+            if timestamps_look_relative
+            else words
+        )
 
     def _find_overlap(self, new_words: list[WordStamp], chunk_start_s: float) -> int:
         if not self._words or not new_words:
@@ -116,12 +120,9 @@ class TranscriptMerger:
             new_start = new_words[0].start_s
             new_end = new_words[size - 1].end_s
             timestamps_valid = previous_end > previous_start and new_end > new_start
-            temporally_overlapping = (
-                not timestamps_valid
-                or (
-                    new_start <= previous_end + self.timestamp_tolerance_s
-                    and new_end >= previous_start - self.timestamp_tolerance_s
-                )
+            temporally_overlapping = not timestamps_valid or (
+                new_start <= previous_end + self.timestamp_tolerance_s
+                and new_end >= previous_start - self.timestamp_tolerance_s
             )
             if temporally_overlapping:
                 return size

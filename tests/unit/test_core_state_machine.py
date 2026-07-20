@@ -54,4 +54,3 @@ def test_state_machine_is_serialized_between_threads() -> None:
         thread.join()
     assert len(machine.history) == 1
     assert len(errors) == 1
-

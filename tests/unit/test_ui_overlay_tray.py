@@ -1,0 +1,90 @@
+from uuid import uuid4
+
+import pytest
+
+pytest.importorskip("pytestqt")
+pytest.importorskip("PySide6")
+
+from PySide6.QtCore import QSettings, Qt
+
+from voxtype.ui.models import AppStatus, DictationLanguage, UIState
+from voxtype.ui.overlay import DictationOverlay
+from voxtype.ui.tray import TrayController
+
+
+class _Controller:
+    def __init__(self) -> None:
+        self.toggle_calls = 0
+        self.pause_calls = 0
+        self.language_calls = 0
+        self.shutdown_calls = 0
+
+    def toggle_dictation(self) -> None:
+        self.toggle_calls += 1
+
+    def toggle_pause(self) -> None:
+        self.pause_calls += 1
+
+    def switch_language(self) -> None:
+        self.language_calls += 1
+
+    def shutdown(self) -> None:
+        self.shutdown_calls += 1
+
+
+def test_overlay_is_nonactivating_and_has_both_modes(qtbot) -> None:  # type: ignore[no-untyped-def]
+    settings = QSettings("VoxTypeTests", f"Overlay-{uuid4()}")
+    settings.clear()
+    controller = _Controller()
+    overlay = DictationOverlay(controller, settings=settings)
+    qtbot.addWidget(overlay)
+
+    assert overlay.windowFlags() & Qt.WindowType.Tool
+    assert overlay.windowFlags() & Qt.WindowType.WindowDoesNotAcceptFocus
+    assert overlay.testAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+    overlay.update_snapshot(
+        UIState(
+            state=AppStatus.TRANSCRIBING,
+            language=DictationLanguage.EN,
+            session_elapsed_s=12,
+            queued_audio_seconds=4.2,
+            provisional_text="provisional text",
+            target_title="Notepad",
+            input_rms=0.4,
+        )
+    )
+    assert overlay.status_label.text() == "Обработка"
+    assert overlay.language_label.text() == "EN"
+    assert overlay.timer_label.text() == "00:00:12"
+
+    overlay.set_compact(False)
+    assert not overlay.is_compact()
+    assert overlay.expanded_panel.isVisible() is False  # parent is not shown yet
+    overlay.show_without_activating()
+    qtbot.waitUntil(overlay.isVisible)
+    assert overlay.expanded_panel.isVisible()
+    qtbot.mouseClick(overlay.pause_button, Qt.MouseButton.LeftButton)
+    qtbot.mouseClick(overlay.stop_button, Qt.MouseButton.LeftButton)
+    assert controller.pause_calls == 1
+    assert controller.toggle_calls == 1
+    settings.clear()
+
+
+def test_tray_menu_updates_and_routes_actions(qtbot) -> None:  # type: ignore[no-untyped-def]
+    del qtbot
+    controller = _Controller()
+    tray = TrayController(controller)
+    tray.update_snapshot(UIState(state=AppStatus.LISTENING, language=DictationLanguage.RU))
+    assert tray.toggle_action.text() == "Остановить диктовку"
+    assert tray.pause_action.isEnabled()
+    assert tray.ru_action.isChecked()
+
+    tray.toggle_action.trigger()
+    tray.pause_action.trigger()
+    tray.en_action.trigger()
+    tray.quit_action.trigger()
+    assert controller.toggle_calls == 1
+    assert controller.pause_calls == 1
+    assert controller.language_calls == 1
+    assert controller.shutdown_calls == 1
+    tray.close()

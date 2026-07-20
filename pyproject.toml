@@ -63,7 +63,7 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 minversion = "9.0"
-addopts = "-ra --strict-markers --strict-config"
+addopts = "-ra --strict-markers --strict-config -m 'not soak'"
 testpaths = ["tests"]
 pythonpath = ["src"]
 markers = [

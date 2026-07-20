@@ -70,4 +70,3 @@ class Vocabulary:
         finally:
             if temporary.exists():
                 temporary.unlink()
-

@@ -24,4 +24,3 @@ def migrate_settings(raw: dict[str, Any]) -> dict[str, Any]:
             f"Settings schema {version} is newer than supported {SETTINGS_SCHEMA_VERSION}"
         )
     return migrated
-

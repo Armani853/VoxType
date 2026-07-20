@@ -30,4 +30,3 @@ def run_health_checks(data_directory: Path) -> tuple[HealthCheck, ...]:
             HealthCheck(module, importlib.util.find_spec(module) is not None, "module availability")
         )
     return tuple(checks)
-

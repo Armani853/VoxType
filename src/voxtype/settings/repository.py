@@ -81,3 +81,20 @@ class SettingsRepository:
         finally:
             if temporary.exists():
                 temporary.unlink()
+
+    def update(self, changes: dict[str, Any]) -> AppSettings:
+        """Deep-merge validated UI changes and persist one complete snapshot."""
+        merged = self.load().to_dict()
+
+        def merge(target: dict[str, Any], source: dict[str, Any]) -> None:
+            for key, value in source.items():
+                current = target.get(key)
+                if isinstance(current, dict) and isinstance(value, dict):
+                    merge(current, value)
+                else:
+                    target[key] = value
+
+        merge(merged, changes)
+        settings = _convert_dataclass(AppSettings, migrate_settings(merged))
+        self.save(settings)
+        return settings

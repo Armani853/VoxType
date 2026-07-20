@@ -129,7 +129,9 @@ class StateMachine:
             if target == previous:
                 raise InvalidStateTransition(f"State is already {target.value}")
             if target not in _ALLOWED[previous]:
-                raise InvalidStateTransition(f"Forbidden transition {previous.value} -> {target.value}")
+                raise InvalidStateTransition(
+                    f"Forbidden transition {previous.value} -> {target.value}"
+                )
             transition = StateTransition(previous, target, reason, time.monotonic())
             self._state = target
             self._history.append(transition)
@@ -146,4 +148,3 @@ class StateMachine:
             except Exception:
                 self._logger.exception("state_listener_failed current=%s", target.value)
         return transition
-

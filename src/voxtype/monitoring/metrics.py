@@ -67,7 +67,9 @@ class PerformanceMonitor:
         with self._lock:
             self.audio.dropped_frames += frames
 
-    def record_processed(self, audio_seconds: float, inference_seconds: float, latency_s: float) -> None:
+    def record_processed(
+        self, audio_seconds: float, inference_seconds: float, latency_s: float
+    ) -> None:
         with self._lock:
             self.audio.processed_audio_seconds += audio_seconds
             if audio_seconds > 0:
@@ -100,4 +102,3 @@ class PerformanceMonitor:
                 "latency_max_s": max(latencies, default=0.0),
                 "samples": [asdict(sample) for sample in samples],
             }
-

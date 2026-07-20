@@ -1,0 +1,222 @@
+"""Human-readable hardware, runtime and self-test diagnostics."""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from typing import Any
+
+from ._optional import PYSIDE6_AVAILABLE, require_pyside6
+from .models import DiagnosticReport, diagnostic_report_from
+
+if PYSIDE6_AVAILABLE:
+    from PySide6.QtCore import Qt, Signal
+    from PySide6.QtGui import QGuiApplication
+    from PySide6.QtWidgets import (
+        QDialog,
+        QHBoxLayout,
+        QHeaderView,
+        QLabel,
+        QPlainTextEdit,
+        QProgressBar,
+        QPushButton,
+        QTableWidget,
+        QTableWidgetItem,
+        QTabWidget,
+        QVBoxLayout,
+        QWidget,
+    )
+
+    class DiagnosticsWindow(QDialog):
+        refresh_requested = Signal()
+        self_test_requested = Signal()
+        open_log_requested = Signal()
+        export_requested = Signal()
+
+        def __init__(self, parent: QWidget | None = None) -> None:
+            super().__init__(parent)
+            self.setObjectName("diagnosticsWindow")
+            self.setWindowTitle("Диагностика — VoxType")
+            self.resize(880, 650)
+            self.setMinimumSize(700, 500)
+            self._report = DiagnosticReport()
+            self._tables: dict[str, QTableWidget] = {}
+            self._build_ui()
+            self._connect_ui()
+            self.set_report(self._report)
+
+        def _build_ui(self) -> None:
+            root = QVBoxLayout(self)
+            root.setContentsMargins(22, 20, 22, 18)
+            header = QHBoxLayout()
+            heading_column = QVBoxLayout()
+            heading = QLabel("Диагностика", self)
+            heading.setProperty("heading", True)
+            self.summary_label = QLabel("Диагностика ещё не выполнялась", self)
+            self.summary_label.setProperty("muted", True)
+            self.summary_label.setWordWrap(True)
+            heading_column.addWidget(heading)
+            heading_column.addWidget(self.summary_label)
+            header.addLayout(heading_column)
+            header.addStretch(1)
+            self.refresh_button = QPushButton("Обновить", self)
+            self.self_test_button = QPushButton("Выполнить self-test", self)
+            self.self_test_button.setProperty("primary", True)
+            self.self_test_button.setStyleSheet("min-height: 34px; font-size: 10pt;")
+            header.addWidget(self.refresh_button)
+            header.addWidget(self.self_test_button)
+            root.addLayout(header)
+
+            self.progress = QProgressBar(self)
+            self.progress.setRange(0, 0)
+            self.progress.setTextVisible(False)
+            self.progress.hide()
+            root.addWidget(self.progress)
+            self.tabs = QTabWidget(self)
+            self.tabs.setObjectName("diagnosticsTabs")
+            self.overview_tab = QWidget(self.tabs)
+            overview_layout = QVBoxLayout(self.overview_tab)
+            overview_layout.setContentsMargins(14, 14, 14, 14)
+            self.checks_table = QTableWidget(0, 3, self.overview_tab)
+            self.checks_table.setObjectName("checksTable")
+            self.checks_table.setHorizontalHeaderLabels(("Проверка", "Результат", "Подробности"))
+            self.checks_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+            self.checks_table.verticalHeader().setVisible(False)
+            checks_header = self.checks_table.horizontalHeader()
+            checks_header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+            checks_header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+            checks_header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+            overview_layout.addWidget(self.checks_table)
+            self.tabs.addTab(self.overview_tab, "Проверки")
+            for key, title in (
+                ("hardware", "Компьютер"),
+                ("audio", "Аудио"),
+                ("runtime", "Производительность"),
+                ("libraries", "Версии"),
+            ):
+                table = self._make_key_value_table()
+                self._tables[key] = table
+                self.tabs.addTab(table, title)
+            log_tab = QWidget(self.tabs)
+            log_layout = QVBoxLayout(log_tab)
+            log_layout.setContentsMargins(12, 12, 12, 12)
+            privacy = QLabel(
+                "Фрагмент технического лога. Продиктованный текст и PCM-аудио сюда не записываются.",
+                log_tab,
+            )
+            privacy.setProperty("muted", True)
+            privacy.setWordWrap(True)
+            self.log_edit = QPlainTextEdit(log_tab)
+            self.log_edit.setObjectName("diagnosticLogExcerpt")
+            self.log_edit.setReadOnly(True)
+            self.log_edit.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+            log_layout.addWidget(privacy)
+            log_layout.addWidget(self.log_edit, 1)
+            self.tabs.addTab(log_tab, "Лог")
+            root.addWidget(self.tabs, 1)
+
+            actions = QHBoxLayout()
+            self.open_log_button = QPushButton("Открыть полный лог", self)
+            self.copy_button = QPushButton("Копировать отчёт", self)
+            self.export_button = QPushButton("Экспортировать…", self)
+            self.close_button = QPushButton("Закрыть", self)
+            actions.addWidget(self.open_log_button)
+            actions.addWidget(self.copy_button)
+            actions.addWidget(self.export_button)
+            actions.addStretch(1)
+            actions.addWidget(self.close_button)
+            root.addLayout(actions)
+
+        def _make_key_value_table(self) -> QTableWidget:
+            table = QTableWidget(0, 2, self.tabs)
+            table.setHorizontalHeaderLabels(("Параметр", "Значение"))
+            table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+            table.verticalHeader().setVisible(False)
+            header = table.horizontalHeader()
+            header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+            header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+            return table
+
+        def _connect_ui(self) -> None:
+            self.refresh_button.clicked.connect(self.refresh_requested)
+            self.self_test_button.clicked.connect(self._start_self_test)
+            self.open_log_button.clicked.connect(self.open_log_requested)
+            self.export_button.clicked.connect(self.export_requested)
+            self.copy_button.clicked.connect(self._copy_report)
+            self.close_button.clicked.connect(self.close)
+
+        def _start_self_test(self) -> None:
+            self.set_self_test_running(True)
+            self.self_test_requested.emit()
+
+        def set_self_test_running(self, running: bool, message: str = "") -> None:
+            self.progress.setVisible(running)
+            self.self_test_button.setEnabled(not running)
+            self.refresh_button.setEnabled(not running)
+            if message:
+                self.summary_label.setText(message)
+
+        def set_report(self, report: DiagnosticReport | Mapping[str, Any] | object) -> None:
+            parsed = diagnostic_report_from(report)
+            self._report = parsed
+            self.summary_label.setText(parsed.summary)
+            self._fill_checks(parsed.checks)
+            self._fill_table(self._tables["hardware"], parsed.hardware)
+            self._fill_table(self._tables["audio"], parsed.audio)
+            self._fill_table(self._tables["runtime"], parsed.runtime)
+            self._fill_table(self._tables["libraries"], parsed.libraries)
+            self.log_edit.setPlainText(parsed.log_excerpt)
+            self.set_self_test_running(False)
+
+        def _fill_checks(self, checks: tuple[tuple[str, bool, str], ...]) -> None:
+            self.checks_table.setRowCount(len(checks))
+            for row, (name, ok, detail) in enumerate(checks):
+                name_item = QTableWidgetItem(name)
+                result_item = QTableWidgetItem("Готово" if ok else "Проблема")
+                result_item.setForeground(
+                    Qt.GlobalColor.darkGreen if ok else Qt.GlobalColor.darkRed
+                )
+                detail_item = QTableWidgetItem(detail)
+                detail_item.setToolTip(detail)
+                self.checks_table.setItem(row, 0, name_item)
+                self.checks_table.setItem(row, 1, result_item)
+                self.checks_table.setItem(row, 2, detail_item)
+
+        @staticmethod
+        def _fill_table(table: QTableWidget, values: Mapping[str, str]) -> None:
+            table.setRowCount(len(values))
+            for row, (key, value) in enumerate(values.items()):
+                key_item = QTableWidgetItem(key)
+                value_item = QTableWidgetItem(value)
+                value_item.setToolTip(value)
+                table.setItem(row, 0, key_item)
+                table.setItem(row, 1, value_item)
+
+        def report_as_text(self) -> str:
+            lines = ["VoxType — диагностический отчёт", self._report.summary, ""]
+            sections = (
+                ("Компьютер", self._report.hardware),
+                ("Аудио", self._report.audio),
+                ("Производительность", self._report.runtime),
+                ("Версии", self._report.libraries),
+            )
+            for title, values in sections:
+                lines.append(title)
+                lines.extend(f"{key}: {value}" for key, value in values.items())
+                lines.append("")
+            if self._report.checks:
+                lines.append("Проверки")
+                lines.extend(
+                    f"{'OK' if ok else 'ERROR'} — {name}: {detail}"
+                    for name, ok, detail in self._report.checks
+                )
+            return "\n".join(lines).strip()
+
+        def _copy_report(self) -> None:
+            QGuiApplication.clipboard().setText(self.report_as_text())
+
+else:
+
+    class DiagnosticsWindow:  # type: ignore[no-redef]
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            del args, kwargs
+            require_pyside6()

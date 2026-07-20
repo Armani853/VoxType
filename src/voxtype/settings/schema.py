@@ -55,7 +55,7 @@ class AudioSettings:
 
 @dataclass(slots=True)
 class ModelSettings:
-    installed_model: str = "small"
+    installed_model: str = "large-v3-turbo"
     cpu_threads: int = 0
     experimental_gpu: bool = False
     power_mode: str = "balanced"
@@ -90,4 +90,3 @@ class AppSettings:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
-

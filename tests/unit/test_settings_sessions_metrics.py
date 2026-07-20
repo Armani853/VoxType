@@ -39,17 +39,13 @@ def test_corrupt_settings_are_backed_up(tmp_path: Path) -> None:
 
 
 def test_legacy_safe_clipboard_migrates() -> None:
-    migrated = migrate_settings(
-        {"schema_version": 0, "dictation": {"safe_clipboard": True}}
-    )
+    migrated = migrate_settings({"schema_version": 0, "dictation": {"safe_clipboard": True}})
     assert migrated["dictation"]["injection_mode"] == "safe_clipboard"
 
 
 def test_session_journal_is_ordered_idempotent_and_recoverable(tmp_path: Path) -> None:
     with SessionRepository(tmp_path / "sessions.sqlite3") as repository:
-        session_id = repository.create(
-            Language.RU, "small", ModelProfile.FAST, "notepad.exe"
-        )
+        session_id = repository.create(Language.RU, "small", ModelProfile.FAST, "notepad.exe")
         journal = SessionJournal(repository, session_id)
         assert journal.commit_text("Привет") == 0
         assert journal.append("warning", {"kind": "quiet"}) == 1
@@ -96,4 +92,3 @@ def test_performance_metrics_are_bounded_and_compute_rtf() -> None:
     assert snapshot["audio"]["captured_frames"] == 480
     assert snapshot["audio"]["queue_high_watermark"] == 3
     assert snapshot["rtf_average"] == 0.5
-

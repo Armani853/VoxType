@@ -125,4 +125,8 @@ class ControllerSnapshot:
     input_rms: float
     clipping_percentage: float
     warning: str = ""
-
+    microphone_name: str = "Системный микрофон"
+    model_name: str = "Модель не загружена"
+    model_profile: ModelProfile = ModelProfile.BALANCED
+    status_message: str = ""
+    error_message: str = ""
