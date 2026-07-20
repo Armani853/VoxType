@@ -1,0 +1,74 @@
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "voxtype"
+version = "0.1.0"
+description = "Local-first continuous dictation for Windows 11"
+readme = "README_RU.md"
+requires-python = ">=3.12,<3.13"
+license = {text = "MIT"}
+authors = [{name = "VoxType contributors"}]
+dependencies = [
+  "PySide6==6.11.0",
+  "ctranslate2==4.8.1",
+  "faster-whisper==1.2.1",
+  "numpy==2.2.0",
+  "onnxruntime==1.27.0",
+  "platformdirs==4.10.1",
+  "psutil==7.2.2",
+  "scipy==1.17.1",
+  "sounddevice==0.5.5",
+]
+
+[project.optional-dependencies]
+dev = [
+  "mypy==1.20.2",
+  "Nuitka==4.1.3",
+  "pytest==9.1.0",
+  "pytest-qt>=4.5,<5",
+  "pytest-timeout>=2.4,<3",
+  "ruff==0.15.20",
+  "zstandard>=0.25,<1",
+]
+
+[project.scripts]
+voxtype = "voxtype.__main__:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["src", "tests", "tools"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+ignore = ["E501", "RUF001"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["S101"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["src/voxtype", "tools"]
+warn_unused_ignores = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+minversion = "9.0"
+addopts = "-ra --strict-markers --strict-config"
+testpaths = ["tests"]
+pythonpath = ["src"]
+markers = [
+  "integration: deterministic multi-component integration tests",
+  "windows: requires a Windows desktop session",
+  "interactive: changes foreground windows or uses real input devices",
+  "soak: long-running resource stability tests",
+]
