@@ -87,6 +87,7 @@ if PYSIDE6_AVAILABLE:
             self._state = UIState()
             self._minimize_to_tray = bool(minimize_to_tray)
             self._allow_close = False
+            self._toggle_hotkey = "Ctrl+Alt+Space"
             self._controller: object | None = None
             self._controller_connections: list[tuple[Any, Callable[..., Any]]] = []
             self.setObjectName("mainWindow")
@@ -353,7 +354,10 @@ if PYSIDE6_AVAILABLE:
             has_error = state.state in {
                 AppStatus.ERROR_RECOVERABLE,
                 AppStatus.ERROR_FATAL,
-            }
+            } or (
+                state.state in {AppStatus.FINISHING, AppStatus.PAUSED_TARGET_LOST}
+                and bool(state.error_message)
+            )
             self.error_banner.setVisible(has_error)
             if has_error:
                 self.error_label.setText(
@@ -365,7 +369,7 @@ if PYSIDE6_AVAILABLE:
 
         def _default_status_detail(self, state: UIState) -> str:
             if state.state is AppStatus.IDLE:
-                return "Нажмите кнопку или Ctrl+Alt+Space, чтобы начать"
+                return f"Нажмите кнопку или {self._toggle_hotkey}, чтобы начать"
             if state.state in {AppStatus.LISTENING, AppStatus.SPEECH_DETECTED}:
                 return state.target_title or "Говорите обычным голосом"
             if state.state is AppStatus.TRANSCRIBING:
@@ -431,7 +435,12 @@ if PYSIDE6_AVAILABLE:
             self.backlog_tile.title_label.setText(ui_text("backlog", locale))
             self.target_tile.title_label.setText(ui_text("target", locale))
             self.fragment_title.setText(ui_text("last_fragment", locale))
-            self.hotkey_label.setText(ui_text("hotkey_hint", locale))
+            self.hotkey_label.setText(self._toggle_hotkey)
+
+        def set_toggle_hotkey(self, specification: str) -> None:
+            self._toggle_hotkey = specification or "Ctrl+Alt+Space"
+            self.hotkey_label.setText(self._toggle_hotkey)
+            self.update_snapshot(self._state)
 
         def set_minimize_to_tray(self, enabled: bool) -> None:
             self._minimize_to_tray = bool(enabled)

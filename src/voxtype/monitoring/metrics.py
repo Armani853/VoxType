@@ -67,11 +67,37 @@ class PerformanceMonitor:
         with self._lock:
             self.audio.dropped_frames += frames
 
+    def sync_audio(
+        self,
+        *,
+        captured_frames: int,
+        dropped_frames: int,
+        queued_audio_seconds: float,
+        processed_audio_seconds: float,
+        queue_high_watermark: int,
+        callback_overflows: int,
+        current_input_rms: float,
+        clipping_percentage: float,
+    ) -> None:
+        """Publish authoritative capture/queue counters into diagnostics."""
+
+        with self._lock:
+            self.audio.captured_frames = max(0, int(captured_frames))
+            self.audio.dropped_frames = max(0, int(dropped_frames))
+            self.audio.queued_audio_seconds = max(0.0, float(queued_audio_seconds))
+            self.audio.processed_audio_seconds = max(0.0, float(processed_audio_seconds))
+            self.audio.queue_high_watermark = max(0, int(queue_high_watermark))
+            self.audio.callback_overflows = max(0, int(callback_overflows))
+            self.audio.current_input_rms = max(0.0, float(current_input_rms))
+            self.audio.clipping_percentage = max(0.0, float(clipping_percentage))
+
     def record_processed(
         self, audio_seconds: float, inference_seconds: float, latency_s: float
     ) -> None:
         with self._lock:
-            self.audio.processed_audio_seconds += audio_seconds
+            # The durable queue publishes processed_audio_seconds through
+            # sync_audio().  ASR segments overlap, so adding their duration
+            # here would double-count audio while still useful for RTF.
             if audio_seconds > 0:
                 self._rtfs.append(inference_seconds / audio_seconds)
             self._latencies.append(max(0.0, latency_s))

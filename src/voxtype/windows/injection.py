@@ -270,6 +270,18 @@ class TextInjectionService:
             self._strategy = InjectionStrategy(value)
 
     @property
+    def paste_delay(self) -> float:
+        with self._lock:
+            return self._paste_delay
+
+    @paste_delay.setter
+    def paste_delay(self, value: float) -> None:
+        if value < 0:
+            raise ValueError("paste_delay cannot be negative")
+        with self._lock:
+            self._paste_delay = float(value)
+
+    @property
     def pending_fragments(self) -> int:
         return len(self._pending)
 
@@ -319,6 +331,17 @@ class TextInjectionService:
                 )
             except (ClipboardError, OSError):
                 restored = False
+            if not restored:
+                # Some editors (notably Word) strip custom formats while
+                # enriching CF_UNICODETEXT during paste. If the clipboard still
+                # contains exactly our submitted phrase, content ownership is
+                # unambiguous and the original snapshot can be restored without
+                # overwriting unrelated user data.
+                try:
+                    if self._clipboard.get_text() == text:
+                        restored = self._clipboard.restore(snapshot)
+                except (ClipboardError, OSError):
+                    restored = False
         return restored, send_error
 
     def _inject_once(
@@ -355,7 +378,19 @@ class TextInjectionService:
 
         if not self._same_target_is_ready(target):
             raise _TargetChanged("Target changed before Unicode fallback")
-        self._sender.send_unicode(text)
+        if target.process_name.casefold() == "winword.exe":
+            self._sleep(0.2)
+            word_sender = SendInputController(
+                self._sender.backend,
+                max_chunk_units=2,
+                inter_chunk_delay=0.02,
+                sleep=self._sleep,
+            )
+            word_sender.send_focus_prime()
+            self._sleep(0.05)
+            word_sender.send_unicode(text)
+        else:
+            self._sender.send_unicode(text)
         return InjectionStrategy.UNICODE, None, "Clipboard paste failed; Unicode fallback was used"
 
     @staticmethod

@@ -218,8 +218,8 @@ class SendInputController:
         self,
         backend: KeyboardInputBackend | None = None,
         *,
-        max_chunk_units: int = 64,
-        inter_chunk_delay: float = 0.001,
+        max_chunk_units: int = 16,
+        inter_chunk_delay: float = 0.03,
         modifier_release_timeout: float = 0.75,
         sleep: Callable[[float], None] = time.sleep,
         monotonic: Callable[[], float] = time.monotonic,
@@ -259,6 +259,17 @@ class SendInputController:
                 if index + 1 < len(chunks) and self._inter_chunk_delay:
                     self._sleep(self._inter_chunk_delay)
         return total
+
+    def send_focus_prime(self) -> int:
+        """Send a non-text Shift transition for editors that drop first Unicode input."""
+
+        with self._lock:
+            return self._send_exact(
+                (
+                    KeyStroke(VK_SHIFT, 0, 0),
+                    KeyStroke(VK_SHIFT, 0, KEYEVENTF_KEYUP),
+                )
+            )
 
     def wait_for_modifiers_released(self) -> bool:
         modifiers = (VK_SHIFT, VK_CONTROL, VK_MENU, VK_LWIN, VK_RWIN)

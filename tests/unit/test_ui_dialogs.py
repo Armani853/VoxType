@@ -23,7 +23,11 @@ def test_settings_roundtrip_and_submit(qtbot) -> None:  # type: ignore[no-untype
     window.set_values(
         {
             "general": {"theme": "dark", "show_overlay": False},
-            "dictation": {"default_language": "en", "model_profile": "fast"},
+            "dictation": {
+                "default_language": "en",
+                "model_profile": "fast",
+                "custom_vocabulary": ["PySide6", "Иван Петров"],
+            },
             "audio": {"device_id": "mic-1", "vad_sensitivity": 0.7},
             "model": {"name": "small", "cpu_threads": 6},
             "privacy": {"save_history": True, "retention_days": 14},
@@ -36,6 +40,7 @@ def test_settings_roundtrip_and_submit(qtbot) -> None:  # type: ignore[no-untype
     assert values["audio"]["device_id"] == "mic-1"
     assert values["audio"]["vad_sensitivity"] == 0.7
     assert values["model"]["cpu_threads"] == 6
+    assert values["dictation"]["custom_vocabulary"] == ["PySide6", "Иван Петров"]
 
     window.overlay_check.setChecked(True)
     apply_button = window.button_box.button(QDialogButtonBox.StandardButton.Apply)
@@ -61,7 +66,7 @@ def test_settings_accepts_slots_based_application_schema(qtbot) -> None:  # type
     assert values["general"]["start_with_windows"] is True
     assert values["general"]["ui_language"] == "ru"
     assert values["dictation"]["target_mode"] == "locked"
-    assert values["dictation"]["model_profile"] == "balanced"
+    assert values["dictation"]["model_profile"] == "fast"
     assert values["audio"]["device_id"] == 3
     assert values["model"]["installed_model"] == "small"
 

@@ -19,6 +19,7 @@ class AppState(StrEnum):
     LISTENING = "listening"
     SPEECH_DETECTED = "speech_detected"
     TRANSCRIBING = "transcribing"
+    PAUSED = "paused"
     PAUSED_TARGET_LOST = "paused_target_lost"
     FINISHING = "finishing"
     ERROR_RECOVERABLE = "error_recoverable"
@@ -38,9 +39,11 @@ _COMMON_ACTIVE = {
     AppState.LISTENING,
     AppState.SPEECH_DETECTED,
     AppState.TRANSCRIBING,
+    AppState.PAUSED,
     AppState.PAUSED_TARGET_LOST,
     AppState.FINISHING,
     AppState.ERROR_RECOVERABLE,
+    AppState.ERROR_FATAL,
     AppState.SHUTTING_DOWN,
 }
 
@@ -63,6 +66,7 @@ _ALLOWED: dict[AppState, frozenset[AppState]] = {
     AppState.LISTENING: frozenset(_COMMON_ACTIVE - {AppState.LISTENING}),
     AppState.SPEECH_DETECTED: frozenset(_COMMON_ACTIVE - {AppState.SPEECH_DETECTED}),
     AppState.TRANSCRIBING: frozenset(_COMMON_ACTIVE - {AppState.TRANSCRIBING}),
+    AppState.PAUSED: frozenset(_COMMON_ACTIVE - {AppState.PAUSED}),
     AppState.PAUSED_TARGET_LOST: frozenset(_COMMON_ACTIVE - {AppState.PAUSED_TARGET_LOST}),
     AppState.FINISHING: frozenset(
         {
@@ -128,6 +132,38 @@ class StateMachine:
             previous = self._state
             if target == previous:
                 raise InvalidStateTransition(f"State is already {target.value}")
+            if target not in _ALLOWED[previous]:
+                raise InvalidStateTransition(
+                    f"Forbidden transition {previous.value} -> {target.value}"
+                )
+            transition = StateTransition(previous, target, reason, time.monotonic())
+            self._state = target
+            self._history.append(transition)
+            listeners = tuple(self._listeners)
+        self._logger.info(
+            "state_transition previous=%s current=%s reason=%s",
+            previous.value,
+            target.value,
+            reason,
+        )
+        for listener in listeners:
+            try:
+                listener(transition)
+            except Exception:
+                self._logger.exception("state_listener_failed current=%s", target.value)
+        return transition
+
+    def transition_if(
+        self, expected: set[AppState] | frozenset[AppState], target: AppState, reason: str
+    ) -> StateTransition | None:
+        """Atomically transition only while the state is one of ``expected``."""
+
+        if not reason.strip():
+            raise ValueError("A state transition requires a non-empty reason")
+        with self._lock:
+            if self._state not in expected:
+                return None
+            previous = self._state
             if target not in _ALLOWED[previous]:
                 raise InvalidStateTransition(
                     f"Forbidden transition {previous.value} -> {target.value}"

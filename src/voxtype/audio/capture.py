@@ -32,6 +32,11 @@ class AudioCaptureConfig:
     target_sample_rate: int = 16_000
     block_duration_ms: int = 30
     callback_queue_chunks: int = 128
+    # A second bounded RAM hand-off absorbs a temporary dispatcher stall.  Once
+    # ingress switches to it, all later callback blocks use the same queue for
+    # the remainder of the session, which preserves FIFO order without doing
+    # disk I/O or waiting in PortAudio's callback.
+    emergency_queue_chunks: int = 8_192
 
     def __post_init__(self) -> None:
         if self.input_sample_rate <= 0 or self.target_sample_rate <= 0:
@@ -40,6 +45,8 @@ class AudioCaptureConfig:
             raise ValueError("block_duration_ms must be between 10 and 200")
         if self.callback_queue_chunks < 4:
             raise ValueError("callback_queue_chunks must be at least 4")
+        if self.emergency_queue_chunks < 4:
+            raise ValueError("emergency_queue_chunks must be at least 4")
 
     @property
     def block_frames(self) -> int:
@@ -51,6 +58,10 @@ class _CallbackBlock:
     samples: FloatAudio
     captured_at: float
     input_overflow: bool
+
+
+class AudioIngressOverflowError(RuntimeError):
+    """PortAudio or the bounded callback hand-off could not retain all PCM."""
 
 
 class AudioCaptureService:
@@ -74,6 +85,10 @@ class AudioCaptureService:
         self._callback_queue: Queue[_CallbackBlock] = Queue(
             maxsize=self.config.callback_queue_chunks
         )
+        self._emergency_queue: Queue[_CallbackBlock] = Queue(
+            maxsize=self.config.emergency_queue_chunks
+        )
+        self._emergency_mode = False
         self._stop_requested = Event()
         self._abort_dispatch = Event()
         self._dispatcher: Thread | None = None
@@ -109,6 +124,7 @@ class AudioCaptureService:
             self._stop_requested.clear()
             self._abort_dispatch.clear()
             self._fatal_error = None
+            self._emergency_mode = False
             self._accept_callbacks = True
             self._dispatcher = Thread(
                 target=self._dispatch_loop, name="voxtype-audio-dispatch", daemon=True
@@ -155,11 +171,25 @@ class AudioCaptureService:
         overflow = bool(getattr(status, "input_overflow", False))
         self._captured_frames += max(int(frames), 0)
         self._callback_overflows += int(overflow)
+        if overflow:
+            # PortAudio cannot report the exact number already lost.  Count one
+            # callback block conservatively so a session can never claim zero
+            # dropped frames after an input overflow.
+            self._dropped_frames += max(int(frames), 1)
+            if self._fatal_error is None:
+                self._fatal_error = AudioIngressOverflowError(
+                    "PortAudio reported an input overflow"
+                )
         copied = np.array(indata, dtype=np.float32, copy=True, order="C").reshape(-1)
-        try:
-            self._callback_queue.put_nowait(_CallbackBlock(copied, time(), overflow))
-        except Full:
+        if not self._enqueue_callback_block(_CallbackBlock(copied, time(), overflow)):
             self._dropped_frames += copied.size
+            if self._fatal_error is None:
+                self._fatal_error = AudioIngressOverflowError(
+                    "The bounded callback hand-off queue was exhausted"
+                )
+            # Continuing would silently discard every following callback.  The
+            # controller observes fatal_error and ends the session recoverably.
+            self._accept_callbacks = False
 
     def submit_test_audio(
         self,
@@ -173,14 +203,46 @@ class AudioCaptureService:
         audio = np.asarray(samples, dtype=np.float32).reshape(-1).copy()
         self._captured_frames += int(audio.size)
         self._callback_overflows += int(input_overflow)
-        try:
-            self._callback_queue.put_nowait(
-                _CallbackBlock(audio, captured_at or time(), input_overflow)
-            )
-        except Full:
+        if input_overflow:
+            self._dropped_frames += max(int(audio.size), 1)
+            if self._fatal_error is None:
+                self._fatal_error = AudioIngressOverflowError(
+                    "Test source reported an input overflow"
+                )
+        if not self._enqueue_callback_block(
+            _CallbackBlock(audio, captured_at or time(), input_overflow)
+        ):
             self._dropped_frames += int(audio.size)
+            if self._fatal_error is None:
+                self._fatal_error = AudioIngressOverflowError(
+                    "The bounded callback hand-off queue was exhausted"
+                )
+            self._accept_callbacks = False
             return False
         return True
+
+    def _enqueue_callback_block(self, block: _CallbackBlock) -> bool:
+        """Route a callback block without waiting and without reordering PCM."""
+
+        if self._emergency_mode:
+            try:
+                self._emergency_queue.put_nowait(block)
+                return True
+            except Full:
+                return False
+        try:
+            self._callback_queue.put_nowait(block)
+            return True
+        except Full:
+            # This is a one-way switch for the session.  Keeping it one-way
+            # prevents a newer primary-queue block from overtaking an older
+            # emergency-queue block during a producer/consumer race.
+            self._emergency_mode = True
+            try:
+                self._emergency_queue.put_nowait(block)
+                return True
+            except Full:
+                return False
 
     def start_dispatcher_for_tests(self) -> None:
         with self._lifecycle_lock:
@@ -189,6 +251,7 @@ class AudioCaptureService:
             self._stop_requested.clear()
             self._abort_dispatch.clear()
             self._accept_callbacks = True
+            self._emergency_mode = False
             self._dispatcher = Thread(
                 target=self._dispatch_loop, name="voxtype-audio-test-dispatch", daemon=True
             )
@@ -197,12 +260,12 @@ class AudioCaptureService:
 
     def _dispatch_loop(self) -> None:
         try:
-            while not self._stop_requested.is_set() or not self._callback_queue.empty():
-                try:
-                    block = self._callback_queue.get(timeout=0.05)
-                except Empty:
+            while not self._stop_requested.is_set() or self._has_callback_backlog():
+                queued = self._get_callback_block(timeout=0.05)
+                if queued is None:
                     self._publish_callback_metrics()
                     continue
+                block, source_queue = queued
                 try:
                     resampled = self.resampler.process(block.samples)
                     if resampled.size:
@@ -225,7 +288,7 @@ class AudioCaptureService:
                     self._dropped_frames += int(block.samples.size)
                     raise
                 finally:
-                    self._callback_queue.task_done()
+                    source_queue.task_done()
             tail = self.resampler.flush()
             if tail.size:
                 processed = self.preprocessor.process(tail)
@@ -265,14 +328,30 @@ class AudioCaptureService:
     def _input_equivalent_frames(self, output_frames: int) -> int:
         return round(output_frames * self.config.input_sample_rate / self.config.target_sample_rate)
 
-    def _discard_callback_backlog(self) -> None:
-        while True:
+    def _has_callback_backlog(self) -> bool:
+        return not self._callback_queue.empty() or not self._emergency_queue.empty()
+
+    def _get_callback_block(
+        self, timeout: float
+    ) -> tuple[_CallbackBlock, Queue[_CallbackBlock]] | None:
+        # Primary blocks are always older: emergency mode is one-way.
+        try:
+            return self._callback_queue.get_nowait(), self._callback_queue
+        except Empty:
             try:
-                block = self._callback_queue.get_nowait()
+                return self._emergency_queue.get(timeout=timeout), self._emergency_queue
             except Empty:
-                return
-            self._dropped_frames += int(block.samples.size)
-            self._callback_queue.task_done()
+                return None
+
+    def _discard_callback_backlog(self) -> None:
+        for callback_queue in (self._callback_queue, self._emergency_queue):
+            while True:
+                try:
+                    block = callback_queue.get_nowait()
+                except Empty:
+                    break
+                self._dropped_frames += int(block.samples.size)
+                callback_queue.task_done()
 
     def _publish_callback_metrics(self) -> None:
         with self._metrics_lock:

@@ -16,7 +16,10 @@ from ctypes import wintypes
 from pathlib import Path
 
 import pytest
+from PySide6.QtCore import QSettings
+from PySide6.QtWidgets import QApplication, QWidget
 
+from voxtype.ui.overlay import DictationOverlay
 from voxtype.windows.clipboard import ClipboardManager
 from voxtype.windows.foreground import (
     capture_foreground,
@@ -136,6 +139,7 @@ def test_notepad_receives_real_unicode_and_clipboard_is_restored(tmp_path: Path)
     assert result.status is InjectionStatus.INSERTED
     assert result.clipboard_restored is True
 
+    assert _wait_foreground(hwnd)
     _send_ctrl_key(ord("S"))
     deadline = time.monotonic() + 5.0
     while time.monotonic() < deadline:
@@ -150,3 +154,66 @@ def test_notepad_receives_real_unicode_and_clipboard_is_restored(tmp_path: Path)
     # The test tab is saved, so Ctrl+W closes it without a destructive prompt.
     _send_ctrl_key(ord("W"))
     service.close()
+
+
+def test_overlay_does_not_take_focus_from_real_notepad(tmp_path: Path) -> None:
+    test_file = tmp_path / "voxtype_overlay_focus.txt"
+    test_file.write_text("", encoding="utf-8")
+    subprocess.Popen(["notepad.exe", str(test_file)])
+    hwnd = _find_notepad_window(test_file.name)
+    if not hwnd or not _wait_foreground(hwnd):
+        pytest.skip("Notepad did not expose an activatable interactive window")
+
+    application = QApplication.instance() or QApplication([])
+    settings = QSettings(str(tmp_path / "overlay.ini"), QSettings.Format.IniFormat)
+    overlay = DictationOverlay(settings=settings)
+    overlay.show_without_activating()
+    deadline = time.monotonic() + 0.5
+    while time.monotonic() < deadline:
+        application.processEvents()
+        time.sleep(0.01)
+    foreground = capture_foreground()
+    assert foreground is not None
+    assert foreground.hwnd != int(overlay.winId())
+    assert not overlay.hasFocus()
+    overlay.close()
+    assert _wait_foreground(hwnd)
+    _send_ctrl_key(ord("W"))
+
+
+def test_locked_target_queues_during_real_window_change_then_returns_fifo(
+    tmp_path: Path,
+) -> None:
+    first_file = tmp_path / "voxtype_target_first.txt"
+    first_file.write_text("", encoding="utf-8")
+    subprocess.Popen(["notepad.exe", str(first_file)])
+    first_hwnd = _find_notepad_window(first_file.name)
+    if not first_hwnd or not _wait_foreground(first_hwnd):
+        pytest.skip("Notepad did not expose an activatable interactive window")
+
+    targets = TargetWindowManager()
+    assert targets.start_session().can_inject
+    service = TextInjectionService(targets, paste_delay=0.2)
+    application = QApplication.instance() or QApplication([])
+    other_window = QWidget()
+    other_window.setWindowTitle("VoxType target-change smoke")
+    other_window.show()
+    application.processEvents()
+    assert _wait_foreground(int(other_window.winId()))
+    queued = service.submit("locked-target-only")
+    assert queued.status is InjectionStatus.QUEUED
+    assert first_file.read_text(encoding="utf-8-sig") == ""
+
+    assert _wait_foreground(first_hwnd)
+    inserted = service.flush()
+    assert inserted.status is InjectionStatus.INSERTED
+    _send_ctrl_key(ord("S"))
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        if first_file.read_text(encoding="utf-8-sig") == "locked-target-only":
+            break
+        time.sleep(0.05)
+    assert first_file.read_text(encoding="utf-8-sig") == "locked-target-only"
+    service.close()
+    _send_ctrl_key(ord("W"))
+    other_window.close()

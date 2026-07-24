@@ -279,10 +279,15 @@ class Win32ClipboardBackend:
         written: list[int] = []
         failed: list[int] = []
         with self._opened():
-            if (
+            sequence_changed = (
                 expected_sequence_number is not None
                 and self.sequence_number() != expected_sequence_number
-            ):
+            )
+            # Word and some Chromium controls enrich the paste clipboard and
+            # increment its sequence while retaining our private lease marker.
+            # The marker proves ownership; without it, a sequence change is
+            # treated as a user clipboard change and is never overwritten.
+            if sequence_changed and expected_marker is None:
                 return None
             if expected_marker is not None:
                 marker_data = self._read_hglobal(expected_marker.format_id)

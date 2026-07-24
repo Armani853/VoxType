@@ -7,10 +7,13 @@ import json
 import sys
 from dataclasses import asdict
 
+import numpy as np
 from platformdirs import user_data_path
 
+from voxtype.asr.base import TranscriptionRequest
+from voxtype.asr.faster_whisper_backend import FasterWhisperBackend
 from voxtype.asr.model_manager import DEFAULT_MODEL_SPECS, ModelManager
-from voxtype.asr.profiles import ASRProfile
+from voxtype.asr.profiles import ASRProfile, get_profile
 from voxtype.constants import APP_AUTHOR, APP_NAME
 from voxtype.monitoring.hardware import probe_hardware
 from voxtype.monitoring.health import run_health_checks
@@ -25,6 +28,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--diagnostics", action="store_true")
     parser.add_argument("--no-ui", action="store_true")
+    parser.add_argument("--ui-smoke-test", action="store_true")
+    parser.add_argument("--inference-smoke-test", action="store_true")
     parser.add_argument("--install-model", choices=("fast", "balanced", "maximum_accuracy"))
     return parser
 
@@ -63,6 +68,45 @@ def main(argv: list[str] | None = None) -> int:
             json.dumps({"installed": str(path), "vad": str(vad_path)}, ensure_ascii=False) + "\n"
         )
         return 0
+    if arguments.inference_smoke_test:
+        data = user_data_path(APP_NAME, APP_AUTHOR)
+        vad_path = install_silero_vad(data)
+        from voxtype.vad.silero import SileroVAD
+
+        probability = SileroVAD(vad_path, strict=True).speech_probability(
+            np.zeros(512, dtype=np.float32), 16_000
+        )
+        manager = ModelManager(data / "models")
+        smoke_config = get_profile(ASRProfile.BALANCED)
+        if not manager.is_installed(smoke_config.model_name):
+            sys.stderr.write("balanced model is not installed for inference smoke-test\n")
+            return 2
+        backend = FasterWhisperBackend(manager.path_for(smoke_config.model_name), smoke_config)
+        result = backend.transcribe(
+            TranscriptionRequest(np.zeros(16_000, dtype=np.float32), 16_000, "ru")
+        )
+        sys.stdout.write(
+            json.dumps(
+                {
+                    "vad_probability": probability,
+                    "model": result.model_id,
+                    "audio_seconds": result.audio_duration_seconds,
+                }
+            )
+            + "\n"
+        )
+        return 0
+    if arguments.ui_smoke_test:
+        from PySide6.QtCore import QTimer
+
+        from voxtype.app import run_desktop
+
+        runtime = build_runtime(verbose=arguments.verbose)
+        from PySide6.QtWidgets import QApplication
+
+        application = QApplication.instance() or QApplication([])
+        QTimer.singleShot(750, application.quit)
+        return run_desktop(runtime)
     if arguments.self_test or arguments.diagnostics or arguments.no_ui:
         report = _diagnostics()
         sys.stdout.write(json.dumps(report, ensure_ascii=False, indent=2, default=str) + "\n")

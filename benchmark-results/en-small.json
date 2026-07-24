@@ -1,0 +1,28 @@
+{
+  "audio": "C:\\C_C++_C#\\Vacancies\\Voice-recognizer\\benchmark-results\\speech\\en.wav",
+  "language": "en",
+  "profile": "fast",
+  "model": "C:\\Users\\E8F7~1\\AppData\\Local\\VoxType\\VoxType\\models\\small",
+  "reference_raw": "Today I am testing local voice dictation. This is a longer sentence for measuring recognition speed on this computer.",
+  "hypothesis_raw": "Today I am testing local voice dictation. This is a longer sentence for measuring recognition speed on this computer.",
+  "raw": {
+    "substitutions": 0,
+    "deletions": 0,
+    "insertions": 0,
+    "reference_words": 19,
+    "wer": 0.0
+  },
+  "normalized": {
+    "substitutions": 0,
+    "deletions": 0,
+    "insertions": 0,
+    "reference_words": 19,
+    "wer": 0.0
+  },
+  "audio_duration_s": 7.883174603174603,
+  "processing_s": 4.01699600000029,
+  "rtf": 0.5095657780283873,
+  "rss_start_bytes": 57192448,
+  "rss_peak_bytes": 661397504,
+  "rss_delta_bytes": 604205056
+}

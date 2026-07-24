@@ -120,6 +120,21 @@ def test_own_voxtype_and_higher_integrity_windows_are_blocked() -> None:
     assert decision.requires_safe_copy
 
 
+def test_start_button_retains_last_observed_external_target() -> None:
+    editor = window(10, 100)
+    own = window(11, 999, process="VoxType.exe")
+    desktop = Desktop(editor)
+    desktop.windows[own.hwnd] = own
+    targets = manager(desktop)
+
+    assert targets.remember_foreground_target() == editor
+    desktop.foreground = own
+    decision = targets.start_session()
+
+    assert targets.locked_target == editor
+    assert decision.status is TargetStatus.TARGET_INACTIVE
+
+
 def test_unknown_integrity_is_blocked_instead_of_guessing() -> None:
     unknown = window(10, 100, integrity=IntegrityLevel.UNKNOWN)
     desktop = Desktop(unknown)

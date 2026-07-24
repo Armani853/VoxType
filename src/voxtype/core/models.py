@@ -28,6 +28,7 @@ class TargetMode(StrEnum):
 
 
 class InjectionMode(StrEnum):
+    AUTO = "auto"
     CLIPBOARD_PASTE = "clipboard_paste"
     UNICODE_INPUT = "unicode_input"
     SAFE_CLIPBOARD = "safe_clipboard"

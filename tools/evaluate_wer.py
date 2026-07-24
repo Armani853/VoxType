@@ -6,12 +6,17 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import threading
 import time
 import wave
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+import psutil
 from faster_whisper import WhisperModel
+from platformdirs import user_data_path
+
+from voxtype.constants import APP_AUTHOR, APP_NAME
 
 _PUNCTUATION = re.compile(r"[^\w\s-]", re.UNICODE)
 _NUMBER_WORDS = {
@@ -106,10 +111,32 @@ def main() -> int:
     parser.add_argument("--normalize-numbers", action="store_true")
     parser.add_argument("--output", type=Path, default=None)
     arguments = parser.parse_args()
-    defaults = {"fast": "small", "balanced": "turbo", "maximum_accuracy": "large-v3"}
-    model_name = arguments.model or defaults[arguments.profile]
+    defaults = {
+        "fast": "small",
+        "balanced": "large-v3-turbo",
+        "maximum_accuracy": "large-v3",
+    }
+    model_id = defaults[arguments.profile]
+    model_name = arguments.model or str(user_data_path(APP_NAME, APP_AUTHOR) / "models" / model_id)
     reference_text = arguments.reference.read_text(encoding="utf-8").strip()
-    model = WhisperModel(model_name, device="cpu", compute_type="int8", cpu_threads=0)
+    process = psutil.Process()
+    rss_start = process.memory_info().rss
+    rss_samples = [rss_start]
+    sampling_done = threading.Event()
+
+    def sample_memory() -> None:
+        while not sampling_done.wait(0.05):
+            rss_samples.append(process.memory_info().rss)
+
+    sampler = threading.Thread(target=sample_memory, name="voxtype-wer-memory", daemon=True)
+    sampler.start()
+    model = WhisperModel(
+        model_name,
+        device="cpu",
+        compute_type="int8",
+        cpu_threads=0,
+        local_files_only=True,
+    )
     started = time.perf_counter()
     segments, _info = model.transcribe(
         str(arguments.audio),
@@ -123,6 +150,9 @@ def main() -> int:
     )
     hypothesis = " ".join(segment.text.strip() for segment in segments).strip()
     processing_s = time.perf_counter() - started
+    sampling_done.set()
+    sampler.join(timeout=1.0)
+    rss_samples.append(process.memory_info().rss)
     duration_s = wav_duration(arguments.audio)
     raw = error_counts(reference_text.split(), hypothesis.split())
     normalized = error_counts(
@@ -149,6 +179,9 @@ def main() -> int:
         "audio_duration_s": duration_s,
         "processing_s": processing_s,
         "rtf": processing_s / duration_s if duration_s else 0.0,
+        "rss_start_bytes": rss_start,
+        "rss_peak_bytes": max(rss_samples),
+        "rss_delta_bytes": max(rss_samples) - rss_start,
     }
     payload = json.dumps(report, ensure_ascii=False, indent=2)
     if arguments.output is not None:

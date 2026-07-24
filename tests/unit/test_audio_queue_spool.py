@@ -124,14 +124,22 @@ def test_spill_migrates_ram_prefix_so_crash_recovery_has_no_fifo_gap(tmp_path: P
     assert sequences == list(range(6))
 
 
-def test_callback_ingress_is_bounded_and_reports_actual_drop(tmp_path: Path) -> None:
+def test_callback_ingress_is_bounded_and_turns_exhaustion_into_fatal_error(tmp_path: Path) -> None:
     output = LosslessAudioQueue(max_ram_chunks=2, spool=DiskSpool(tmp_path / "spool"))
     service = AudioCaptureService(
         output,
-        AudioCaptureConfig(input_sample_rate=16_000, callback_queue_chunks=4),
+        AudioCaptureConfig(
+            input_sample_rate=16_000,
+            callback_queue_chunks=4,
+            emergency_queue_chunks=4,
+        ),
     )
     block = np.zeros(480, dtype=np.float32)
-    assert [service.submit_test_audio(block) for _ in range(5)] == [
+    assert [service.submit_test_audio(block) for _ in range(9)] == [
+        True,
+        True,
+        True,
+        True,
         True,
         True,
         True,
@@ -139,8 +147,22 @@ def test_callback_ingress_is_bounded_and_reports_actual_drop(tmp_path: Path) -> 
         False,
     ]
     stats = service.stats()
-    assert stats.captured_frames == 2_400
+    assert stats.captured_frames == 4_320
     assert stats.dropped_frames == 480
+    assert service.fatal_error is not None
+
+
+def test_portaudio_overflow_can_never_report_zero_dropped_frames(tmp_path: Path) -> None:
+    output = LosslessAudioQueue(max_ram_chunks=2, spool=DiskSpool(tmp_path / "spool"))
+    service = AudioCaptureService(
+        output,
+        AudioCaptureConfig(input_sample_rate=16_000, callback_queue_chunks=4),
+    )
+    assert service.submit_test_audio(np.zeros(480, dtype=np.float32), input_overflow=True)
+    stats = service.stats()
+    assert stats.callback_overflows == 1
+    assert stats.dropped_frames >= 480
+    assert service.fatal_error is not None
 
 
 def test_streaming_resampler_keeps_duration_and_boundary_continuity() -> None:

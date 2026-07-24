@@ -5,7 +5,7 @@ from pathlib import Path
 from voxtype.core.models import Language, TranscriptFragment, WordStamp
 from voxtype.transcript.commands import VoiceCommandProcessor
 from voxtype.transcript.formatter import format_fragment_boundary
-from voxtype.transcript.merger import TranscriptMerger
+from voxtype.transcript.merger import TranscriptMerger, deduplicate_text_boundary
 from voxtype.transcript.vocabulary import Vocabulary
 
 
@@ -38,6 +38,16 @@ def test_merger_removes_exact_timed_overlap() -> None:
     assert result.committed_text == "Hello from VoxType today"
 
 
+def test_recovery_boundary_removes_only_replayed_suffix_prefix() -> None:
+    assert (
+        deduplicate_text_boundary(
+            "Это уже сохранённый важный текст", "важный текст и восстановленный хвост"
+        )
+        == "и восстановленный хвост"
+    )
+    assert deduplicate_text_boundary("один два", "совсем другой текст") == "совсем другой текст"
+
+
 def test_merger_ignores_punctuation_and_case_at_overlap() -> None:
     merger = TranscriptMerger()
     merger.merge(fragment(0, "Привет, мир", ["Привет,", "мир"], 0.0, 0.8))
@@ -64,12 +74,86 @@ def test_merger_preserves_real_repeat_without_audio_overlap() -> None:
     assert result.committed_text == "Yes yes yes yes"
 
 
+def test_merger_uses_text_fallback_when_word_timestamps_are_missing() -> None:
+    merger = TranscriptMerger()
+    first = TranscriptFragment(0, "one two three four", (), 0.0, 2.0, Language.EN)
+    second = TranscriptFragment(1, "three four five", (), 1.0, 3.0, Language.EN)
+    merger.merge(first)
+    result = merger.merge(second)
+    assert result.skipped_prefix_words == 2
+    assert result.committed_text == "One two three four five"
+
+
+def test_merger_uses_text_fallback_when_only_previous_timestamps_are_missing() -> None:
+    merger = TranscriptMerger()
+    merger.merge(TranscriptFragment(0, "one two three four", (), 0.0, 2.0, Language.EN))
+    result = merger.merge(fragment(1, "three four five", ["three", "four", "five"], 1.0, 3.0))
+    assert result.skipped_prefix_words == 2
+    assert result.committed_text == "One two three four five"
+
+
+def test_merger_text_fallback_preserves_repeat_after_non_overlapping_pause() -> None:
+    merger = TranscriptMerger()
+    first = TranscriptFragment(0, "repeat this", (), 0.0, 1.0, Language.EN)
+    second = TranscriptFragment(1, "repeat this", (), 1.2, 2.2, Language.EN)
+    merger.merge(first)
+    result = merger.merge(second)
+    assert result.skipped_prefix_words == 0
+    assert result.committed_text == "Repeat this repeat this"
+
+
 def test_merger_rejects_replayed_sequence() -> None:
     merger = TranscriptMerger()
     merger.merge(fragment(5, "first", ["first"], 0.0, 0.4))
     duplicate = merger.merge(fragment(5, "first", ["first"], 0.0, 0.4))
     assert duplicate.duplicate_detected
     assert duplicate.insertion_text == ""
+
+
+def test_merger_keeps_real_adjacent_short_repeat_and_removes_only_overlap() -> None:
+    merger = TranscriptMerger()
+    merger.merge(fragment(0, "go go", ["go", "go"], 0.0, 0.8))
+    result = merger.merge(fragment(1, "go now", ["go", "now"], 0.4, 1.2))
+    assert result.skipped_prefix_words == 1
+    assert result.committed_text == "Go go now"
+
+
+def test_merger_handles_cyrillic_latin_numbers_hyphen_and_abbreviation() -> None:
+    merger = TranscriptMerger()
+    merger.merge(fragment(0, "VoxType тест API-2", ["VoxType", "тест", "API-2"], 0.0, 1.2))
+    result = merger.merge(fragment(1, "тест API-2 готов", ["тест", "API-2", "готов"], 0.4, 1.6))
+    assert result.skipped_prefix_words == 2
+    assert result.committed_text == "VoxType тест API-2 готов"
+
+
+def test_merger_accepts_empty_chunk_without_losing_next_text() -> None:
+    merger = TranscriptMerger()
+    merger.merge(fragment(0, "first", ["first"], 0.0, 0.4))
+    empty = merger.merge(TranscriptFragment(1, "", (), 0.4, 0.8, Language.EN))
+    result = merger.merge(fragment(2, "second", ["second"], 0.8, 1.2))
+    assert empty.insertion_text == ""
+    assert result.committed_text == "First second"
+
+
+def test_merger_removes_ten_word_forced_chunk_overlap() -> None:
+    merger = TranscriptMerger(max_overlap_words=20)
+    previous = [f"w{index}" for index in range(15)]
+    incoming = [*previous[-10:], "tail"]
+    merger.merge(fragment(0, " ".join(previous), previous, 0.0, 6.0))
+    result = merger.merge(fragment(1, " ".join(incoming), incoming, 2.0, 6.4))
+    assert result.skipped_prefix_words == 10
+    assert result.committed_text.endswith(" tail")
+
+
+def test_merger_long_dictation_remains_ordered() -> None:
+    merger = TranscriptMerger()
+    for sequence in range(500):
+        start = sequence * 0.5
+        merger.merge(fragment(sequence, f"word{sequence}", [f"word{sequence}"], start, start + 0.4))
+    tokens = merger.committed_text.split()
+    assert len(tokens) == 500
+    assert tokens[0] == "Word0"
+    assert tokens[-1] == "word499"
 
 
 def test_formatter_spacing() -> None:

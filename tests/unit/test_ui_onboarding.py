@@ -41,4 +41,4 @@ def test_onboarding_emits_external_work_requests(qtbot) -> None:  # type: ignore
 
     with qtbot.waitSignal(wizard.model_download_requested, timeout=1000) as signal:
         wizard.download_button.click()
-    assert signal.args == ["balanced"]
+    assert signal.args == ["fast"]

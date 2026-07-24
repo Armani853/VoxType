@@ -164,3 +164,13 @@ def test_silero_onnx_path_uses_512_samples_and_recurrent_state() -> None:
 def test_segmentation_settings_enforce_required_padding() -> None:
     with pytest.raises(ValueError, match="pre-roll"):
         SegmentationSettings(pre_roll_ms=100)
+
+
+def test_segmenter_reset_can_preserve_monotonic_transcript_sequence() -> None:
+    segmenter = StreamingSegmenter(AmplitudeVAD())
+    speech = np.full(16_000, 0.5, dtype=np.float32)
+    first = segmenter.process(speech) or segmenter.flush()
+    assert first
+    segmenter.reset(preserve_sequence=True)
+    second = segmenter.process(speech) or segmenter.flush()
+    assert second[0].sequence > first[-1].sequence

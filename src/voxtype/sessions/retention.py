@@ -14,6 +14,7 @@ def cleanup_retention(
     temporary_audio_root: Path,
     retention_days: int,
     now: float | None = None,
+    spool_root: Path | None = None,
 ) -> tuple[int, int]:
     if retention_days < 0:
         raise ValueError("retention_days cannot be negative")
@@ -26,4 +27,18 @@ def cleanup_retention(
             if child.is_dir() and child.stat().st_mtime < cutoff:
                 shutil.rmtree(child)
                 deleted_directories += 1
+            elif child.is_file() and child.stat().st_mtime < cutoff:
+                child.unlink()
+                deleted_directories += 1
+    if spool_root is not None and spool_root.exists():
+        for child in spool_root.iterdir():
+            if child.stat().st_mtime >= cutoff:
+                continue
+            if repository.get(child.name) is not None:
+                continue
+            if child.is_dir():
+                shutil.rmtree(child)
+            else:
+                child.unlink()
+            deleted_directories += 1
     return deleted_sessions, deleted_directories

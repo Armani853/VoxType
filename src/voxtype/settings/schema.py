@@ -34,14 +34,17 @@ class GeneralSettings:
 @dataclass(slots=True)
 class DictationSettings:
     language: Language = Language.RU
-    model_profile: ModelProfile = ModelProfile.BALANCED
+    # FAST is the conservative first-run choice.  On the target Ryzen 5 5500U
+    # the measured large-v3-turbo RTF is >1, while small/int8 stays <0.7.
+    model_profile: ModelProfile = ModelProfile.FAST
     voice_commands: bool = False
     auto_insert: bool = True
-    injection_mode: InjectionMode = InjectionMode.CLIPBOARD_PASTE
+    injection_mode: InjectionMode = InjectionMode.AUTO
     target_mode: TargetMode = TargetMode.LOCKED
     insertion_delay_ms: int = 80
     add_fragment_space: bool = True
     capitalize_sentences: bool = True
+    custom_vocabulary: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -55,7 +58,7 @@ class AudioSettings:
 
 @dataclass(slots=True)
 class ModelSettings:
-    installed_model: str = "large-v3-turbo"
+    installed_model: str = "small"
     cpu_threads: int = 0
     experimental_gpu: bool = False
     power_mode: str = "balanced"

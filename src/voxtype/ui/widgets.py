@@ -167,16 +167,16 @@ else:
             require_pyside6()
 
     class Card(_UnavailableWidget):  # type: ignore[no-redef]
-        """Unavailable placeholder that fails clearly at construction."""
+        """Import guard that fails clearly at construction."""
 
     class AudioLevelMeter(_UnavailableWidget):  # type: ignore[no-redef]
-        """Unavailable placeholder that fails clearly at construction."""
+        """Import guard that fails clearly at construction."""
 
     class StatusDot(_UnavailableWidget):  # type: ignore[no-redef]
-        """Unavailable placeholder that fails clearly at construction."""
+        """Import guard that fails clearly at construction."""
 
     class SegmentedLanguageControl(_UnavailableWidget):  # type: ignore[no-redef]
-        """Unavailable placeholder that fails clearly at construction."""
+        """Import guard that fails clearly at construction."""
 
     class MetricTile(_UnavailableWidget):  # type: ignore[no-redef]
-        """Unavailable placeholder that fails clearly at construction."""
+        """Import guard that fails clearly at construction."""

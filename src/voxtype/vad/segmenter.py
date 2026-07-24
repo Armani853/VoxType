@@ -382,7 +382,8 @@ class StreamingSegmenter:
             raise RuntimeError("segmenter is not active")
         return self._active_start
 
-    def reset(self) -> None:
+    def reset(self, *, preserve_sequence: bool = False) -> None:
+        next_sequence = self._segment_sequence
         self._pending = np.empty(0, dtype=np.float32)
         self._pending_start = 0
         self._stream_end = 0
@@ -390,5 +391,5 @@ class StreamingSegmenter:
         self._clear_active_state()
         self._speech_run_start = None
         self._speech_run_samples = 0
-        self._segment_sequence = 0
+        self._segment_sequence = next_sequence if preserve_sequence else 0
         self.detector.reset()

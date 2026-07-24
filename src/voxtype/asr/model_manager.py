@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 import shutil
+import time
 import uuid
 import zipfile
 from collections.abc import Callable, Iterable
@@ -65,14 +66,20 @@ class InstalledModel:
 
 
 DEFAULT_MODEL_SPECS: dict[ASRProfile, ModelSpec] = {
-    ASRProfile.FAST: ModelSpec("medium", repository_id="Systran/faster-whisper-medium"),
+    ASRProfile.FAST: ModelSpec(
+        "small",
+        repository_id="Systran/faster-whisper-small",
+        revision="536b0662742c02347bc0e980a01041f333bce120",
+    ),
     ASRProfile.BALANCED: ModelSpec(
         "large-v3-turbo",
         repository_id="mobiuslabsgmbh/faster-whisper-large-v3-turbo",
+        revision="0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf",
     ),
     ASRProfile.MAXIMUM_ACCURACY: ModelSpec(
         "large-v3",
         repository_id="Systran/faster-whisper-large-v3",
+        revision="edaa852ec7e145841d8ffdb056a99866b5f0a478",
     ),
 }
 
@@ -84,6 +91,17 @@ class ModelManager:
         self.models_directory = Path(models_directory).resolve()
         self.models_directory.mkdir(parents=True, exist_ok=True)
         self._lock = RLock()
+        self._remove_stale_temporary_entries()
+
+    def _remove_stale_temporary_entries(self, *, minimum_age_seconds: float = 86_400.0) -> None:
+        cutoff = time.time() - minimum_age_seconds
+        for candidate in self.models_directory.iterdir():
+            if not candidate.name.startswith(".") or candidate.stat().st_mtime >= cutoff:
+                continue
+            if candidate.name.endswith((".staging", ".flat")) and candidate.is_dir():
+                shutil.rmtree(candidate, ignore_errors=True)
+            elif candidate.name.endswith(".download") and candidate.is_file():
+                candidate.unlink(missing_ok=True)
 
     def path_for(self, model_id: str) -> Path:
         if not _SAFE_ID.fullmatch(model_id):
@@ -97,6 +115,17 @@ class ModelManager:
         path = self.path_for(model_id)
         installed = path.is_dir() and (path / _MARKER).is_file()
         return installed and (not verify or self.verify(model_id))
+
+    def matches_spec(self, spec: ModelSpec) -> bool:
+        marker_path = self.path_for(spec.model_id) / _MARKER
+        try:
+            marker = json.loads(marker_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            return False
+        return bool(
+            marker.get("repository_id") == spec.repository_id
+            and marker.get("revision") == spec.revision
+        )
 
     def required_free_space(self, spec: ModelSpec) -> int:
         expected = spec.expected_size_bytes or 3 * 1024**3
@@ -117,12 +146,13 @@ class ModelManager:
         callback = progress or (lambda downloaded, total: None)
         with self._lock:
             destination = self.path_for(spec.model_id)
-            if self.is_installed(spec.model_id, verify=True):
+            if self.is_installed(spec.model_id, verify=True) and self.matches_spec(spec):
                 callback(self._directory_size(destination), self._directory_size(destination))
                 return destination
             if destination.exists():
                 raise ModelManagerError(
-                    f"Каталог {destination} уже существует, но не является проверенной моделью."
+                    f"Каталог {destination} занят повреждённой или другой версией модели; "
+                    "удалите её через настройки перед повторной установкой."
                 )
             self.ensure_free_space(spec)
             staging = self.models_directory / f".{spec.model_id}.{uuid.uuid4().hex}.staging"

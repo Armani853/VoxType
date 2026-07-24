@@ -158,6 +158,47 @@ class SessionRepository:
                 (time.time(), status, session_id),
             )
 
+    def require_recovery(self, session_id: str) -> None:
+        """Keep a failed session unfinished so startup can offer PCM recovery."""
+
+        with self._lock, self._connection:
+            self._connection.execute(
+                "UPDATE sessions SET finished_at=NULL, status='recovery_required' WHERE session_id=?",
+                (session_id,),
+            )
+
+    def commit_next_text(self, session_id: str, text: str) -> int:
+        """Append recovered text using the next durable journal sequence."""
+
+        if not text:
+            raise ValueError("Cannot journal empty committed text")
+        with self._lock, self._connection:
+            row = self._connection.execute(
+                "SELECT COALESCE(MAX(sequence), -1) + 1 AS sequence FROM session_events WHERE session_id=?",
+                (session_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(session_id)
+            sequence = int(row["sequence"])
+            self._connection.execute(
+                """INSERT INTO session_events(
+                    session_id, sequence, event_type, created_at, payload_json
+                ) VALUES (?, ?, 'recovered_text', ?, ?)""",
+                (
+                    session_id,
+                    sequence,
+                    time.time(),
+                    json.dumps({"text": text}, ensure_ascii=False, separators=(",", ":")),
+                ),
+            )
+            cursor = self._connection.execute(
+                "UPDATE sessions SET committed_text=committed_text || ? WHERE session_id=?",
+                (text, session_id),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(session_id)
+        return sequence
+
     def add_warning(self, session_id: str, warning: str, suspicious: bool = False) -> None:
         column = "suspicious_json" if suspicious else "warnings_json"
         with self._lock, self._connection:
@@ -194,6 +235,24 @@ class SessionRepository:
             ).fetchall()
         return tuple(self._record(row) for row in rows)
 
+    def language_switches(self, session_id: str) -> tuple[tuple[float, str], ...]:
+        """Return durable language changes for replaying an unfinished spool."""
+
+        with self._lock:
+            rows = self._connection.execute(
+                """SELECT payload_json FROM session_events
+                WHERE session_id=? AND event_type='language_switch' ORDER BY sequence""",
+                (session_id,),
+            ).fetchall()
+        switches: list[tuple[float, str]] = []
+        for row in rows:
+            payload = json.loads(row["payload_json"])
+            language = payload.get("language")
+            captured_at = payload.get("captured_at")
+            if language in {"ru", "en"} and isinstance(captured_at, int | float):
+                switches.append((float(captured_at), str(language)))
+        return tuple(switches)
+
     def delete_older_than(self, cutoff_timestamp: float) -> int:
         with self._lock, self._connection:
             session_rows = self._connection.execute(
@@ -207,6 +266,41 @@ class SessionRepository:
                 )
                 self._connection.execute("DELETE FROM sessions WHERE session_id=?", (identifier,))
         return len(identifiers)
+
+    def delete(self, session_id: str) -> bool:
+        """Delete one session and its event journal atomically."""
+
+        with self._lock, self._connection:
+            self._connection.execute("DELETE FROM session_events WHERE session_id=?", (session_id,))
+            cursor = self._connection.execute(
+                "DELETE FROM sessions WHERE session_id=?", (session_id,)
+            )
+        return cursor.rowcount == 1
+
+    def delete_all_finished(self) -> int:
+        """Remove local history without touching active recovery journals."""
+
+        with self._lock, self._connection:
+            rows = self._connection.execute(
+                "SELECT session_id FROM sessions WHERE finished_at IS NOT NULL"
+            ).fetchall()
+            identifiers = tuple(str(row["session_id"]) for row in rows)
+            for identifier in identifiers:
+                self._connection.execute(
+                    "DELETE FROM session_events WHERE session_id=?", (identifier,)
+                )
+                self._connection.execute("DELETE FROM sessions WHERE session_id=?", (identifier,))
+        return len(identifiers)
+
+    def delete_all(self) -> int:
+        """Erase every transcript and journal after capture has stopped."""
+
+        with self._lock, self._connection:
+            row = self._connection.execute("SELECT COUNT(*) AS total FROM sessions").fetchone()
+            total = int(row["total"]) if row is not None else 0
+            self._connection.execute("DELETE FROM session_events")
+            self._connection.execute("DELETE FROM sessions")
+        return total
 
     def close(self) -> None:
         with self._lock:

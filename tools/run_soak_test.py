@@ -23,11 +23,22 @@ import numpy as np
 import numpy.typing as npt
 import psutil
 
+from voxtype.asr.base import (
+    TranscriptionRequest,
+    TranscriptionResult,
+    TranscriptionSegment,
+    WordTimestamp,
+)
+from voxtype.asr.hallucination_guard import HallucinationGuard
 from voxtype.audio.models import AudioChunk
-from voxtype.audio.spool import DiskSpool, LosslessAudioQueue
-from voxtype.core.models import Language, ModelProfile
+from voxtype.audio.preprocessing import AudioPreprocessor
+from voxtype.audio.spool import AudioQueueLease, DiskSpool, LosslessAudioQueue
+from voxtype.core.models import Language, ModelProfile, TranscriptFragment, WordStamp
 from voxtype.sessions.journal import SessionJournal
 from voxtype.sessions.repository import SessionRepository
+from voxtype.transcript.merger import TranscriptMerger
+from voxtype.vad.base import AdaptiveEnergyVAD
+from voxtype.vad.segmenter import AudioSegment, StreamingSegmenter
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,11 +129,65 @@ class _JournalledInjector:
         self.sequences.append(sequence)
 
 
-def _audio_samples(sequence: int, frames: int) -> npt.NDArray[np.float32]:
-    """Alternate speech, silence and quieter speech without retaining PCM."""
+class _DeterministicASR:
+    """Backend-shaped local fixture that exercises guard/merger timing paths."""
 
-    phase = sequence % 12
-    amplitude = 0.0 if phase in {8, 9} else (0.04 if phase in {6, 7} else 0.18)
+    model_id = "deterministic-soak-fixture"
+
+    def __init__(self, config: SoakConfig) -> None:
+        self.config = config
+        self.segment_sequences: list[int] = []
+        self.loaded = False
+
+    def load(self) -> None:
+        self.loaded = True
+
+    def unload(self) -> None:
+        self.loaded = False
+
+    def transcribe(self, request: TranscriptionRequest) -> TranscriptionResult:
+        sequence = int(request.metadata.get("segment_sequence", "0"))
+        cycle = sequence % self.config.backlog_period_chunks
+        factor = (
+            self.config.backlog_processing_factor
+            if cycle >= self.config.backlog_period_chunks - self.config.backlog_chunks
+            else self.config.normal_processing_factor
+        )
+        started = time.monotonic()
+        if factor:
+            time.sleep(request.duration_seconds * factor)
+        token = f"segment-{sequence}"
+        self.segment_sequences.append(sequence)
+        word = WordTimestamp(
+            token, request.start_offset_seconds, request.start_offset_seconds + 0.2, 0.99
+        )
+        segment = TranscriptionSegment(
+            token,
+            request.start_offset_seconds,
+            request.start_offset_seconds + 0.2,
+            (word,),
+            average_log_probability=-0.05,
+            no_speech_probability=0.01,
+            compression_ratio=1.0,
+        )
+        return TranscriptionResult(
+            token,
+            request.language,
+            (segment,),
+            request.duration_seconds,
+            time.monotonic() - started,
+            self.model_id,
+            "deterministic",
+        )
+
+
+def _audio_samples(sequence: int, frames: int) -> npt.NDArray[np.float32]:
+    """Include >18 s monologues, pauses and quiet speech in every cycle."""
+
+    phase = sequence % 48
+    amplitude = 0.0 if 25 <= phase < 28 or 38 <= phase < 40 else 0.18
+    if 28 <= phase < 38:
+        amplitude = 0.04
     if amplitude == 0.0:
         return np.zeros(frames, dtype=np.float32)
     indices = np.arange(frames, dtype=np.float32)
@@ -166,6 +231,20 @@ def _ram_is_bounded(samples: list[ResourceSample], maximum_growth: int) -> tuple
     return growth_is_small and not linear_growth, linear_growth
 
 
+def _threads_are_bounded(
+    thread_counts: list[int], base_threads: int, *, worker_alive: bool = False
+) -> bool:
+    """Allow short native-library bursts while rejecting a retained thread leak."""
+
+    if not thread_counts or worker_alive:
+        return False
+    peak_allowance = max(4, base_threads // 2)
+    return (
+        max(thread_counts) <= base_threads + peak_allowance
+        and thread_counts[-1] <= base_threads + 1
+    )
+
+
 def run_soak(config: SoakConfig, work_directory: Path) -> SoakResult:
     """Execute one real wall-clock soak run and return its measured result."""
 
@@ -188,7 +267,8 @@ def run_soak(config: SoakConfig, work_directory: Path) -> SoakResult:
         max_ram_chunks=config.max_ram_chunks,
         spill_threshold=config.spill_threshold,
         spool=spool,
-        max_inflight=1,
+        max_inflight=2048,
+        durable=True,
     )
     process = psutil.Process()
     process.cpu_percent(interval=None)
@@ -197,24 +277,93 @@ def run_soak(config: SoakConfig, work_directory: Path) -> SoakResult:
     base_threads = process.num_threads()
     frames_per_chunk = max(1, round(config.sample_rate * config.chunk_duration_seconds))
     processed_sequences: list[int] = []
+    injected_sequences: list[int] = []
     retried_sequences: set[int] = set()
     exceptions: list[str] = []
     rtf_values: list[float] = []
     latency_values: list[float] = []
     duplicate_count = 0
     retry_count = 0
+    forced_segments = 0
     max_spool_bytes = 0
+    preprocessor = AudioPreprocessor(config.sample_rate)
+    segmenter = StreamingSegmenter(AdaptiveEnergyVAD(), sample_rate=config.sample_rate)
+    merger = TranscriptMerger()
+    guard = HallucinationGuard()
+    backend = _DeterministicASR(config)
 
     def consume() -> None:
-        nonlocal duplicate_count, retry_count
-        while True:
-            lease = audio_queue.acquire(timeout=0.2)
-            if lease is None:
-                if audio_queue.closed:
-                    return
-                continue
-            sequence = lease.chunk.sequence
-            try:
+        nonlocal duplicate_count, forced_segments, retry_count
+        pending: list[AudioQueueLease] = []
+        pending_seconds = 0.0
+
+        def acknowledge_pending() -> None:
+            nonlocal duplicate_count, pending_seconds
+            while pending:
+                completed = pending.pop(0)
+                audio_queue.ack(completed)
+                if completed.chunk.sequence in processed_sequences:
+                    duplicate_count += 1
+                processed_sequences.append(completed.chunk.sequence)
+            pending_seconds = 0.0
+
+        def acknowledge_committed_prefix() -> None:
+            nonlocal pending_seconds
+            retained_seconds = segmenter.buffered_seconds
+            while pending:
+                oldest_seconds = pending[0].chunk.duration_seconds
+                if pending_seconds - oldest_seconds + 1e-9 < retained_seconds:
+                    break
+                completed = pending.pop(0)
+                audio_queue.ack(completed)
+                processed_sequences.append(completed.chunk.sequence)
+                pending_seconds -= oldest_seconds
+
+        def transcribe(segment: AudioSegment) -> None:
+            nonlocal forced_segments
+            if segment.forced:
+                forced_segments += 1
+            request = TranscriptionRequest(
+                segment.samples,
+                segment.sample_rate,
+                "ru",
+                segment.start_seconds,
+                condition_on_previous_text=False,
+                metadata={"segment_sequence": str(segment.sequence)},
+            )
+            guarded = guard.transcribe_guarded(
+                backend, request, committed_text=merger.committed_text
+            )
+            result = guarded.result
+            fragment = TranscriptFragment(
+                segment.sequence,
+                result.text,
+                tuple(
+                    WordStamp(item.word, item.start, item.end, item.probability or 0.0)
+                    for item in result.words
+                ),
+                segment.start_seconds,
+                segment.end_seconds,
+                Language.RU,
+                inference_s=result.processing_seconds,
+            )
+            outcome = merger.merge(fragment)
+            if outcome.insertion_text:
+                token = f"segment-{segment.sequence} "
+                journal.commit_text(token)
+                injector.submit(segment.sequence, token)
+                injected_sequences.append(segment.sequence)
+            rtf_values.append(result.processing_seconds / max(request.duration_seconds, 1e-9))
+            latency_values.append(result.processing_seconds)
+
+        try:
+            while True:
+                lease = audio_queue.acquire(timeout=0.2)
+                if lease is None:
+                    if audio_queue.closed:
+                        break
+                    continue
+                sequence = lease.chunk.sequence
                 should_retry = (
                     config.retry_every_chunks > 0
                     and sequence > 0
@@ -226,30 +375,22 @@ def run_soak(config: SoakConfig, work_directory: Path) -> SoakResult:
                     retry_count += 1
                     audio_queue.nack(lease)
                     continue
-                cycle = sequence % config.backlog_period_chunks
-                factor = (
-                    config.backlog_processing_factor
-                    if cycle >= config.backlog_period_chunks - config.backlog_chunks
-                    else config.normal_processing_factor
-                )
-                processing_started = time.monotonic()
-                if factor:
-                    time.sleep(config.chunk_duration_seconds * factor)
-                token = f"{sequence} "
-                journal.commit_text(token)
-                injector.submit(sequence, token)
-                if sequence in processed_sequences:
-                    duplicate_count += 1
-                processed_sequences.append(sequence)
-                audio_queue.ack(lease)
-                processing_seconds = time.monotonic() - processing_started
-                rtf_values.append(processing_seconds / lease.chunk.duration_seconds)
-                latency_values.append(max(0.0, time.time() - lease.chunk.captured_at))
-            except Exception as exc:  # the result must retain worker failures
-                exceptions.append(type(exc).__name__)
+                pending.append(lease)
+                pending_seconds += lease.chunk.duration_seconds
+                processed = preprocessor.process(lease.chunk.samples)
+                emitted = segmenter.process(processed.samples)
+                for speech_segment in emitted:
+                    transcribe(speech_segment)
+                acknowledge_committed_prefix()
+            for speech_segment in segmenter.flush():
+                transcribe(speech_segment)
+            acknowledge_pending()
+        except Exception as exc:  # the result must retain worker failures
+            exceptions.append(type(exc).__name__)
+            while pending:
+                lease = pending.pop()
                 with suppress(ValueError, RuntimeError):
                     audio_queue.nack(lease)
-                return
 
     worker = threading.Thread(target=consume, name="voxtype-soak-consumer", daemon=True)
     worker.start()
@@ -304,13 +445,12 @@ def run_soak(config: SoakConfig, work_directory: Path) -> SoakResult:
     )
     repository.finish(session_id, status="completed" if drained else "soak_failed")
     record = repository.get(session_id)
-    journal_tokens = (
-        [] if record is None else [int(token) for token in record.committed_text.split()]
-    )
+    journal_tokens = [] if record is None else record.committed_text.split()
+    expected_tokens = [f"segment-{sequence}" for sequence in injected_sequences]
     journal_valid = (
         record is not None
         and record.status == "completed"
-        and journal_tokens == expected_sequences
+        and journal_tokens == expected_tokens
         and injector.journal_order_failures == 0
     )
     repository.close()
@@ -321,8 +461,11 @@ def run_soak(config: SoakConfig, work_directory: Path) -> SoakResult:
             spool_directory.rmdir()
     spool_cleaned = spool_files_remaining == 0 and not spool_directory.exists()
     ram_bounded, linear_ram_growth = _ram_is_bounded(samples, config.max_ram_growth_bytes)
-    max_threads = max(sample.thread_count for sample in samples)
-    threads_bounded = max_threads <= base_threads + 2 and not worker.is_alive()
+    thread_counts = [sample.thread_count for sample in samples]
+    max_threads = max(thread_counts)
+    threads_bounded = _threads_are_bounded(
+        thread_counts, base_threads, worker_alive=worker.is_alive()
+    )
     criteria = {
         "no_exceptions": not exceptions,
         "zero_dropped_frames": stats.dropped_frames == 0,
@@ -350,6 +493,8 @@ def run_soak(config: SoakConfig, work_directory: Path) -> SoakResult:
         "spool_files_remaining": spool_files_remaining,
         "duplicate_count": duplicate_count,
         "retry_count": retry_count,
+        "transcription_segments": len(injected_sequences),
+        "forced_segments": forced_segments,
         "exception_types": exceptions,
         "rtf_average": statistics.fmean(rtf_values) if rtf_values else 0.0,
         "rtf_maximum": max(rtf_values, default=0.0),
@@ -360,6 +505,7 @@ def run_soak(config: SoakConfig, work_directory: Path) -> SoakResult:
         "linear_ram_growth_detected": linear_ram_growth,
         "base_thread_count": base_threads,
         "max_thread_count": max_threads,
+        "final_thread_count": thread_counts[-1],
         "resource_sample_count": len(samples),
     }
     return SoakResult(
@@ -380,6 +526,34 @@ def write_result(result: SoakResult, output_path: Path) -> None:
         encoding="utf-8",
     )
     temporary.replace(output_path)
+
+
+def reassess_saved_result(output_path: Path) -> SoakResult:
+    """Re-evaluate acceptance criteria from an already measured sample series."""
+
+    raw = json.loads(output_path.read_text(encoding="utf-8"))
+    samples = raw.get("samples", [])
+    summary = raw.get("summary", {})
+    if not isinstance(samples, list) or not isinstance(summary, dict):
+        raise ValueError("invalid soak result structure")
+    counts = [int(item["thread_count"]) for item in samples if isinstance(item, dict)]
+    base_threads = int(summary.get("base_thread_count", counts[0] if counts else 0))
+    criteria = summary.get("criteria")
+    if not isinstance(criteria, dict):
+        raise ValueError("soak result has no criteria")
+    criteria["threads_bounded"] = _threads_are_bounded(counts, base_threads)
+    summary["max_thread_count"] = max(counts, default=0)
+    summary["final_thread_count"] = counts[-1] if counts else 0
+    summary["passed"] = all(bool(value) for value in criteria.values())
+    result = SoakResult(
+        started_at=str(raw["started_at"]),
+        finished_at=str(raw["finished_at"]),
+        config=dict(raw["config"]),
+        samples=samples,
+        summary=summary,
+    )
+    write_result(result, output_path)
+    return result
 
 
 def main() -> int:

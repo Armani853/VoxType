@@ -41,7 +41,7 @@ class ASRProfileConfig:
 DEFAULT_PROFILES: dict[ASRProfile, ASRProfileConfig] = {
     ASRProfile.FAST: ASRProfileConfig(
         profile=ASRProfile.FAST,
-        model_name="medium",
+        model_name="small",
         compute_type="int8",
         beam_size=1,
         best_of=1,

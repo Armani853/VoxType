@@ -1,0 +1,28 @@
+{
+  "audio": "C:\\C_C++_C#\\Vacancies\\Voice-recognizer\\benchmark-results\\speech\\ru.wav",
+  "language": "ru",
+  "profile": "balanced",
+  "model": "C:\\Users\\E8F7~1\\AppData\\Local\\VoxType\\VoxType\\models\\large-v3-turbo",
+  "reference_raw": "Сегодня я проверяю локальную голосовую диктовку. Это длинная тестовая фраза для измерения скорости распознавания на компьютере.",
+  "hypothesis_raw": "Сегодня я проверяю локальную голосовую диктовку Это длинная тестовая фраза для измерения скорости распознавания на компьютере",
+  "raw": {
+    "substitutions": 2,
+    "deletions": 0,
+    "insertions": 0,
+    "reference_words": 16,
+    "wer": 0.125
+  },
+  "normalized": {
+    "substitutions": 0,
+    "deletions": 0,
+    "insertions": 0,
+    "reference_words": 16,
+    "wer": 0.0
+  },
+  "audio_duration_s": 11.087573696145125,
+  "processing_s": 20.029316399999516,
+  "rtf": 1.806465232962845,
+  "rss_start_bytes": 57126912,
+  "rss_peak_bytes": 1948450816,
+  "rss_delta_bytes": 1891323904
+}

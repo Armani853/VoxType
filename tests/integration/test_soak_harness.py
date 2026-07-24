@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from tools.run_soak_test import SoakConfig, run_soak, write_result
+from tools.run_soak_test import SoakConfig, _threads_are_bounded, run_soak, write_result
 
 
 @pytest.mark.integration
@@ -42,3 +42,8 @@ def test_soak_defaults_are_the_required_sixty_minutes_and_ten_seconds() -> None:
 
     assert config.duration_seconds == 3600
     assert config.sample_interval_seconds == 10
+
+
+def test_thread_bound_allows_transient_native_pool_but_rejects_retained_leak() -> None:
+    assert _threads_are_bounded([15, 18, 15, 12], 15)
+    assert not _threads_are_bounded([15, 18, 18, 18], 15)

@@ -4,8 +4,9 @@ import json
 import time
 from pathlib import Path
 
-from voxtype.core.models import Language, ModelProfile
+from voxtype.core.models import InjectionMode, Language, ModelProfile
 from voxtype.monitoring.metrics import PerformanceMonitor
+from voxtype.runtime import effective_cpu_threads
 from voxtype.sessions.journal import SessionJournal
 from voxtype.sessions.recovery import mark_recovered, recoverable_sessions
 from voxtype.sessions.repository import SessionRepository
@@ -26,6 +27,25 @@ def test_settings_round_trip_and_atomic_temp_cleanup(tmp_path: Path) -> None:
     assert loaded.general.theme == "dark"
     assert loaded.dictation.language is Language.EN
     assert list(tmp_path.glob("*.tmp")) == []
+
+
+def test_power_modes_change_effective_cpu_budget(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setattr("voxtype.runtime.os.cpu_count", lambda: 12)
+    settings = AppSettings()
+    settings.model.cpu_threads = 8
+    settings.model.power_mode = "energy"
+    assert effective_cpu_threads(settings) == 4
+    settings.model.power_mode = "balanced"
+    assert effective_cpu_threads(settings) == 8
+    settings.model.power_mode = "maximum"
+    assert effective_cpu_threads(settings) == 12
+
+
+def test_default_injection_uses_clipboard_with_unicode_fallback() -> None:
+    settings = AppSettings()
+    assert settings.dictation.injection_mode is InjectionMode.AUTO
+    assert settings.dictation.model_profile is ModelProfile.FAST
+    assert settings.model.installed_model == "small"
 
 
 def test_corrupt_settings_are_backed_up(tmp_path: Path) -> None:
@@ -77,6 +97,31 @@ def test_retention_removes_completed_old_data(tmp_path: Path) -> None:
         assert (sessions, directories) == (1, 1)
 
 
+def test_retention_removes_only_orphaned_old_spool(tmp_path: Path) -> None:
+    with SessionRepository(tmp_path / "sessions.sqlite3") as repository:
+        session_id = repository.create(Language.RU, "small", ModelProfile.FAST, "test")
+        spool_root = tmp_path / "spool"
+        owned = spool_root / session_id
+        orphan = spool_root / "orphan"
+        owned.mkdir(parents=True)
+        orphan.mkdir()
+        old = time.time() - 10 * 86_400
+        import os
+
+        os.utime(owned, (old, old))
+        os.utime(orphan, (old, old))
+        _sessions, directories = cleanup_retention(
+            repository,
+            tmp_path / "audio",
+            retention_days=1,
+            now=time.time(),
+            spool_root=spool_root,
+        )
+        assert directories == 1
+        assert owned.exists()
+        assert not orphan.exists()
+
+
 def test_performance_metrics_are_bounded_and_compute_rtf() -> None:
     monitor = PerformanceMonitor(max_samples=2, max_chunks=2)
     monitor.record_capture(
@@ -92,3 +137,21 @@ def test_performance_metrics_are_bounded_and_compute_rtf() -> None:
     assert snapshot["audio"]["captured_frames"] == 480
     assert snapshot["audio"]["queue_high_watermark"] == 3
     assert snapshot["rtf_average"] == 0.5
+
+
+def test_performance_metrics_can_sync_authoritative_capture_counters() -> None:
+    monitor = PerformanceMonitor()
+    monitor.sync_audio(
+        captured_frames=16_000,
+        dropped_frames=0,
+        queued_audio_seconds=1.25,
+        processed_audio_seconds=0.75,
+        queue_high_watermark=12,
+        callback_overflows=0,
+        current_input_rms=0.2,
+        clipping_percentage=0.5,
+    )
+    audio = monitor.snapshot()["audio"]
+    assert audio["captured_frames"] == 16_000
+    assert audio["processed_audio_seconds"] == 0.75
+    assert audio["queue_high_watermark"] == 12

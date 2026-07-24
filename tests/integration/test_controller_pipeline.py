@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+from pytest import MonkeyPatch
 
 from voxtype.asr.base import (
     TranscriptionRequest,
@@ -28,6 +29,19 @@ class AlwaysSpeech:
     def speech_probability(self, samples: object, sample_rate: int) -> float:
         del samples, sample_rate
         return 1.0
+
+    def reset(self) -> None:
+        return None
+
+
+class CountingSilence:
+    def __init__(self) -> None:
+        self.samples_seen = 0
+
+    def speech_probability(self, samples: object, sample_rate: int) -> float:
+        del sample_rate
+        self.samples_seen += int(np.asarray(samples).size)
+        return 0.0
 
     def reset(self) -> None:
         return None
@@ -76,6 +90,45 @@ class DeterministicBackend:
         self.loaded = False
 
 
+class FailingBackend(DeterministicBackend):
+    def transcribe(self, request: TranscriptionRequest) -> TranscriptionResult:
+        del request
+        raise RuntimeError("fixture inference failed")
+
+
+class HangingBackend(DeterministicBackend):
+    def transcribe(self, request: TranscriptionRequest) -> TranscriptionResult:
+        time.sleep(0.5)
+        return super().transcribe(request)
+
+
+class LanguageBackend(DeterministicBackend):
+    def transcribe(self, request: TranscriptionRequest) -> TranscriptionResult:
+        self.languages.append(request.language)
+        text = "русский" if request.language == "ru" else "english"
+        word = WordTimestamp(
+            text, request.start_offset_seconds, request.start_offset_seconds + 0.3, 0.99
+        )
+        segment = TranscriptionSegment(
+            text,
+            request.start_offset_seconds,
+            request.start_offset_seconds + 0.3,
+            (word,),
+            average_log_probability=-0.01,
+            no_speech_probability=0.01,
+            compression_ratio=1.0,
+        )
+        return TranscriptionResult(
+            text,
+            request.language,
+            (segment,),
+            request.duration_seconds,
+            0.01,
+            self.model_id,
+            "fixture",
+        )
+
+
 class FixtureCapture:
     def __init__(self, output_queue: LosslessAudioQueue) -> None:
         self.output_queue = output_queue
@@ -94,6 +147,29 @@ class FixtureCapture:
 
     def stats(self) -> AudioQueueStats:
         return self.output_queue.snapshot()
+
+    def feed(self, sequence: int) -> None:
+        samples = np.full(16_000, 0.2, dtype=np.float32)
+        self.output_queue.put(AudioChunk(sequence, samples, 16_000, time.time()))
+        self.output_queue.record_capture(samples.size)
+
+
+class LongSilenceCapture(FixtureCapture):
+    chunk_count = 25
+    chunk_samples = 800
+
+    def start(self) -> None:
+        self.running = True
+        samples = np.zeros(self.chunk_samples, dtype=np.float32)
+        for sequence in range(self.chunk_count):
+            self.output_queue.put(AudioChunk(sequence, samples, 16_000, time.time()))
+            self.output_queue.record_capture(samples.size)
+
+
+class NonStoppingCapture(FixtureCapture):
+    def stop(self, *, drain_timeout: float = 5.0) -> bool:
+        del drain_timeout
+        return False
 
 
 class FixtureTargetManager:
@@ -164,5 +240,171 @@ def test_controller_journals_before_ordered_injection_and_drains(tmp_path: Path)
     assert injection.fragments == ["Привет мир"]
     assert backend.languages == ["ru"]
     assert not any((tmp_path / "spool").rglob("*.vtxpcm"))
+    controller.shutdown()
+    session_repository.close()
+
+
+def test_controller_never_finalizes_completed_when_audio_dispatcher_does_not_stop(
+    tmp_path: Path,
+) -> None:
+    settings_repository = SettingsRepository(tmp_path / "settings.json")
+    session_repository = SessionRepository(tmp_path / "sessions.sqlite3")
+    controller = ApplicationController(
+        settings_repository=settings_repository,
+        session_repository=session_repository,
+        backend=DeterministicBackend(),
+        capture_factory=lambda queue: NonStoppingCapture(queue),  # type: ignore[arg-type,return-value]
+        segmenter_factory=lambda: StreamingSegmenter(AlwaysSpeech()),
+        target_manager=FixtureTargetManager(),  # type: ignore[arg-type]
+        injection_service=FixtureInjection(),  # type: ignore[arg-type]
+        spool_root=tmp_path / "spool",
+    )
+    controller.initialize()
+    assert controller.start_dictation()
+    wait_for_state(controller, AppState.LISTENING)
+    assert controller.stop_dictation()
+    wait_for_state(controller, AppState.ERROR_RECOVERABLE)
+    records = session_repository.recent()
+    assert records[0].status == "recovery_required"
+    session_repository.close()
+
+
+def test_inference_watchdog_converts_hang_to_fatal_recoverable_session(tmp_path: Path) -> None:
+    settings_repository = SettingsRepository(tmp_path / "settings.json")
+    session_repository = SessionRepository(tmp_path / "sessions.sqlite3")
+    controller = ApplicationController(
+        settings_repository=settings_repository,
+        session_repository=session_repository,
+        backend=HangingBackend(),
+        capture_factory=lambda queue: FixtureCapture(queue),  # type: ignore[arg-type,return-value]
+        segmenter_factory=lambda: StreamingSegmenter(AlwaysSpeech()),
+        target_manager=FixtureTargetManager(),  # type: ignore[arg-type]
+        injection_service=FixtureInjection(),  # type: ignore[arg-type]
+        spool_root=tmp_path / "spool",
+        inference_timeout_s=0.05,
+    )
+    controller.initialize()
+    assert controller.start_dictation()
+    wait_for_state(controller, AppState.LISTENING)
+    assert controller.stop_dictation()
+    wait_for_state(controller, AppState.ERROR_FATAL)
+    assert session_repository.recent()[0].status == "recovery_required"
+    session_repository.close()
+
+
+def test_long_silence_does_not_exhaust_durable_inflight_leases(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    settings_repository = SettingsRepository(tmp_path / "settings.json")
+    session_repository = SessionRepository(tmp_path / "sessions.sqlite3")
+    detector = CountingSilence()
+
+    def small_inflight_queue(**kwargs: object) -> LosslessAudioQueue:
+        # Larger than the segmenter's 612 ms pre-roll window, but much smaller
+        # than the silent source, so a failure to acknowledge old silence stalls.
+        kwargs["max_inflight"] = 16
+        return LosslessAudioQueue(**kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr("voxtype.core.controller.LosslessAudioQueue", small_inflight_queue)
+    controller = ApplicationController(
+        settings_repository=settings_repository,
+        session_repository=session_repository,
+        backend=DeterministicBackend(),
+        capture_factory=lambda queue: LongSilenceCapture(queue),  # type: ignore[arg-type,return-value]
+        segmenter_factory=lambda: StreamingSegmenter(detector),
+        target_manager=FixtureTargetManager(),  # type: ignore[arg-type]
+        injection_service=FixtureInjection(),  # type: ignore[arg-type]
+        spool_root=tmp_path / "spool",
+    )
+    controller.initialize()
+    assert controller.start_dictation()
+    wait_for_state(controller, AppState.LISTENING, timeout_s=15.0)
+    assert controller.stop_dictation()
+    wait_for_state(controller, AppState.IDLE, timeout_s=15.0)
+
+    expected_samples = LongSilenceCapture.chunk_count * LongSilenceCapture.chunk_samples
+    assert detector.samples_seen == expected_samples
+    assert session_repository.recent()[0].dropped_frames == 0
+    assert not any((tmp_path / "spool").rglob("*.vtxpcm"))
+    controller.shutdown()
+    session_repository.close()
+
+
+def test_runtime_error_preserves_pcm_then_recovers_tail_before_retry(tmp_path: Path) -> None:
+    settings_repository = SettingsRepository(tmp_path / "settings.json")
+    session_repository = SessionRepository(tmp_path / "sessions.sqlite3")
+    controller = ApplicationController(
+        settings_repository=settings_repository,
+        session_repository=session_repository,
+        backend=FailingBackend(),
+        capture_factory=lambda queue: FixtureCapture(queue),  # type: ignore[arg-type,return-value]
+        segmenter_factory=lambda: StreamingSegmenter(AlwaysSpeech()),
+        target_manager=FixtureTargetManager(),  # type: ignore[arg-type]
+        injection_service=FixtureInjection(),  # type: ignore[arg-type]
+        spool_root=tmp_path / "spool",
+    )
+    controller.initialize()
+    assert controller.start_dictation()
+    wait_for_state(controller, AppState.LISTENING)
+    assert controller.stop_dictation()
+    wait_for_state(controller, AppState.ERROR_RECOVERABLE)
+
+    records = session_repository.recent()
+    assert len(records) == 1
+    assert records[0].finished_at is None
+    assert records[0].status == "recovery_required"
+    assert any((tmp_path / "spool" / records[0].session_id).glob("*.vtxpcm"))
+    assert controller.configure_backend(
+        DeterministicBackend(), controller.settings.dictation.model_profile
+    )
+    recovered = controller.recover_session(records[0].session_id)
+    assert recovered == "Привет мир"
+    restored = session_repository.get(records[0].session_id)
+    assert restored is not None
+    assert restored.finished_at is not None
+    assert restored.status == "recovered"
+    assert not (tmp_path / "spool" / records[0].session_id).exists()
+    assert controller.start_dictation()
+    controller.shutdown()
+    session_repository.close()
+
+
+def test_language_switch_preserves_segment_sequence_and_commits_both_languages(
+    tmp_path: Path,
+) -> None:
+    settings_repository = SettingsRepository(tmp_path / "settings.json")
+    session_repository = SessionRepository(tmp_path / "sessions.sqlite3")
+    backend = LanguageBackend()
+    captures: list[FixtureCapture] = []
+
+    def capture_factory(queue: LosslessAudioQueue) -> FixtureCapture:
+        capture = FixtureCapture(queue)
+        captures.append(capture)
+        return capture
+
+    controller = ApplicationController(
+        settings_repository=settings_repository,
+        session_repository=session_repository,
+        backend=backend,
+        capture_factory=capture_factory,  # type: ignore[arg-type]
+        segmenter_factory=lambda: StreamingSegmenter(AlwaysSpeech()),
+        target_manager=FixtureTargetManager(),  # type: ignore[arg-type]
+        injection_service=FixtureInjection(),  # type: ignore[arg-type]
+        spool_root=tmp_path / "spool",
+    )
+    controller.initialize()
+    assert controller.start_dictation()
+    wait_for_state(controller, AppState.LISTENING)
+    time.sleep(0.05)
+    controller.switch_language()
+    captures[0].feed(1)
+    time.sleep(0.05)
+    assert controller.stop_dictation()
+    wait_for_state(controller, AppState.IDLE)
+
+    record = session_repository.recent()[0]
+    assert "Русский" in record.committed_text
+    assert "english" in record.committed_text.casefold()
+    assert backend.languages == ["ru", "en"]
     controller.shutdown()
     session_repository.close()

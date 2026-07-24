@@ -27,6 +27,7 @@ if PYSIDE6_AVAILABLE:
         QListWidget,
         QListWidgetItem,
         QMessageBox,
+        QPlainTextEdit,
         QProgressBar,
         QPushButton,
         QScrollArea,
@@ -61,7 +62,7 @@ if PYSIDE6_AVAILABLE:
             self.setMinimumSize(760, 540)
             self._loading = False
             self._dirty = False
-            self._non_safe_injection_mode = "clipboard_paste"
+            self._non_safe_injection_mode = "auto"
             self._build_ui()
             self._connect_actions()
             self._connect_dirty_tracking()
@@ -178,6 +179,11 @@ if PYSIDE6_AVAILABLE:
                 page,
             )
             self.voice_commands_check = QCheckBox("Распознавать голосовые команды", page)
+            self.vocabulary_edit = QPlainTextEdit(page)
+            self.vocabulary_edit.setPlaceholderText(
+                "По одному имени, термину или сокращению на строку (до 200)"
+            )
+            self.vocabulary_edit.setMaximumHeight(110)
             self.auto_insert_check = QCheckBox("Автоматически вставлять подтверждённый текст", page)
             self.safe_clipboard_check = QCheckBox("Безопасный режим буфера обмена", page)
             self.target_policy_combo = self._combo(
@@ -193,6 +199,7 @@ if PYSIDE6_AVAILABLE:
             form.addRow("Язык по умолчанию", self.default_language_combo)
             form.addRow("Профиль модели", self.profile_combo)
             form.addRow(self.voice_commands_check)
+            form.addRow("Пользовательский словарь", self.vocabulary_edit)
             form.addRow(self.auto_insert_check)
             form.addRow(self.safe_clipboard_check)
             form.addRow("Целевое окно", self.target_policy_combo)
@@ -263,11 +270,16 @@ if PYSIDE6_AVAILABLE:
             self.cpu_threads_spin = QSpinBox(page)
             self.cpu_threads_spin.setRange(1, 128)
             self.cpu_threads_spin.setValue(4)
+            self.power_mode_combo = QComboBox(page)
+            self.power_mode_combo.addItem("Экономия энергии", "energy")
+            self.power_mode_combo.addItem("Баланс", "balanced")
+            self.power_mode_combo.addItem("Максимальная производительность", "maximum")
             self.gpu_experimental_check = QCheckBox("Экспериментальный GPU backend", page)
             form.addRow("Активная модель", self.model_combo)
             form.addRow("Управление", model_actions)
             form.addRow("Загрузка", self.model_progress)
             form.addRow("Потоки CPU", self.cpu_threads_spin)
+            form.addRow("Режим питания", self.power_mode_combo)
             form.addRow(self.gpu_experimental_check)
 
         def _build_privacy_page(self) -> None:
@@ -301,6 +313,10 @@ if PYSIDE6_AVAILABLE:
             self.pause_hotkey_edit = QKeySequenceEdit(page)
             self.language_hotkey_edit = QKeySequenceEdit(page)
             self.push_to_talk_hotkey_edit = QKeySequenceEdit(page)
+            self.push_to_talk_hotkey_edit.setEnabled(False)
+            self.push_to_talk_hotkey_edit.setToolTip(
+                "Отключено: RegisterHotKey не сообщает надёжное отпускание клавиши"
+            )
             form.addRow("Начать / остановить", self.toggle_hotkey_edit)
             form.addRow("Пауза / продолжить", self.pause_hotkey_edit)
             form.addRow("Переключить RU / EN", self.language_hotkey_edit)
@@ -384,6 +400,7 @@ if PYSIDE6_AVAILABLE:
                 self.audio_device_combo,
                 self.preprocessing_combo,
                 self.model_combo,
+                self.power_mode_combo,
             )
             for combo in combos:
                 combo.currentIndexChanged.connect(self._mark_dirty)
@@ -401,6 +418,7 @@ if PYSIDE6_AVAILABLE:
                 self.push_to_talk_hotkey_edit,
             ):
                 key_edit.keySequenceChanged.connect(self._mark_dirty)
+            self.vocabulary_edit.textChanged.connect(self._mark_dirty)
 
         def _mark_dirty(self, *_args: object) -> None:
             if not self._loading:
@@ -434,6 +452,11 @@ if PYSIDE6_AVAILABLE:
                     "language": self.default_language_combo.currentData(),
                     "model_profile": self.profile_combo.currentData(),
                     "voice_commands": self.voice_commands_check.isChecked(),
+                    "custom_vocabulary": [
+                        line.strip()
+                        for line in self.vocabulary_edit.toPlainText().splitlines()
+                        if line.strip()
+                    ][:200],
                     "auto_insert": self.auto_insert_check.isChecked(),
                     "injection_mode": (
                         "safe_clipboard"
@@ -455,6 +478,7 @@ if PYSIDE6_AVAILABLE:
                 "model": {
                     "installed_model": self.model_combo.currentData(),
                     "cpu_threads": self.cpu_threads_spin.value(),
+                    "power_mode": self.power_mode_combo.currentData(),
                     "experimental_gpu": self.gpu_experimental_check.isChecked(),
                 },
                 "privacy": {
@@ -506,6 +530,9 @@ if PYSIDE6_AVAILABLE:
                 self.voice_commands_check.setChecked(
                     bool(_setting(dictation, "voice_commands", default=False))
                 )
+                vocabulary = _setting(dictation, "custom_vocabulary", default=[])
+                entries = vocabulary if isinstance(vocabulary, list) else []
+                self.vocabulary_edit.setPlainText("\n".join(str(item) for item in entries[:200]))
                 self.auto_insert_check.setChecked(
                     bool(_setting(dictation, "auto_insert", default=True))
                 )
@@ -556,6 +583,10 @@ if PYSIDE6_AVAILABLE:
                     _setting(model, "installed_model", "name", default=""),
                 )
                 self.cpu_threads_spin.setValue(int(str(_setting(model, "cpu_threads", default=4))))
+                _select_data(
+                    self.power_mode_combo,
+                    _setting(model, "power_mode", default="balanced"),
+                )
                 self.gpu_experimental_check.setChecked(
                     bool(_setting(model, "experimental_gpu", default=False))
                 )

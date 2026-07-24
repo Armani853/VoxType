@@ -293,6 +293,7 @@ class LosslessAudioQueue:
         spool: DiskSpool,
         spill_threshold: float = 0.75,
         max_inflight: int | None = None,
+        durable: bool = False,
     ) -> None:
         if max_ram_chunks <= 0:
             raise ValueError("max_ram_chunks must be positive")
@@ -302,6 +303,7 @@ class LosslessAudioQueue:
         self.spool = spool
         self._spill_at = max(1, min(max_ram_chunks, int(max_ram_chunks * spill_threshold + 0.999)))
         self._max_inflight = max_inflight or max_ram_chunks
+        self._durable = durable
         self._ram: deque[AudioChunk] = deque()
         self._inflight: dict[int, AudioQueueLease] = {}
         self._next_token = 1
@@ -329,7 +331,7 @@ class LosslessAudioQueue:
                 raise AudioQueueClosed("audio queue is closed")
             if chunk.sequence <= self._last_sequence:
                 raise ValueError("audio chunk sequences must be strictly increasing")
-            should_spill = (
+            should_spill = self._durable or (
                 self._spilling or self.spool.count > 0 or len(self._ram) >= self._spill_at
             )
             if should_spill:

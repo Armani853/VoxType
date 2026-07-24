@@ -25,6 +25,33 @@ def normalize_token(text: str) -> str:
     return match.group(0) if match else ""
 
 
+def deduplicate_text_boundary(previous: str, continuation: str, max_words: int = 20) -> str:
+    """Remove a repeated textual suffix/prefix after crash recovery.
+
+    Recovery intentionally replays the durable segmenter tail. Its timestamps
+    predate the new process, so text-boundary matching is the only stable way
+    to discard the already committed overlap.
+    """
+
+    if max_words < 1:
+        raise ValueError("max_words must be positive")
+    previous_matches = list(_TOKEN_PATTERN.finditer(previous))
+    continuation_matches = list(_TOKEN_PATTERN.finditer(continuation))
+    limit = min(max_words, len(previous_matches), len(continuation_matches))
+    previous_tokens = [normalize_token(item.group(0)) for item in previous_matches]
+    continuation_tokens = [normalize_token(item.group(0)) for item in continuation_matches]
+    overlap = 0
+    for size in range(limit, 0, -1):
+        if previous_tokens[-size:] == continuation_tokens[:size]:
+            overlap = size
+            break
+    if overlap == 0:
+        return continuation.strip()
+    if overlap >= len(continuation_matches):
+        return ""
+    return continuation[continuation_matches[overlap].start() :].lstrip(" ,.;:!?—–-\t\r\n")
+
+
 @dataclass(frozen=True, slots=True)
 class MergeOutcome:
     insertion_text: str
@@ -62,17 +89,34 @@ class TranscriptMerger:
             self._last_sequence = -1
             self._last_chunk_end_s = 0.0
 
-    def merge(self, fragment: TranscriptFragment) -> MergeOutcome:
+    def merge(
+        self,
+        fragment: TranscriptFragment,
+        *,
+        add_space: bool = True,
+        capitalize: bool = True,
+    ) -> MergeOutcome:
         with self._lock:
             if fragment.sequence <= self._last_sequence:
                 return MergeOutcome("", self._text, 0, True)
             absolute = self._absolute_words(fragment)
-            overlap_count = self._find_overlap(absolute, fragment.chunk_start_s)
+            overlap_count = (
+                self._find_overlap(absolute, fragment.chunk_start_s)
+                if absolute
+                else self._find_text_overlap(fragment.text, fragment.chunk_start_s)
+            )
+            # A previous backend result may have text but no word stamps.  In
+            # that mixed case the timestamp matcher has no history to compare,
+            # so fall back to the time-gated text boundary matcher.
+            if absolute and overlap_count == 0 and not self._words:
+                overlap_count = self._find_text_overlap(fragment.text, fragment.chunk_start_s)
             remaining = absolute[overlap_count:]
             raw_insertion = self._text_after_prefix(fragment.text, overlap_count)
             if remaining and (not raw_insertion or overlap_count >= len(absolute)):
                 raw_insertion = join_word_texts([word.text for word in remaining])
-            insertion = format_fragment_boundary(self._text, raw_insertion)
+            insertion = format_fragment_boundary(
+                self._text, raw_insertion, add_space=add_space, capitalize=capitalize
+            )
             if insertion:
                 self._text += insertion
             self._words.extend(remaining)
@@ -120,11 +164,35 @@ class TranscriptMerger:
             new_start = new_words[0].start_s
             new_end = new_words[size - 1].end_s
             timestamps_valid = previous_end > previous_start and new_end > new_start
-            temporally_overlapping = not timestamps_valid or (
-                new_start <= previous_end + self.timestamp_tolerance_s
-                and new_end >= previous_start - self.timestamp_tolerance_s
+            temporally_aligned = not timestamps_valid or (
+                abs(new_start - previous_start) <= self.timestamp_tolerance_s
+                and abs(new_end - previous_end) <= self.timestamp_tolerance_s
             )
-            if temporally_overlapping:
+            if temporally_aligned:
+                return size
+        return 0
+
+    def _find_text_overlap(self, text: str, chunk_start_s: float) -> int:
+        """Fallback for backends that return missing or unusable word times.
+
+        Text-only de-duplication is deliberately allowed only when the audio
+        chunks overlap.  A later identical sentence is therefore preserved as
+        an intentional repetition.
+        """
+
+        if not self._text or chunk_start_s >= self._last_chunk_end_s - 0.02:
+            return 0
+        previous = [
+            normalize_token(match.group(0)) for match in _TOKEN_PATTERN.finditer(self._text)
+        ]
+        incoming = [normalize_token(match.group(0)) for match in _TOKEN_PATTERN.finditer(text)]
+        limit = min(self.max_overlap_words, len(previous), len(incoming))
+        for size in range(limit, 0, -1):
+            left = previous[-size:]
+            right = incoming[:size]
+            if left == right or (
+                size >= 4 and SequenceMatcher(a=left, b=right, autojunk=False).ratio() >= 0.75
+            ):
                 return size
         return 0
 

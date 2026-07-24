@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from math import gcd
 from typing import cast
 
 import numpy as np
@@ -14,32 +13,16 @@ from .models import FloatAudio, mono_float32
 def resample_audio(
     samples: npt.ArrayLike, source_rate: int, target_rate: int = 16_000
 ) -> FloatAudio:
-    """Resample a complete buffer with a polyphase filter when SciPy is present.
-
-    The lightweight interpolation fallback keeps the runtime importable in a
-    minimal installation.  Live capture uses ``StreamingResampler`` below so
-    boundaries remain continuous across callbacks.
-    """
+    """Resample a complete buffer through the same bounded streaming implementation."""
 
     _validate_rates(source_rate, target_rate)
     audio = mono_float32(samples)
     if source_rate == target_rate or audio.size == 0:
         return audio.copy()
-    if audio.size == 1:
-        output_size = max(1, int(np.ceil(target_rate / source_rate)))
-        return np.full(output_size, audio[0], dtype=np.float32)
-    divisor = gcd(source_rate, target_rate)
-    up, down = target_rate // divisor, source_rate // divisor
-    try:
-        from scipy.signal import resample_poly
-    except ImportError:
-        output_size = max(1, int(np.ceil(audio.size * target_rate / source_rate)))
-        positions = np.arange(output_size, dtype=np.float64) * source_rate / target_rate
-        result = np.interp(
-            positions, np.arange(audio.size, dtype=np.float64), audio, right=float(audio[-1])
-        )
-    else:
-        result = resample_poly(audio, up, down, window=("kaiser", 8.0), padtype="line")
+    resampler = StreamingResampler(source_rate, target_rate)
+    head = resampler.process(audio)
+    tail = resampler.flush()
+    result = np.concatenate((head, tail)) if tail.size else head
     return np.ascontiguousarray(np.clip(result, -1.0, 1.0), dtype=np.float32)
 
 

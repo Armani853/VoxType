@@ -256,6 +256,14 @@ def test_safe_copy_strategy_copies_without_synthetic_input() -> None:
     assert sender.clipboard.get_text() == "manual"
 
 
+def test_paste_delay_can_be_updated_after_settings_apply() -> None:
+    service, _, _ = build_service(Resolver(decision(TargetStatus.READY)))
+    service.paste_delay = 0.35
+    assert service.paste_delay == 0.35
+    with pytest.raises(ValueError):
+        service.paste_delay = -0.1
+
+
 def test_pending_queue_spills_transparently_and_preserves_unicode_newlines() -> None:
     queue = PendingTextQueue(memory_limit_bytes=1)
     queue.append("первая\nстрока")
