@@ -169,19 +169,38 @@ class ASRBackend(Protocol):
 
 
 def bounded_prompt(
-    confirmed_context: str, vocabulary: tuple[str, ...] = (), *, max_characters: int = 600
+    confirmed_context: str,
+    vocabulary: tuple[str, ...] = (),
+    *,
+    max_characters: int = 600,
+    max_context_words: int = 30,
 ) -> str:
     """Build a small soft hint without feeding an entire transcript back in."""
 
-    if max_characters <= 0:
+    if max_characters <= 0 or max_context_words < 0:
         return ""
     cleaned_terms = [" ".join(term.split()) for term in vocabulary if term.strip()]
     vocabulary_hint = ", ".join(dict.fromkeys(cleaned_terms))
-    context = " ".join(confirmed_context.split())
-    if len(context) > max_characters // 2:
-        context = context[-max_characters // 2 :]
-        first_space = context.find(" ")
-        if first_space >= 0:
-            context = context[first_space + 1 :]
-    parts = [part for part in (context, vocabulary_hint) if part]
-    return ". ".join(parts)[:max_characters]
+    if len(vocabulary_hint) > max_characters // 2:
+        vocabulary_hint = _fit_words(vocabulary_hint, max_characters // 2, keep_tail=False)
+    context_words = confirmed_context.split()
+    context = " ".join(context_words[-max_context_words:]) if max_context_words else ""
+    separator_size = 2 if context and vocabulary_hint else 0
+    context = _fit_words(
+        context,
+        max(0, max_characters - len(vocabulary_hint) - separator_size),
+        keep_tail=True,
+    )
+    return ". ".join(part for part in (context, vocabulary_hint) if part).rstrip(" ,.")
+
+
+def _fit_words(text: str, limit: int, *, keep_tail: bool) -> str:
+    """Fit complete whitespace-delimited tokens into a character budget."""
+
+    words = text.split()
+    while words and len(" ".join(words)) > limit:
+        if keep_tail:
+            words.pop(0)
+        else:
+            words.pop()
+    return " ".join(words).rstrip(" ,.")

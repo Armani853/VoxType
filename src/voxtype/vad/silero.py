@@ -44,6 +44,8 @@ class SileroVAD:
         self._load_attempted = model is not None or onnx_session is not None
         self._load_error: BaseException | None = None
         self._state: npt.NDArray[np.float32] = np.zeros((2, 1, 128), dtype=np.float32)
+        self._context: npt.NDArray[np.float32] = np.empty((1, 0), dtype=np.float32)
+        self._last_sample_rate = 0
         self._lock = RLock()
 
     @property
@@ -141,12 +143,21 @@ class SileroVAD:
         original_audio: np.ndarray[Any, np.dtype[np.float32]],
     ) -> float:
         try:
+            context_size = 64 if sample_rate == 16_000 else 32
+            if self._last_sample_rate and self._last_sample_rate != sample_rate:
+                self._state.fill(0.0)
+                self._context = np.empty((1, 0), dtype=np.float32)
+            if self._context.shape != (1, context_size):
+                self._context = np.zeros((1, context_size), dtype=np.float32)
+            model_audio = np.concatenate(
+                (self._context, inference_audio.reshape(1, -1)), axis=1
+            ).astype(np.float32, copy=False)
             names = {item.name for item in session.get_inputs()}
             feeds: dict[str, np.ndarray[Any, Any]] = {}
             for name in names:
                 normalized = name.casefold()
                 if normalized in {"input", "audio", "x"}:
-                    feeds[name] = inference_audio.reshape(1, -1).astype(np.float32, copy=False)
+                    feeds[name] = model_audio
                 elif normalized in {"state", "state_1"}:
                     feeds[name] = self._state
                 elif normalized in {"sr", "sample_rate"}:
@@ -162,12 +173,16 @@ class SileroVAD:
                 if next_state.shape != self._state.shape:
                     raise ValueError("Silero ONNX returned an invalid recurrent state")
                 self._state = next_state.copy()
+            self._context = model_audio[:, -context_size:].copy()
+            self._last_sample_rate = sample_rate
         except (RuntimeError, TypeError, ValueError, IndexError) as exc:
             if self.strict:
                 raise VADUnavailable("Silero ONNX inference failed") from exc
             self._load_error = exc
             self._onnx_session = None
             self._state.fill(0.0)
+            self._context = np.empty((1, 0), dtype=np.float32)
+            self._last_sample_rate = 0
             return self.fallback.speech_probability(original_audio, sample_rate)
         return min(1.0, max(0.0, probability))
 
@@ -177,4 +192,6 @@ class SileroVAD:
             if model is not None and hasattr(model, "reset_states"):
                 model.reset_states()
             self._state.fill(0.0)
+            self._context = np.empty((1, 0), dtype=np.float32)
+            self._last_sample_rate = 0
         self.fallback.reset()

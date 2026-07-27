@@ -17,13 +17,11 @@ runtime реально сообщил CPU compute types `int8`, `int8_float32`, 
 <https://opennmt.net/CTranslate2/quantization.html>,
 <https://opennmt.net/CTranslate2/performance.html>.
 
-Названия по умолчанию: FAST=`small`, кандидат BALANCED=`turbo`,
-MAXIMUM_ACCURACY=`large-v3`. Если `turbo` не выдерживает RTF с запасом,
-автовыбор обязан оставить более быструю реально измеренную модель.
-
-На Ryzen 5 5500U измерено: `small` RTF 0,398 RU / 0,510 EN, а
-`large-v3-turbo` 1,806 RU / 2,455 EN. Поэтому first-run default изменён на
-FAST=`small`; BALANCED доступен вручную после предупреждения/benchmark.
+Финальные профили после private screening: FAST=`small`, BALANCED=`small` с
+единственным выборочным retry на `large-v3-turbo`, MAXIMUM_ACCURACY=
+`large-v3-turbo`. В прямом multilingual screening turbo дал лучший pseudo-WER,
+но полный production-путь turbo не выдержал realtime. Поэтому ежедневный режим
+не запускает тяжёлую модель на каждом сегменте.
 
 ## D-003 — Silero VAD через ONNX и energy fallback
 

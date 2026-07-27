@@ -60,6 +60,7 @@ class ApplicationController:
         settings_repository: SettingsRepository,
         session_repository: SessionRepository,
         backend: ASRBackend,
+        retry_backend: ASRBackend | None = None,
         capture_factory: CaptureFactory,
         segmenter_factory: SegmenterFactory,
         target_manager: TargetWindowManager,
@@ -75,6 +76,7 @@ class ApplicationController:
         self.settings_repository = settings_repository
         self.session_repository = session_repository
         self.backend = backend
+        self.retry_backend = retry_backend
         self.capture_factory = capture_factory
         self.segmenter_factory = segmenter_factory
         self.target_manager = target_manager
@@ -115,6 +117,9 @@ class ApplicationController:
         self._error_message = ""
         self._last_stats: AudioQueueStats | None = None
         self._processing_seconds = 0.0
+        self._prompt_language: Language | None = None
+        self._last_prompt_segment_end_s: float | None = None
+        self._last_prompt_result_uncertain = False
         self._audio_archive: wave.Wave_write | None = None
         self._shutdown_requested = threading.Event()
 
@@ -230,6 +235,9 @@ class ApplicationController:
             self._status_message = "Подготовка модели"
             self._user_paused = False
             self._processing_seconds = 0.0
+            self._prompt_language = None
+            self._last_prompt_segment_end_s = None
+            self._last_prompt_result_uncertain = False
             self.merger.reset()
             if self.state is AppState.ERROR_RECOVERABLE:
                 self.state_machine.transition(AppState.IDLE, "retry requested")
@@ -438,7 +446,10 @@ class ApplicationController:
             sample_rate=segment.sample_rate,
             language=language.value,
             start_offset_seconds=segment.start_seconds,
-            initial_prompt=bounded_prompt(committed, self.vocabulary.entries),
+            initial_prompt=bounded_prompt(
+                self._safe_prompt_context(segment, language, committed),
+                self.vocabulary.entries,
+            ),
             beam_size=1 if backlog >= 10.0 else None,
             condition_on_previous_text=False,
             metadata={"segment_sequence": str(segment.sequence)},
@@ -447,6 +458,8 @@ class ApplicationController:
             self._provisional = "Распознаю…"
         guarded = self._transcribe_guarded_with_timeout(request, committed)
         result = guarded.result
+        with self._lock:
+            self._last_prompt_result_uncertain = result.possible_inaccuracy
         self.logger.info(
             "chunk_inference session_id=%s sequence=%d model=%s backend=%s audio_s=%.3f "
             "inference_s=%.3f rtf=%.3f queue_s=%.3f",
@@ -509,6 +522,13 @@ class ApplicationController:
             result.audio_duration_seconds,
             result.processing_seconds,
             end_to_end_latency,
+            model_id=result.model_id,
+            retried=guarded.retried,
+            cascade_retry=(
+                guarded.retry_model_id is not None
+                and guarded.retry_model_id != self.backend.model_id
+            ),
+            uncertain=result.possible_inaccuracy,
         )
         with self._lock:
             self._processing_seconds += result.processing_seconds
@@ -580,6 +600,32 @@ class ApplicationController:
             "segment committed",
         )
 
+    def _safe_prompt_context(
+        self,
+        segment: AudioSegment,
+        language: Language,
+        committed_text: str,
+        *,
+        reset_after_s: float = 8.0,
+    ) -> str:
+        """Return confirmed context only across a short same-language continuation."""
+
+        with self._lock:
+            previous_language = self._prompt_language
+            previous_end = self._last_prompt_segment_end_s
+            previous_uncertain = self._last_prompt_result_uncertain
+            self._prompt_language = language
+            self._last_prompt_segment_end_s = segment.end_seconds
+        if previous_uncertain:
+            return ""
+        if previous_language is not None and previous_language is not language:
+            return ""
+        if previous_end is not None and segment.start_seconds - previous_end > reset_after_s:
+            return ""
+        if committed_text.rstrip().endswith((".", "!", "?", "…")):
+            return ""
+        return committed_text
+
     def switch_language(self) -> Language:
         switch_time = time.time()
         with self._lock:
@@ -606,7 +652,10 @@ class ApplicationController:
         def worker() -> None:
             try:
                 outcome: GuardedTranscription | BaseException = self.guard.transcribe_guarded(
-                    self.backend, request, committed_text=committed_text
+                    self.backend,
+                    request,
+                    committed_text=committed_text,
+                    retry_backend=self.retry_backend,
                 )
             except BaseException as exc:  # propagate native/backend failures to pipeline owner
                 outcome = exc
@@ -624,7 +673,12 @@ class ApplicationController:
             raise outcome
         return outcome
 
-    def configure_backend(self, backend: ASRBackend, profile: ModelProfile) -> bool:
+    def configure_backend(
+        self,
+        backend: ASRBackend,
+        profile: ModelProfile,
+        retry_backend: ASRBackend | None = None,
+    ) -> bool:
         """Switch an installed model only while no session owns the current one."""
         with self._lock:
             if self._session_id is not None or self.state not in {
@@ -633,7 +687,9 @@ class ApplicationController:
             }:
                 return False
             previous = self.backend
+            previous_retry = self.retry_backend
             self.backend = backend
+            self.retry_backend = retry_backend
             self.settings.dictation.model_profile = profile
             self.settings.model.installed_model = backend.model_id
             self.settings_repository.save(self.settings)
@@ -641,6 +697,12 @@ class ApplicationController:
             self._error_message = ""
         if previous is not backend:
             previous.unload()
+        if (
+            previous_retry is not None
+            and previous_retry is not backend
+            and previous_retry is not retry_backend
+        ):
+            previous_retry.unload()
         if self.state is AppState.ERROR_RECOVERABLE:
             self.state_machine.transition(AppState.IDLE, "installed model selected")
         return True
@@ -735,7 +797,12 @@ class ApplicationController:
             condition_on_previous_text=False,
             metadata={"segment_sequence": str(segment.sequence), "recovery": "true"},
         )
-        guarded = self.guard.transcribe_guarded(self.backend, request, committed_text=prompt)
+        guarded = self.guard.transcribe_guarded(
+            self.backend,
+            request,
+            committed_text=prompt,
+            retry_backend=self.retry_backend,
+        )
         result = guarded.result
         text = VoiceCommandProcessor(self.settings.dictation.voice_commands).process(
             result.text, language

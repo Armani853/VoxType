@@ -30,9 +30,9 @@ class SegmentationSettings:
     end_silence_ms: int = 650
     pre_roll_ms: int = 400
     post_roll_ms: int = 300
-    preferred_segment_seconds: float = 12.0
-    maximum_segment_seconds: float = 18.0
-    overlap_seconds: float = 1.2
+    preferred_segment_seconds: float = 15.0
+    maximum_segment_seconds: float = 25.0
+    overlap_seconds: float = 0.8
     forced_pause_ms: int = 180
 
     def __post_init__(self) -> None:

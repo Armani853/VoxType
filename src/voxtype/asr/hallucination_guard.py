@@ -56,6 +56,7 @@ class GuardedTranscription:
     assessment: GuardAssessment
     first_assessment: GuardAssessment
     retried: bool
+    retry_model_id: str | None = None
 
 
 class HallucinationGuard:
@@ -204,16 +205,22 @@ class HallucinationGuard:
         request: TranscriptionRequest,
         *,
         committed_text: str = "",
+        retry_backend: ASRBackend | None = None,
     ) -> GuardedTranscription:
-        """Retry a suspicious chunk exactly once with conservative settings."""
+        """Retry a suspicious chunk exactly once, optionally on a larger model."""
 
         first = backend.transcribe(request)
         first_assessment = self.assess(request, first, committed_text=committed_text)
         if not first_assessment.suspicious:
             return GuardedTranscription(first, first_assessment, first_assessment, False)
+        retry_engine = retry_backend or backend
         try:
             retry_request = request.conservative_retry()
-            retry = backend.transcribe(retry_request)
+            if retry_backend is not None:
+                # The larger model is already the conservative choice; forcing
+                # a wide beam on CPU makes a rare cascade retry unbounded.
+                retry_request = replace(retry_request, beam_size=1)
+            retry = retry_engine.transcribe(retry_request)
             retry_assessment = self.assess(retry_request, retry, committed_text=committed_text)
         except Exception:
             failed_issues = tuple(
@@ -227,7 +234,13 @@ class HallucinationGuard:
             marked = first.marked_uncertain(
                 tuple(issue.value for issue in failed_issues), retry_count=1
             )
-            return GuardedTranscription(marked, assessment, first_assessment, True)
+            return GuardedTranscription(
+                marked,
+                assessment,
+                first_assessment,
+                True,
+                retry_engine.model_id,
+            )
 
         if retry_assessment.score < first_assessment.score:
             chosen, assessment = retry, retry_assessment
@@ -241,12 +254,22 @@ class HallucinationGuard:
                 if retry_probability > first_probability
                 else (first, first_assessment)
             )
-        chosen = replace(chosen, retry_count=1)
+        chosen = replace(
+            chosen,
+            processing_seconds=first.processing_seconds + retry.processing_seconds,
+            retry_count=1,
+        )
         if assessment.suspicious:
             chosen = chosen.marked_uncertain(
                 tuple(issue.value for issue in assessment.issues), retry_count=1
             )
-        return GuardedTranscription(chosen, assessment, first_assessment, True)
+        return GuardedTranscription(
+            chosen,
+            assessment,
+            first_assessment,
+            True,
+            retry_engine.model_id,
+        )
 
 
 def _normalize(text: str) -> str:

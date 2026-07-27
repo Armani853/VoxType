@@ -70,7 +70,7 @@ def domain_profile(profile: ASRProfile | str) -> ModelProfile:
 def configured_profile(settings: AppSettings) -> ASRProfileConfig:
     profile = get_profile(asr_profile(settings.dictation.model_profile))
     threads = effective_cpu_threads(settings)
-    return replace(profile, model_name=settings.model.installed_model, cpu_threads=threads)
+    return replace(profile, cpu_threads=threads)
 
 
 def effective_cpu_threads(settings: AppSettings) -> int:
@@ -176,9 +176,28 @@ class RuntimeBundle:
         path = self.model_manager.path_for(config.model_name)
         return FasterWhisperBackend(path, config)
 
+    def retry_backend_for(self, profile: ASRProfile | str) -> FasterWhisperBackend | None:
+        selected = asr_profile(domain_profile(profile))
+        if selected is not ASRProfile.BALANCED or not self.model_manager.is_installed(
+            "large-v3-turbo"
+        ):
+            return None
+        retry_config = replace(
+            get_profile(ASRProfile.MAXIMUM_ACCURACY),
+            cpu_threads=effective_cpu_threads(self.settings),
+        )
+        return FasterWhisperBackend(
+            self.model_manager.path_for(retry_config.model_name),
+            retry_config,
+        )
+
     def close(self) -> bool:
         if not self.controller.shutdown():
             return False
+        self.controller.backend.unload()
+        retry_backend = self.controller.retry_backend
+        if retry_backend is not None and retry_backend is not self.controller.backend:
+            retry_backend.unload()
         self.session_repository.close()
         return True
 
@@ -211,7 +230,20 @@ def build_runtime(*, verbose: bool = False) -> RuntimeBundle:
     device = select_input_device(devices, settings.audio.device_id)
 
     profile = configured_profile(settings)
+    if settings.model.installed_model != profile.model_name:
+        settings.model.installed_model = profile.model_name
+        settings_repository.save(settings)
     backend = FasterWhisperBackend(model_manager.path_for(profile.model_name), profile)
+    retry_backend: FasterWhisperBackend | None = None
+    if profile.profile is ASRProfile.BALANCED and model_manager.is_installed("large-v3-turbo"):
+        retry_profile = replace(
+            get_profile(ASRProfile.MAXIMUM_ACCURACY),
+            cpu_threads=effective_cpu_threads(settings),
+        )
+        retry_backend = FasterWhisperBackend(
+            model_manager.path_for(retry_profile.model_name),
+            retry_profile,
+        )
     target_manager = TargetWindowManager(policy=TargetPolicy(settings.dictation.target_mode.value))
     injection = TextInjectionService(
         target_manager,
@@ -252,6 +284,7 @@ def build_runtime(*, verbose: bool = False) -> RuntimeBundle:
         settings_repository=settings_repository,
         session_repository=session_repository,
         backend=backend,
+        retry_backend=retry_backend,
         capture_factory=capture_factory,
         segmenter_factory=segmenter_factory,
         target_manager=target_manager,

@@ -8,13 +8,13 @@
 [Setup]
 AppId={{5A4A7C70-50ED-4F41-90A6-48C69682B1A7}
 AppName=VoxType
-AppVersion=0.1.0
+AppVersion=0.2.0
 AppPublisher=VoxType
 DefaultDirName={localappdata}\Programs\VoxType
 DefaultGroupName=VoxType
 DisableProgramGroupPage=yes
 OutputDir={#InstallerOutput}
-OutputBaseFilename=VoxType-0.1.0-win64-setup
+OutputBaseFilename=VoxType-0.2.0-win64-setup
 Compression=lzma2
 SolidCompression=yes
 PrivilegesRequired=lowest

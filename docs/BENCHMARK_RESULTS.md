@@ -29,12 +29,12 @@
 
 ```text
 scripts/lint.ps1
-ruff format --check: 110 files formatted
+ruff format --check: 116 files formatted
 ruff check: All checks passed
-mypy: Success, 83 source files
+mypy: Success, 87 source files
 
 scripts/test.ps1
-162 passed, 5 opt-in acceptance tests deselected
+176 passed, 5 opt-in acceptance tests deselected
 
 $env:VOXTYPE_RUN_WINDOWS_SMOKE=1
 pytest tests/windows/test_windows_native_smoke.py -v
@@ -54,36 +54,46 @@ python tools/run_app_injection_matrix.py
 намеренно направлены в отсутствующий каталог: standalone не зависит от
 установленного Python.
 
-## Реальный ASR benchmark
+## ASR benchmark
 
-Одинаковые собственные RU/EN WAV проверены `tools/evaluate_wer.py`, CPU INT8:
+Русская эталонная расшифровка получена из другого Whisper-сервиса и не была
+полностью вычитана человеком. Поэтому результаты ниже — только **pseudo-WER**,
+а не объективный WER или подтверждённая точность.
 
-| Модель | Язык | Аудио | Время | RTF | Raw/normalized WER | Peak RSS |
-|---|---:|---:|---:|---:|---:|---:|
-| small | RU | 11,088 с | 4,418 с | 0,398 | 0% / 0% | 693,7 МБ |
-| small | EN | 7,883 с | 4,017 с | 0,510 | 0% / 0% | 661,4 МБ |
-| large-v3-turbo | RU | 11,088 с | 20,029 с | 1,806 | 12,5% / 0% | 1 948,5 МБ |
-| large-v3-turbo | EN | 7,883 с | 19,355 с | 2,455 | 0% / 0% | 1 886,1 МБ |
+| Проверка | Режим | pseudo-WER | CER | Wall RTF | Peak RSS |
+|---|---|---:|---:|---:|---:|
+| RU tuning, 8 файлов | Balanced | 29,469% | 22,492% | 0,636 | 2 240,6 МБ |
+| RU held-out, 4 файла | Balanced | 25,552% | 17,432% | 0,557 | 2 210,0 МБ |
+| RU все 12 файлов | Balanced | **28,402%** | 21,142% | 0,616 | 2 240,6 МБ |
+| EN synthetic SAPI | Balanced | 1,852% | 2,120% | 1,196 | 649,3 МБ |
+| RU файл 006 | Maximum Accuracy | 10,448% | 4,047% | 1,752 | 1 826,7 МБ |
 
-На этом компьютере автоматически выбран FAST=`small`: он остаётся ниже целевого
-RTF 0,7 на обоих файлах. `large-v3-turbo` оставлен ручным вариантом, потому что
-его измеренный RTF > 1 гарантирует рост backlog. Набор короткий и не доказывает
-превосходство над Windows Dictation; такого заявления нет.
+Balanced работает быстрее реального времени на русском наборе. Maximum Accuracy
+на проверенном русском файле дал около 10,45% pseudo-WER, но wall RTF около
+1,752 означает накопление очереди при непрерывной речи на этом CPU. Английский
+набор синтетический и короткий, поэтому его результат нельзя переносить на
+произвольный живой микрофон.
+
+Подтверждённые 90–95% качества русского распознавания не достигнуты; VoxType не
+заявляет такую точность. Зафиксированная конфигурация использует raw audio,
+чанки 15/25 секунд с overlap 0,8 секунды, явный RU/EN и не более 30 завершённых
+слов контекста. Vulkan backend отклонён: на текущем AMD-драйвере он вернул
+повреждённый многоязычный результат. Аудио не отправляется в облачный STT.
 
 ## 60-минутный soak
 
 Команда: `tools/run_soak_test.py --duration 3600 --sample-interval 10`.
-Полный JSON: `soak-results/acceptance-final/soak-result.json`.
+Полный JSON: `build/private-eval/final-soak/report.json` (не входит в release).
 
-- wall clock: 3 600,937 с; samples: 361;
+- wall clock: 3 600,906 с; samples: 361;
 - captured/processed: 3 600 / 3 600 чанков, 57 600 000 frames;
 - dropped frames: 0; FIFO: pass; duplicates: 0; retries: 37;
-- forced segments: 149; queue high watermark: 94;
+- cascade retries: 8; forced segments: 75; queue high watermark: 110;
 - backlog полностью опустошён; spool после завершения: 0 файлов;
-- RSS min/max: 42 614 784 / 49 127 424 bytes; линейного роста нет;
+- RSS min/max: 40 714 240 / 51 949 568 bytes; линейного роста нет;
 - threads base/max/final: 15 / 18 / 12; retained leak отсутствует;
-- synthetic RTF average/max: 0,360 / 1,502;
-- synthetic latency average/max: 5,461 / 27,015 с;
+- synthetic RTF average/max: 0,364 / 1,501;
+- synthetic latency average/p50/p95/max: 5,481 / 1,078 / 37,5 / 37,5 с;
 - все 11 критериев: PASS.
 
 Кратковременный пик RTF/latency создан намеренным backlog-сценарием; звук при нём
@@ -91,18 +101,24 @@ RTF 0,7 на обоих файлах. `large-v3-turbo` оставлен ручн
 
 ## Release
 
-- `release/VoxType-0.1.0-win64-portable.zip`, SHA-256
-  `7e487640c79116daec9ca0719f8e1f30b30a3708495039948bff6ff041feba82`,
-  122 844 714 bytes.
-- `release/VoxType-0.1.0-win64-setup.exe`, SHA-256
-  `5aac7055247b625ff5a6cca2e81fe0acb47b66e83d253deccdd6fbc9c859a3d7`,
-  80 537 264 bytes.
+- `release/VoxType-0.2.0-win64-portable.zip`, SHA-256
+  `dbede927e10e5637c024e3a5f3bd18fa7e166fd767d047738acf71ff22d734d4`,
+  122 855 161 bytes.
+- `release/VoxType-0.2.0-win64-setup.exe`, SHA-256
+  `7c3a2172917a426f0e20e2d420d6be2c9e8c7ab078a278a396149561fa51271b`,
+  80 544 819 bytes.
+- Установлен `%LOCALAPPDATA%\Programs\VoxType\VoxType.exe`, версия
+  `0.2.0.0`; installed self-test, inference smoke и Qt UI smoke: exit code 0.
+- Короткая desktop-приёмка установленной версии реально зарегистрировала
+  `Ctrl+Alt+Space`, открыла микрофон в RU/Balance, обработала хвост до `idle`,
+  переключила язык `Ctrl+Alt+L` на EN и штатно закрыла worker/audio runtime.
 - Подпись отсутствует: сертификат code signing не предоставлен.
 
 ## Непроверенное
 
-Не выполнялся запуск на физически другом чистом ПК. Также не выполнялась именно
-живая многoабзацная диктовка голосом пользователя через микрофон в этой сессии:
-реальные ASR WAV, microphone-capable pipeline, tail flush и настоящая вставка в
-Windows-приложения проверены отдельно. Матрица Word/Chrome/VS Code/Telegram
-пройдена реально; Telegram использовал только поле поиска и не отправлял сообщений.
+Не выполнялся запуск на физически другом чистом ПК. Также не выполнялась
+контролируемая 1–2-минутная RU и 30–60-секундная EN диктовка голосом пользователя:
+в автоматизированной сессии нет источника живой речи. Реальный microphone start,
+language switch и tail flush проверены, но их нельзя выдавать за проверку качества
+текста. Матрица Word/Chrome/VS Code/Telegram пройдена 4/4 ранее; Telegram
+использовал только поле поиска и не отправлял сообщений.

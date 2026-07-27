@@ -154,8 +154,8 @@
 - [x] Есть тихий/шумный профиль и регулируемый порог.
 - [x] Minimum speech, end silence и защита от короткой паузы.
 - [x] Frame 32 мс, threshold 0.45, minimum speech 180 мс, end silence 650 мс.
-- [x] Preferred chunk 12 с, maximum 18 с.
-- [x] Overlap 1.2 с.
+- [x] Preferred chunk 15 с, maximum 25 с.
+- [x] Overlap 0.8 с.
 - [x] Forced cut предпочитает ближайшую короткую паузу.
 - [x] При отсутствии паузы выполняется безопасный cut с overlap.
 - [x] Whisper никогда не получает часовой массив.
@@ -165,15 +165,15 @@
 
 - [x] Основной backend — faster-whisper через общий `ASRBackend`.
 - [x] FAST=`small/int8`.
-- [x] BALANCED=`large-v3-turbo/int8`.
-- [x] MAXIMUM_ACCURACY=`large-v3/int8_float32`.
+- [x] BALANCED=`small/int8` с выборочным retry на `large-v3-turbo/int8`.
+- [x] MAXIMUM_ACCURACY=`large-v3-turbo/int8`.
 - [x] Язык задаётся явно и word timestamps включены.
 - [x] RTF измеряется локальным benchmark.
 - [x] Цель RTF ≤ 0.7 применяется при выборе профиля.
 - [x] На этом CPU автоматически выбран FAST, поскольку turbo имеет RTF > 1.
 - [x] Ручной выбор тяжёлой модели предупреждает о backlog.
-- [x] Опциональный Vulkan backend не включён: Vulkan не подтверждён, CPU быстрее
-  real time, а ТЗ прямо запрещает задерживать стабильный выпуск.
+- [x] Опциональный Vulkan backend не включён: официальный build подтвердил
+  ускорение, но дал повреждённый multilingual-текст на AMD-драйвере.
 - [x] `ModelManager` показывает progress и позволяет повторить после ошибки.
 - [x] Загрузка идёт во staging/temporary и публикуется атомарно.
 - [x] Проверяются структура, revision, размер/SHA-256, когда они доступны.

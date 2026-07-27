@@ -4,9 +4,11 @@ import json
 import time
 from pathlib import Path
 
-from voxtype.core.models import InjectionMode, Language, ModelProfile
+from voxtype.asr.model_manager import DEFAULT_MODEL_SPECS
+from voxtype.asr.profiles import ASRProfile, get_profile
+from voxtype.core.models import InjectionMode, Language, ModelProfile, PreprocessingProfile
 from voxtype.monitoring.metrics import PerformanceMonitor
-from voxtype.runtime import effective_cpu_threads
+from voxtype.runtime import configured_profile, effective_cpu_threads
 from voxtype.sessions.journal import SessionJournal
 from voxtype.sessions.recovery import mark_recovered, recoverable_sessions
 from voxtype.sessions.repository import SessionRepository
@@ -46,6 +48,19 @@ def test_default_injection_uses_clipboard_with_unicode_fallback() -> None:
     assert settings.dictation.injection_mode is InjectionMode.AUTO
     assert settings.dictation.model_profile is ModelProfile.FAST
     assert settings.model.installed_model == "small"
+    assert settings.audio.preprocessing_profile is PreprocessingProfile.RAW
+    assert not settings.audio.normalization
+
+
+def test_measured_profiles_choose_small_balanced_and_turbo_maximum() -> None:
+    settings = AppSettings()
+    settings.dictation.model_profile = ModelProfile.BALANCED
+    settings.model.installed_model = "stale-large-v3"
+
+    assert configured_profile(settings).model_name == "small"
+    assert get_profile(ASRProfile.MAXIMUM_ACCURACY).model_name == "large-v3-turbo"
+    assert DEFAULT_MODEL_SPECS[ASRProfile.BALANCED].model_id == "small"
+    assert DEFAULT_MODEL_SPECS[ASRProfile.MAXIMUM_ACCURACY].model_id == "large-v3-turbo"
 
 
 def test_corrupt_settings_are_backed_up(tmp_path: Path) -> None:
@@ -131,12 +146,28 @@ def test_performance_metrics_are_bounded_and_compute_rtf() -> None:
         queue_size=3,
         queued_seconds=0.09,
     )
-    monitor.record_processed(2.0, 1.0, 1.2)
+    monitor.record_processed(
+        2.0,
+        1.0,
+        1.2,
+        model_id="large-v3-turbo",
+        retried=True,
+        cascade_retry=True,
+        uncertain=True,
+    )
+    monitor.record_processed(4.0, 1.0, 0.8, model_id="small")
     monitor.sample_resources(queue_size=2, spool_bytes=0)
     snapshot = monitor.snapshot()
     assert snapshot["audio"]["captured_frames"] == 480
     assert snapshot["audio"]["queue_high_watermark"] == 3
-    assert snapshot["rtf_average"] == 0.5
+    assert snapshot["current_rtf"] == 0.25
+    assert snapshot["rtf_average"] == 0.375
+    assert snapshot["latency_p50_s"] == 1.0
+    assert snapshot["latency_p95_s"] == 1.18
+    assert snapshot["current_model"] == "small"
+    assert snapshot["retry_chunks"] == 1
+    assert snapshot["cascade_retry_percentage"] == 50.0
+    assert snapshot["uncertain_chunks"] == 1
 
 
 def test_performance_metrics_can_sync_authoritative_capture_counters() -> None:

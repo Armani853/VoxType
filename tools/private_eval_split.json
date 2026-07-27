@@ -1,0 +1,27 @@
+{
+  "protocol_version": 1,
+  "reference_kind": "unreviewed_external_asr",
+  "metric_name": "pseudo-WER",
+  "tuning": [
+    "001",
+    "004",
+    "005",
+    "006",
+    "008",
+    "010",
+    "011",
+    "012"
+  ],
+  "held_out": [
+    "002",
+    "003",
+    "007",
+    "009"
+  ],
+  "screening": {
+    "good": "001",
+    "medium": "004",
+    "worst": "005",
+    "held_out_observation_only": "009"
+  }
+}

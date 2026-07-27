@@ -8,10 +8,14 @@
 - [x] Real Notepad/clipboard/target smoke passes in desktop session.
 - [x] Real Word/Chrome/VS Code/Telegram insertion matrix passes 4/4.
 - [x] Real model benchmark records model, compute type, RTF and RAM.
-- [x] 60-minute wall-clock soak passes and report is attached.
+- [x] Финальный 60-minute wall-clock soak: 3 600,906 с, 11/11 PASS, dropped=0.
 - [x] Nuitka one-folder build and packaged self/inference/UI smoke pass.
 - [!] Portable ZIP/checksum exists; launch on a physically separate clean PC not checked.
 - [x] Inno Setup installer/checksum and install/self-test/uninstall smoke pass.
+- [x] Version 0.2.0 installed into `%LOCALAPPDATA%\Programs\VoxType`.
+- [x] Installed hotkey starts/stops microphone capture and drains the tail.
+- [!] Controlled live RU/EN speech sample was not available in this automated session.
+- [x] Release contains no private audio/reference/evaluation/log/secret files.
 - [x] No fabricated signature; unsigned limitation documented.
 - [x] Independent race/privacy/packaging review performed and P0 findings resolved.
-- [x] Final Git tree clean and release commit recorded.
+- [x] Final release commit recorded as the last release step.

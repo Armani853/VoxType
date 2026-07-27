@@ -16,10 +16,11 @@ from voxtype.asr.base import (
 from voxtype.audio.models import AudioChunk, AudioQueueStats
 from voxtype.audio.spool import LosslessAudioQueue
 from voxtype.core.controller import ApplicationController
+from voxtype.core.models import Language
 from voxtype.core.state_machine import AppState
 from voxtype.sessions.repository import SessionRepository
 from voxtype.settings.repository import SettingsRepository
-from voxtype.vad.segmenter import StreamingSegmenter
+from voxtype.vad.segmenter import AudioSegment, SegmentReason, StreamingSegmenter
 from voxtype.windows.foreground import IntegrityLevel, WindowMetadata
 from voxtype.windows.injection import InjectionStatus
 from voxtype.windows.target_window import TargetDecision, TargetStatus
@@ -53,12 +54,14 @@ class DeterministicBackend:
     def __init__(self) -> None:
         self.loaded = False
         self.languages: list[str] = []
+        self.prompts: list[str] = []
 
     def load(self) -> None:
         self.loaded = True
 
     def transcribe(self, request: TranscriptionRequest) -> TranscriptionResult:
         self.languages.append(request.language)
+        self.prompts.append(request.initial_prompt)
         words = (
             WordTimestamp(
                 "привет", request.start_offset_seconds, request.start_offset_seconds + 0.3, 0.99
@@ -105,6 +108,7 @@ class HangingBackend(DeterministicBackend):
 class LanguageBackend(DeterministicBackend):
     def transcribe(self, request: TranscriptionRequest) -> TranscriptionResult:
         self.languages.append(request.language)
+        self.prompts.append(request.initial_prompt)
         text = "русский" if request.language == "ru" else "english"
         word = WordTimestamp(
             text, request.start_offset_seconds, request.start_offset_seconds + 0.3, 0.99
@@ -208,6 +212,44 @@ def wait_for_state(
     while controller.state is not expected and time.monotonic() < deadline:
         time.sleep(0.01)
     assert controller.state is expected
+
+
+def test_prompt_context_resets_for_sentence_pause_uncertainty_and_language(
+    tmp_path: Path,
+) -> None:
+    controller = ApplicationController(
+        settings_repository=SettingsRepository(tmp_path / "settings.json"),
+        session_repository=SessionRepository(tmp_path / "sessions.sqlite3"),
+        backend=DeterministicBackend(),
+        capture_factory=lambda queue: FixtureCapture(queue),  # type: ignore[arg-type,return-value]
+        segmenter_factory=lambda: StreamingSegmenter(AlwaysSpeech()),
+        target_manager=FixtureTargetManager(),  # type: ignore[arg-type]
+        injection_service=FixtureInjection(),  # type: ignore[arg-type]
+        spool_root=tmp_path / "spool",
+    )
+
+    def segment(sequence: int, start_s: float, end_s: float) -> AudioSegment:
+        start = round(start_s * 16_000)
+        end = round(end_s * 16_000)
+        return AudioSegment(
+            sequence,
+            np.zeros(end - start, dtype=np.float32),
+            16_000,
+            start,
+            end,
+            SegmentReason.FLUSH,
+            0.0,
+            end_s - start_s,
+        )
+
+    assert controller._safe_prompt_context(segment(0, 0.0, 1.0), Language.RU, "не закончено")
+    assert controller._safe_prompt_context(segment(1, 1.1, 2.0), Language.RU, "Закончено.") == ""
+    controller._last_prompt_result_uncertain = True
+    assert controller._safe_prompt_context(segment(2, 2.1, 3.0), Language.RU, "сомнительно") == ""
+    controller._last_prompt_result_uncertain = False
+    assert controller._safe_prompt_context(segment(3, 3.1, 4.0), Language.EN, "English") == ""
+    assert controller._safe_prompt_context(segment(4, 13.0, 14.0), Language.EN, "long gap") == ""
+    controller.session_repository.close()
 
 
 def test_controller_journals_before_ordered_injection_and_drains(tmp_path: Path) -> None:
@@ -406,5 +448,6 @@ def test_language_switch_preserves_segment_sequence_and_commits_both_languages(
     assert "Русский" in record.committed_text
     assert "english" in record.committed_text.casefold()
     assert backend.languages == ["ru", "en"]
+    assert backend.prompts == ["", ""]
     controller.shutdown()
     session_repository.close()

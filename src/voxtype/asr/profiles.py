@@ -48,17 +48,17 @@ DEFAULT_PROFILES: dict[ASRProfile, ASRProfileConfig] = {
     ),
     ASRProfile.BALANCED: ASRProfileConfig(
         profile=ASRProfile.BALANCED,
-        model_name="large-v3-turbo",
+        model_name="small",
         compute_type="int8",
-        beam_size=5,
-        best_of=5,
+        beam_size=1,
+        best_of=1,
     ),
     ASRProfile.MAXIMUM_ACCURACY: ASRProfileConfig(
         profile=ASRProfile.MAXIMUM_ACCURACY,
-        model_name="large-v3",
-        compute_type="int8_float32",
-        beam_size=8,
-        best_of=5,
+        model_name="large-v3-turbo",
+        compute_type="int8",
+        beam_size=1,
+        best_of=1,
     ),
 }
 

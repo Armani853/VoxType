@@ -34,8 +34,8 @@ class GeneralSettings:
 @dataclass(slots=True)
 class DictationSettings:
     language: Language = Language.RU
-    # FAST is the conservative first-run choice.  On the target Ryzen 5 5500U
-    # the measured large-v3-turbo RTF is >1, while small/int8 stays <0.7.
+    # FAST keeps first-run memory low. BALANCED can add a lazy turbo retry when
+    # that optional model is installed; MAXIMUM runs turbo on every segment.
     model_profile: ModelProfile = ModelProfile.FAST
     voice_commands: bool = False
     auto_insert: bool = True
@@ -51,9 +51,9 @@ class DictationSettings:
 class AudioSettings:
     device_id: int | None = None
     vad_sensitivity: float = 0.5
-    preprocessing_profile: PreprocessingProfile = PreprocessingProfile.NORMAL
+    preprocessing_profile: PreprocessingProfile = PreprocessingProfile.RAW
     noise_suppression: bool = False
-    normalization: bool = True
+    normalization: bool = False
 
 
 @dataclass(slots=True)

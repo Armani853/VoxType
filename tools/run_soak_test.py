@@ -54,6 +54,7 @@ class SoakConfig:
     normal_processing_factor: float = 0.10
     backlog_processing_factor: float = 1.50
     retry_every_chunks: int = 97
+    cascade_every_segments: int = 31
     drain_timeout_seconds: float = 120.0
     max_ram_growth_bytes: int = 128 * 1024 * 1024
 
@@ -76,6 +77,8 @@ class SoakConfig:
             raise ValueError("backlog_chunks must be below backlog_period_chunks")
         if self.normal_processing_factor < 0 or self.backlog_processing_factor < 0:
             raise ValueError("processing factors cannot be negative")
+        if self.retry_every_chunks < 0 or self.cascade_every_segments < 0:
+            raise ValueError("retry intervals cannot be negative")
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,10 +135,12 @@ class _JournalledInjector:
 class _DeterministicASR:
     """Backend-shaped local fixture that exercises guard/merger timing paths."""
 
-    model_id = "deterministic-soak-fixture"
-
-    def __init__(self, config: SoakConfig) -> None:
+    def __init__(self, config: SoakConfig, *, retry_model: bool = False) -> None:
         self.config = config
+        self.model_id = (
+            "deterministic-soak-retry-fixture" if retry_model else "deterministic-soak-fixture"
+        )
+        self.retry_model = retry_model
         self.segment_sequences: list[int] = []
         self.loaded = False
 
@@ -157,12 +162,19 @@ class _DeterministicASR:
         if factor:
             time.sleep(request.duration_seconds * factor)
         token = f"segment-{sequence}"
+        text = token
+        if (
+            not self.retry_model
+            and self.config.cascade_every_segments > 0
+            and sequence % self.config.cascade_every_segments == 0
+        ):
+            text = " ".join(["повтор"] * 9)
         self.segment_sequences.append(sequence)
         word = WordTimestamp(
-            token, request.start_offset_seconds, request.start_offset_seconds + 0.2, 0.99
+            text, request.start_offset_seconds, request.start_offset_seconds + 0.2, 0.99
         )
         segment = TranscriptionSegment(
-            token,
+            text,
             request.start_offset_seconds,
             request.start_offset_seconds + 0.2,
             (word,),
@@ -171,7 +183,7 @@ class _DeterministicASR:
             compression_ratio=1.0,
         )
         return TranscriptionResult(
-            token,
+            text,
             request.language,
             (segment,),
             request.duration_seconds,
@@ -245,6 +257,17 @@ def _threads_are_bounded(
     )
 
 
+def _percentile(values: list[float], fraction: float) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    position = (len(ordered) - 1) * fraction
+    lower = int(position)
+    upper = min(lower + 1, len(ordered) - 1)
+    weight = position - lower
+    return ordered[lower] * (1.0 - weight) + ordered[upper] * weight
+
+
 def run_soak(config: SoakConfig, work_directory: Path) -> SoakResult:
     """Execute one real wall-clock soak run and return its measured result."""
 
@@ -284,6 +307,7 @@ def run_soak(config: SoakConfig, work_directory: Path) -> SoakResult:
     latency_values: list[float] = []
     duplicate_count = 0
     retry_count = 0
+    cascade_retry_count = 0
     forced_segments = 0
     max_spool_bytes = 0
     preprocessor = AudioPreprocessor(config.sample_rate)
@@ -291,9 +315,10 @@ def run_soak(config: SoakConfig, work_directory: Path) -> SoakResult:
     merger = TranscriptMerger()
     guard = HallucinationGuard()
     backend = _DeterministicASR(config)
+    retry_backend = _DeterministicASR(config, retry_model=True)
 
     def consume() -> None:
-        nonlocal duplicate_count, forced_segments, retry_count
+        nonlocal cascade_retry_count, duplicate_count, forced_segments, retry_count
         pending: list[AudioQueueLease] = []
         pending_seconds = 0.0
 
@@ -320,7 +345,7 @@ def run_soak(config: SoakConfig, work_directory: Path) -> SoakResult:
                 pending_seconds -= oldest_seconds
 
         def transcribe(segment: AudioSegment) -> None:
-            nonlocal forced_segments
+            nonlocal cascade_retry_count, forced_segments
             if segment.forced:
                 forced_segments += 1
             request = TranscriptionRequest(
@@ -332,7 +357,13 @@ def run_soak(config: SoakConfig, work_directory: Path) -> SoakResult:
                 metadata={"segment_sequence": str(segment.sequence)},
             )
             guarded = guard.transcribe_guarded(
-                backend, request, committed_text=merger.committed_text
+                backend,
+                request,
+                committed_text=merger.committed_text,
+                retry_backend=retry_backend,
+            )
+            cascade_retry_count += int(
+                guarded.retried and guarded.retry_model_id == retry_backend.model_id
             )
             result = guarded.result
             fragment = TranscriptFragment(
@@ -493,12 +524,15 @@ def run_soak(config: SoakConfig, work_directory: Path) -> SoakResult:
         "spool_files_remaining": spool_files_remaining,
         "duplicate_count": duplicate_count,
         "retry_count": retry_count,
+        "cascade_retry_count": cascade_retry_count,
         "transcription_segments": len(injected_sequences),
         "forced_segments": forced_segments,
         "exception_types": exceptions,
         "rtf_average": statistics.fmean(rtf_values) if rtf_values else 0.0,
         "rtf_maximum": max(rtf_values, default=0.0),
         "latency_average_seconds": statistics.fmean(latency_values) if latency_values else 0.0,
+        "latency_p50_seconds": _percentile(latency_values, 0.50),
+        "latency_p95_seconds": _percentile(latency_values, 0.95),
         "latency_maximum_seconds": max(latency_values, default=0.0),
         "rss_min_bytes": min(sample.rss_bytes for sample in samples),
         "rss_max_bytes": max(sample.rss_bytes for sample in samples),

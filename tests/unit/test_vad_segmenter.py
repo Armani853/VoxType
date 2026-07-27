@@ -60,7 +60,12 @@ def test_short_pause_does_not_end_speech() -> None:
 
 
 def test_forced_segmentation_limits_unbroken_speech_and_carries_overlap() -> None:
-    segmenter = StreamingSegmenter(AmplitudeVAD(), sample_rate=1_000)
+    settings = SegmentationSettings(
+        preferred_segment_seconds=12.0,
+        maximum_segment_seconds=18.0,
+        overlap_seconds=1.2,
+    )
+    segmenter = StreamingSegmenter(AmplitudeVAD(), sample_rate=1_000, settings=settings)
     audio = np.r_[np.zeros(500), np.full(40_000, 0.5)].astype(np.float32)
     segments = _feed(segmenter, audio, 73)
     assert len(segments) >= 3
@@ -72,7 +77,12 @@ def test_forced_segmentation_limits_unbroken_speech_and_carries_overlap() -> Non
 
 
 def test_forced_segmentation_prefers_short_pause_after_target() -> None:
-    segmenter = StreamingSegmenter(AmplitudeVAD(), sample_rate=1_000)
+    settings = SegmentationSettings(
+        preferred_segment_seconds=12.0,
+        maximum_segment_seconds=18.0,
+        overlap_seconds=1.2,
+    )
+    segmenter = StreamingSegmenter(AmplitudeVAD(), sample_rate=1_000, settings=settings)
     audio = np.r_[
         np.zeros(400),
         np.full(12_200, 0.5),
@@ -85,6 +95,14 @@ def test_forced_segmentation_prefers_short_pause_after_target() -> None:
     assert segments[0].reason is SegmentReason.PREFERRED_PAUSE
     assert 12.0 <= segments[0].duration_seconds <= 13.0
     assert segments[1].leading_overlap_seconds == pytest.approx(1.2)
+
+
+def test_default_segmentation_uses_selected_accuracy_configuration() -> None:
+    settings = SegmentationSettings()
+
+    assert settings.preferred_segment_seconds == 15.0
+    assert settings.maximum_segment_seconds == 25.0
+    assert settings.overlap_seconds == 0.8
 
 
 def test_subminimum_burst_is_not_sent_to_asr() -> None:
@@ -124,7 +142,7 @@ def test_silero_is_lazy_and_falls_back_without_torch_or_model(tmp_path: Path) ->
         strict.speech_probability(np.ones(512, dtype=np.float32), 16_000)
 
 
-def test_silero_onnx_path_uses_512_samples_and_recurrent_state() -> None:
+def test_silero_onnx_path_uses_context_and_recurrent_state() -> None:
     class Input:
         def __init__(self, name: str) -> None:
             self.name = name
@@ -132,14 +150,14 @@ def test_silero_onnx_path_uses_512_samples_and_recurrent_state() -> None:
     class Session:
         def __init__(self) -> None:
             self.states: list[np.ndarray] = []
-            self.audio_shapes: list[tuple[int, ...]] = []
+            self.audio_inputs: list[np.ndarray] = []
 
         def get_inputs(self) -> list[Input]:
             return [Input("input"), Input("state"), Input("sr")]
 
         def run(self, outputs: object, feeds: dict[str, np.ndarray]) -> list[np.ndarray]:
             assert outputs is None
-            self.audio_shapes.append(feeds["input"].shape)
+            self.audio_inputs.append(feeds["input"].copy())
             self.states.append(feeds["state"].copy())
             assert int(feeds["sr"]) == 16_000
             return [np.array([[0.87]], dtype=np.float32), feeds["state"] + 1.0]
@@ -153,12 +171,15 @@ def test_silero_onnx_path_uses_512_samples_and_recurrent_state() -> None:
     assert detector.speech_probability(np.ones(700, dtype=np.float32), 16_000) == pytest.approx(
         0.87
     )
-    assert session.audio_shapes == [(1, 512), (1, 512)]
+    assert [item.shape for item in session.audio_inputs] == [(1, 576), (1, 576)]
+    assert np.all(session.audio_inputs[0][:, :64] == 0.0)
+    assert np.array_equal(session.audio_inputs[1][:, :64], session.audio_inputs[0][:, -64:])
     assert np.all(session.states[0] == 0.0)
     assert np.all(session.states[1] == 1.0)
     detector.reset()
     detector.speech_probability(np.ones(512, dtype=np.float32), 16_000)
     assert np.all(session.states[2] == 0.0)
+    assert np.all(session.audio_inputs[2][:, :64] == 0.0)
 
 
 def test_segmentation_settings_enforce_required_padding() -> None:

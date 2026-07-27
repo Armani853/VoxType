@@ -100,6 +100,9 @@ def test_request_requires_explicit_language_and_bounds_context() -> None:
     )
     assert len(prompt) <= 180
     assert "VoxType" in prompt
+    numbered = " ".join(f"слово{index}" for index in range(50))
+    word_bounded = bounded_prompt(numbered, max_context_words=20)
+    assert word_bounded.split() == numbered.split()[-20:]
     retry = replace(
         _request(), initial_prompt="bad context", condition_on_previous_text=True
     ).conservative_retry()
@@ -200,6 +203,32 @@ def test_guard_retries_once_and_selects_more_plausible_result() -> None:
     assert guarded.result.text == clean.text
     assert guarded.result.retry_count == 1
     assert not guarded.result.possible_inaccuracy
+
+
+def test_guard_uses_one_alternate_model_retry_and_accounts_for_both_passes() -> None:
+    suspicious = replace(
+        _result("слово слово слово слово слово слово слово слово слово"),
+        processing_seconds=0.2,
+    )
+    clean = replace(
+        _result("это нормальный результат распознавания"),
+        processing_seconds=0.4,
+        model_id="larger",
+    )
+    primary = FakeBackend([suspicious], model_id="small")
+    alternate = FakeBackend([clean], model_id="larger")
+    guarded = HallucinationGuard().transcribe_guarded(
+        primary,
+        _request(),
+        retry_backend=alternate,
+    )
+    assert len(primary.calls) == 1
+    assert len(alternate.calls) == 1
+    assert alternate.calls[0].beam_size == 1
+    assert guarded.retry_model_id == "larger"
+    assert guarded.result.model_id == "larger"
+    assert guarded.result.processing_seconds == pytest.approx(0.6)
+    assert guarded.result.retry_count == 1
 
 
 def test_guard_keeps_suspicious_text_with_warning_if_retry_fails() -> None:

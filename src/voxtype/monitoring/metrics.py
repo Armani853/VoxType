@@ -40,6 +40,11 @@ class PerformanceMonitor:
         self._samples: deque[ResourceSample] = deque(maxlen=max_samples)
         self._rtfs: deque[float] = deque(maxlen=max_chunks)
         self._latencies: deque[float] = deque(maxlen=max_chunks)
+        self._processed_chunks = 0
+        self._retry_chunks = 0
+        self._cascade_retry_chunks = 0
+        self._uncertain_chunks = 0
+        self._current_model = ""
         self._lock = threading.RLock()
         self._process = psutil.Process()
         self._process.cpu_percent(None)
@@ -92,7 +97,15 @@ class PerformanceMonitor:
             self.audio.clipping_percentage = max(0.0, float(clipping_percentage))
 
     def record_processed(
-        self, audio_seconds: float, inference_seconds: float, latency_s: float
+        self,
+        audio_seconds: float,
+        inference_seconds: float,
+        latency_s: float,
+        *,
+        model_id: str = "",
+        retried: bool = False,
+        cascade_retry: bool = False,
+        uncertain: bool = False,
     ) -> None:
         with self._lock:
             # The durable queue publishes processed_audio_seconds through
@@ -101,6 +114,12 @@ class PerformanceMonitor:
             if audio_seconds > 0:
                 self._rtfs.append(inference_seconds / audio_seconds)
             self._latencies.append(max(0.0, latency_s))
+            self._processed_chunks += 1
+            self._retry_chunks += int(retried)
+            self._cascade_retry_chunks += int(cascade_retry)
+            self._uncertain_chunks += int(uncertain)
+            if model_id:
+                self._current_model = model_id
 
     def sample_resources(self, queue_size: int, spool_bytes: int) -> ResourceSample:
         sample = ResourceSample(
@@ -120,11 +139,38 @@ class PerformanceMonitor:
             rtfs = tuple(self._rtfs)
             latencies = tuple(self._latencies)
             samples = tuple(self._samples)
+            processed = self._processed_chunks
             return {
                 "audio": asdict(self.audio),
+                "current_rtf": rtfs[-1] if rtfs else 0.0,
                 "rtf_average": statistics.fmean(rtfs) if rtfs else 0.0,
                 "rtf_max": max(rtfs, default=0.0),
                 "latency_average_s": statistics.fmean(latencies) if latencies else 0.0,
                 "latency_max_s": max(latencies, default=0.0),
+                "latency_p50_s": _percentile(latencies, 0.50),
+                "latency_p95_s": _percentile(latencies, 0.95),
+                "peak_rss_bytes": max(
+                    (sample.rss_bytes for sample in samples),
+                    default=0,
+                ),
+                "current_model": self._current_model,
+                "processed_chunks": processed,
+                "retry_chunks": self._retry_chunks,
+                "cascade_retry_chunks": self._cascade_retry_chunks,
+                "cascade_retry_percentage": (
+                    self._cascade_retry_chunks * 100.0 / processed if processed else 0.0
+                ),
+                "uncertain_chunks": self._uncertain_chunks,
                 "samples": [asdict(sample) for sample in samples],
             }
+
+
+def _percentile(values: tuple[float, ...], fraction: float) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    position = (len(ordered) - 1) * fraction
+    lower = int(position)
+    upper = min(lower + 1, len(ordered) - 1)
+    weight = position - lower
+    return ordered[lower] * (1.0 - weight) + ordered[upper] * weight

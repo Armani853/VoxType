@@ -326,14 +326,10 @@ class DesktopApplication:
         self.settings_window.set_audio_devices(devices, self.runtime.settings.audio.device_id)
         installed = {item.model_id for item in self.runtime.model_manager.list_installed()}
         models = [
-            (f"Быстро — small{' ✓' if 'small' in installed else ''}", "small"),
+            (f"small — быстро/баланс{' ✓' if 'small' in installed else ''}", "small"),
             (
-                f"Баланс — large-v3-turbo{' ✓' if 'large-v3-turbo' in installed else ''}",
+                f"large-v3-turbo — максимум{' ✓' if 'large-v3-turbo' in installed else ''}",
                 "large-v3-turbo",
-            ),
-            (
-                f"Максимальная точность — large-v3{' ✓' if 'large-v3' in installed else ''}",
-                "large-v3",
             ),
         ]
         self.settings_window.set_models(models, self.runtime.settings.model.installed_model)
@@ -416,7 +412,9 @@ class DesktopApplication:
         required_model = DEFAULT_MODEL_SPECS[selected].model_id
         if backend_settings_changed and self.runtime.model_manager.is_installed(required_model):
             self.controller.configure_backend(
-                self.runtime.backend_for(selected), domain_profile(selected)
+                self.runtime.backend_for(selected),
+                domain_profile(selected),
+                self.runtime.retry_backend_for(selected),
             )
         elif backend_settings_changed:
             self.settings_window.set_diagnostics_status(
@@ -676,7 +674,11 @@ class DesktopApplication:
                 self.runtime.model_manager.install(spec, progress=progress)
                 install_silero_vad(self.runtime.data_directory)
                 backend = self.runtime.backend_for(selected)
-                configured = self.controller.configure_backend(backend, domain_profile(selected))
+                configured = self.controller.configure_backend(
+                    backend,
+                    domain_profile(selected),
+                    self.runtime.retry_backend_for(selected),
+                )
                 if configured:
                     self.runtime.settings = self.runtime.settings_repository.load()
                 self.signals.model_ready.emit(
@@ -754,7 +756,11 @@ class DesktopApplication:
                 rtf = result.maximum_rtf
                 ok = result.successful and rtf < 1.0
                 if ok:
-                    self.controller.configure_backend(backend, domain_profile(selected))
+                    self.controller.configure_backend(
+                        backend,
+                        domain_profile(selected),
+                        self.runtime.retry_backend_for(selected),
+                    )
                 quality = "есть запас" if rtf <= 0.7 else "рекомендуется профиль «Быстро»"
                 message = f"RTF={rtf:.3f}; {quality}"
             except Exception as exc:
@@ -801,6 +807,11 @@ class DesktopApplication:
             )
             return
         self.controller.backend.unload()
+        if (
+            self.controller.retry_backend is not None
+            and self.controller.retry_backend is not self.controller.backend
+        ):
+            self.controller.retry_backend.unload()
         removed = self.runtime.session_repository.delete_all()
         root_logger = logging.getLogger("voxtype")
         for handler in tuple(root_logger.handlers):
@@ -916,7 +927,9 @@ class DesktopApplication:
                     )
                     if fast_result.successful and fast_result.maximum_rtf < rtf:
                         self.controller.configure_backend(
-                            fast_backend, domain_profile(ASRProfile.FAST)
+                            fast_backend,
+                            domain_profile(ASRProfile.FAST),
+                            self.runtime.retry_backend_for(ASRProfile.FAST),
                         )
                         self.runtime.settings = self.runtime.settings_repository.load()
                         rtf = fast_result.maximum_rtf
@@ -998,9 +1011,15 @@ def _remove_owned_path(path: Path, root: Path) -> None:
 
 def _coerce_asr_profile(value: str) -> ASRProfile:
     normalized = value.casefold().strip()
-    if normalized in {"accurate", "large-v3", "maximum_accuracy"}:
+    if normalized in {
+        "accurate",
+        "large-v3",
+        "large-v3-turbo",
+        "turbo",
+        "maximum_accuracy",
+    }:
         return ASRProfile.MAXIMUM_ACCURACY
-    if normalized in {"balanced", "large-v3-turbo", "turbo"}:
+    if normalized == "balanced":
         return ASRProfile.BALANCED
     return ASRProfile.FAST
 
