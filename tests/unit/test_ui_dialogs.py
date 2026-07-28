@@ -15,6 +15,25 @@ from voxtype.ui.models import DiagnosticReport, HistoryEntry
 from voxtype.ui.settings_window import SettingsWindow
 
 
+class _MemoryClipboard:
+    def __init__(self) -> None:
+        self.value = ""
+
+    def setText(self, value: str) -> None:
+        self.value = value
+
+    def text(self) -> str:
+        return self.value
+
+
+class _ClipboardApplication:
+    clipboard_backend = _MemoryClipboard()
+
+    @classmethod
+    def clipboard(cls) -> _MemoryClipboard:
+        return cls.clipboard_backend
+
+
 def test_settings_roundtrip_and_submit(qtbot) -> None:  # type: ignore[no-untyped-def]
     window = SettingsWindow()
     qtbot.addWidget(window)
@@ -71,7 +90,10 @@ def test_settings_accepts_slots_based_application_schema(qtbot) -> None:  # type
     assert values["model"]["installed_model"] == "small"
 
 
-def test_history_filters_displays_and_copies(qtbot) -> None:  # type: ignore[no-untyped-def]
+def test_history_filters_displays_and_copies(qtbot, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    clipboard = _MemoryClipboard()
+    monkeypatch.setattr(_ClipboardApplication, "clipboard_backend", clipboard)
+    monkeypatch.setattr("voxtype.ui.history_window.QGuiApplication", _ClipboardApplication)
     window = HistoryWindow()
     qtbot.addWidget(window)
     window.set_sessions(
@@ -97,7 +119,7 @@ def test_history_filters_displays_and_copies(qtbot) -> None:  # type: ignore[no-
     assert window.table.rowCount() == 2
     assert window.selected_entry() is not None
     qtbot.mouseClick(window.copy_button, Qt.MouseButton.LeftButton)
-    assert QGuiApplication.clipboard().text() == "Русский текст"
+    assert clipboard.text() == "Русский текст"
 
     window.search_edit.setText("English")
     hidden = [window.table.isRowHidden(row) for row in range(window.table.rowCount())]
@@ -168,7 +190,10 @@ def test_history_language_filter_never_keeps_stale_detail_and_delete_selects_nex
     assert not window.table.horizontalScrollBar().isVisible()
 
 
-def test_diagnostics_renders_and_copies_report(qtbot) -> None:  # type: ignore[no-untyped-def]
+def test_diagnostics_renders_and_copies_report(qtbot, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    clipboard = _MemoryClipboard()
+    monkeypatch.setattr(_ClipboardApplication, "clipboard_backend", clipboard)
+    monkeypatch.setattr("voxtype.ui.diagnostics_window.QGuiApplication", _ClipboardApplication)
     window = DiagnosticsWindow()
     qtbot.addWidget(window)
     window.set_report(
@@ -184,6 +209,6 @@ def test_diagnostics_renders_and_copies_report(qtbot) -> None:  # type: ignore[n
     assert window.checks_table.rowCount() == 1
     assert window._tables["hardware"].rowCount() == 2
     qtbot.mouseClick(window.copy_button, Qt.MouseButton.LeftButton)
-    copied = QGuiApplication.clipboard().text()
+    copied = clipboard.text()
     assert "Test CPU" in copied
     assert "Модель" in copied
