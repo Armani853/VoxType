@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.2.2
+
+- Moved session preparation, model loading, microphone startup and shutdown
+  waits off the Qt thread; slow handlers and event-loop stalls now produce
+  privacy-safe `UI_BLOCK` / `UI_STALL` diagnostics.
+- Added immediate `STARTING`, two-phase `FINISHING`, frozen stop time and a
+  persistent `COMPLETED` result with full-text Copy, safe retry and Close.
+- Added an exact timestamp boundary for Pause/Resume so callbacks captured
+  during pause cannot enter a later transcript while the loaded model is kept.
+- Routed automatic insertion through one bounded FIFO delivery worker, added
+  per-fragment delivery states and idempotency keys, and suppressed automatic
+  retry after an uncertain partial `SendInput` result.
+- Increased the effective clipboard-paste observation window to the measured
+  350 ms before restoring the user's clipboard, while preserving target
+  revalidation.
+- Made first-run/settings microphone and model discovery asynchronous and added
+  default-on full-result clipboard copy with default-off automatic result hide.
+
 ## 0.2.1
 
 - Fixed microphone calibration rejecting quiet but clearly separated speech:

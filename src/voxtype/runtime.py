@@ -274,7 +274,7 @@ def build_runtime(*, verbose: bool = False) -> RuntimeBundle:
     injection = TextInjectionService(
         target_manager,
         strategy=InjectionStrategy(settings.dictation.injection_mode.value),
-        paste_delay=settings.dictation.insertion_delay_ms / 1_000.0,
+        paste_delay=max(350, settings.dictation.insertion_delay_ms) / 1_000.0,
     )
 
     audio_profile = AudioPreprocessingProfile(settings.audio.preprocessing_profile.value)

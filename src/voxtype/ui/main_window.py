@@ -58,6 +58,7 @@ if PYSIDE6_AVAILABLE:
         AppStatus.TRANSCRIBING: ("transcribing", "#7A55C5"),
         AppStatus.PAUSED_TARGET_LOST: ("target_lost", "#D98B16"),
         AppStatus.FINISHING: ("finishing", "#7A55C5"),
+        AppStatus.COMPLETED: ("ready", "#1A9B67"),
         AppStatus.ERROR_RECOVERABLE: ("recoverable_error", "#D98B16"),
         AppStatus.ERROR_FATAL: ("fatal_error", "#D34A55"),
         AppStatus.SHUTTING_DOWN: ("shutting_down", "#657089"),
@@ -341,8 +342,6 @@ if PYSIDE6_AVAILABLE:
             self.dictation_button.setEnabled(
                 state.state
                 not in {
-                    AppStatus.STARTING,
-                    AppStatus.MODEL_LOADING,
                     AppStatus.FINISHING,
                     AppStatus.SHUTTING_DOWN,
                     AppStatus.ERROR_FATAL,
@@ -376,6 +375,8 @@ if PYSIDE6_AVAILABLE:
                 return "Вернитесь в целевое приложение — накопленный текст не потерян"
             if state.state is AppStatus.FINISHING:
                 return "Обрабатываю оставшееся аудио и сохраняю результат"
+            if state.state is AppStatus.COMPLETED:
+                return "Результат сохранён; его можно скопировать или вставить повторно"
             if state.state is AppStatus.PAUSED:
                 return "Запись приостановлена"
             return "VoxType работает полностью на этом компьютере"
@@ -389,7 +390,11 @@ if PYSIDE6_AVAILABLE:
             }[profile]
 
         def _fragment_text(self, state: UIState) -> str:
-            committed = text_preview(state.last_committed_text)
+            committed = text_preview(
+                state.full_transcript
+                if state.state is AppStatus.COMPLETED
+                else state.last_committed_text
+            )
             if committed:
                 return committed
             if state.state in {AppStatus.LISTENING, AppStatus.SPEECH_DETECTED}:

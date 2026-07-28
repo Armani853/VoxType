@@ -34,6 +34,16 @@ class InjectionStatus(StrEnum):
     BLOCKED = "blocked"
     FAILED = "failed"
     EMPTY = "empty"
+    DUPLICATE = "duplicate"
+    UNKNOWN = "unknown"
+
+
+class DeliveryStatus(StrEnum):
+    PENDING = "pending"
+    DELIVERED = "delivered"
+    FAILED = "failed"
+    QUEUED_TARGET_INACTIVE = "queued_target_inactive"
+    UNKNOWN = "unknown"
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,6 +81,7 @@ class TargetResolver(Protocol):
 class PendingFragment:
     text: str
     target_identity: tuple[int, int] | None
+    fragment_id: str = ""
 
 
 class PendingTextQueue:
@@ -101,12 +112,19 @@ class PendingTextQueue:
         with self._lock:
             return self._characters
 
-    def append(self, text: str, *, target_identity: tuple[int, int] | None = None) -> None:
+    def append(
+        self,
+        text: str,
+        *,
+        target_identity: tuple[int, int] | None = None,
+        fragment_id: str = "",
+    ) -> None:
         if not text:
             return
         payload = {
             "target": None if target_identity is None else list(target_identity),
             "text": text,
+            "fragment_id": fragment_id,
         }
         record = json.dumps(payload, ensure_ascii=False).encode("utf-8") + b"\n"
         with self._lock:
@@ -132,7 +150,7 @@ class PendingTextQueue:
             target = (raw_target[0], raw_target[1])
         else:
             raise RuntimeError("pending-text spool contains an invalid target identity")
-        return PendingFragment(value["text"], target)
+        return PendingFragment(value["text"], target, str(value.get("fragment_id", "")))
 
     def peek_record(self) -> PendingFragment | None:
         with self._lock:
@@ -149,6 +167,9 @@ class PendingTextQueue:
         return None if record is None else record.text
 
     def popleft(self) -> str:
+        return self.popleft_record().text
+
+    def popleft_record(self) -> PendingFragment:
         with self._lock:
             record = self.peek_record()
             if record is None:
@@ -162,7 +183,7 @@ class PendingTextQueue:
                 self._reset_stream()
             elif not line:
                 raise RuntimeError("pending-text spool could not advance")
-            return record.text
+            return record
 
     def __iter__(self) -> Iterator[str]:
         with self._lock:
@@ -243,7 +264,7 @@ class TextInjectionService:
         clipboard: ClipboardManager | None = None,
         sender: SendInputController | None = None,
         strategy: InjectionStrategy | str = InjectionStrategy.AUTO,
-        paste_delay: float = 0.12,
+        paste_delay: float = 0.35,
         pending_memory_bytes: int = 256 * 1024,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
@@ -257,6 +278,9 @@ class TextInjectionService:
         self._sleep = sleep
         self._pending = PendingTextQueue(memory_limit_bytes=pending_memory_bytes)
         self._tails: dict[tuple[int, int], str] = {}
+        self._known_fragment_ids: set[str] = set()
+        self._delivered_fragment_ids: set[str] = set()
+        self._delivery_statuses: dict[str, DeliveryStatus] = {}
         self._lock = threading.RLock()
 
     @property
@@ -288,6 +312,10 @@ class TextInjectionService:
     @property
     def pending_characters(self) -> int:
         return self._pending.characters
+
+    def delivery_status(self, fragment_id: str) -> DeliveryStatus | None:
+        with self._lock:
+            return self._delivery_statuses.get(fragment_id)
 
     def _tail_for(self, target: WindowMetadata) -> str:
         return self._tails.get(target.identity, "")
@@ -398,7 +426,11 @@ class TextInjectionService:
         return InjectionStatus.BLOCKED if decision.requires_safe_copy else InjectionStatus.QUEUED
 
     def submit(
-        self, text: str, *, strategy: InjectionStrategy | str | None = None
+        self,
+        text: str,
+        *,
+        strategy: InjectionStrategy | str | None = None,
+        fragment_id: str = "",
     ) -> InjectionResult:
         """Accept a committed fragment, retaining it until delivery succeeds."""
 
@@ -414,10 +446,24 @@ class TextInjectionService:
                 detail="Empty fragments are ignored",
             )
         with self._lock:
+            if fragment_id and fragment_id in self._known_fragment_ids:
+                return InjectionResult(
+                    InjectionStatus.DUPLICATE,
+                    text,
+                    "",
+                    None,
+                    len(self._pending),
+                    None,
+                    None,
+                    detail="Fragment was already accepted; duplicate delivery was ignored",
+                )
             try:
                 binding = self._targets.resolve()
             except Exception as exc:
-                self._pending.append(text)
+                self._pending.append(text, fragment_id=fragment_id)
+                if fragment_id:
+                    self._known_fragment_ids.add(fragment_id)
+                    self._delivery_statuses[fragment_id] = DeliveryStatus.FAILED
                 return InjectionResult(
                     InjectionStatus.FAILED,
                     text,
@@ -429,7 +475,14 @@ class TextInjectionService:
                     detail=f"Target resolution failed: {exc}",
                 )
             target_identity = None if binding.target is None else binding.target.identity
-            self._pending.append(text, target_identity=target_identity)
+            self._pending.append(
+                text,
+                target_identity=target_identity,
+                fragment_id=fragment_id,
+            )
+            if fragment_id:
+                self._known_fragment_ids.add(fragment_id)
+                self._delivery_statuses[fragment_id] = DeliveryStatus.PENDING
             selected = self._strategy if strategy is None else InjectionStrategy(strategy)
             if selected is InjectionStrategy.SAFE_COPY:
                 return self.copy_pending_to_clipboard(consume=True, submitted_text=text)
@@ -459,6 +512,11 @@ class TextInjectionService:
                 last_target = decision.target
                 last_target_status = decision.status
                 if not decision.can_inject or decision.target is None:
+                    pending = self._pending.peek_record()
+                    if pending is not None and pending.fragment_id:
+                        self._delivery_statuses[pending.fragment_id] = (
+                            DeliveryStatus.QUEUED_TARGET_INACTIVE
+                        )
                     return InjectionResult(
                         self._status_for_decision(decision),
                         submitted_text,
@@ -512,6 +570,25 @@ class TextInjectionService:
                         str(exc),
                     )
                 except (ClipboardError, OSError, SendInputError) as exc:
+                    if isinstance(exc, SendInputError) and exc.sent:
+                        uncertain = self._pending.popleft_record()
+                        if uncertain.fragment_id:
+                            self._delivered_fragment_ids.add(uncertain.fragment_id)
+                            self._delivery_statuses[uncertain.fragment_id] = DeliveryStatus.UNKNOWN
+                        return InjectionResult(
+                            InjectionStatus.UNKNOWN,
+                            submitted_text,
+                            "".join(delivered_parts),
+                            used_strategy,
+                            len(self._pending),
+                            decision.target,
+                            decision.status,
+                            restored,
+                            "Input may have reached the target; automatic retry was suppressed",
+                        )
+                    failed = self._pending.peek_record()
+                    if failed is not None and failed.fragment_id:
+                        self._delivery_statuses[failed.fragment_id] = DeliveryStatus.FAILED
                     return InjectionResult(
                         InjectionStatus.FAILED,
                         submitted_text,
@@ -523,7 +600,10 @@ class TextInjectionService:
                         restored,
                         str(exc),
                     )
-                self._pending.popleft()
+                delivered = self._pending.popleft_record()
+                if delivered.fragment_id:
+                    self._delivered_fragment_ids.add(delivered.fragment_id)
+                    self._delivery_statuses[delivered.fragment_id] = DeliveryStatus.DELIVERED
                 self._remember_delivery(decision.target, prepared)
                 delivered_parts.append(prepared)
                 detail = injection_detail or detail
@@ -574,7 +654,10 @@ class TextInjectionService:
                 )
             if consume:
                 for _ in fragments:
-                    self._pending.popleft()
+                    consumed = self._pending.popleft_record()
+                    if consumed.fragment_id:
+                        self._delivered_fragment_ids.add(consumed.fragment_id)
+                        self._delivery_statuses[consumed.fragment_id] = DeliveryStatus.DELIVERED
             return InjectionResult(
                 InjectionStatus.COPIED,
                 submitted_text,
@@ -585,6 +668,17 @@ class TextInjectionService:
                 None,
                 detail="Confirmed text is ready for a manual paste",
             )
+
+    def copy_text_to_clipboard(self, text: str) -> bool:
+        """Copy a complete result without consuming or reordering delivery FIFO."""
+
+        if not text:
+            return False
+        try:
+            self._clipboard.copy_text(text)
+        except (ClipboardError, OSError):
+            return False
+        return True
 
     def close(self) -> None:
         with self._lock:

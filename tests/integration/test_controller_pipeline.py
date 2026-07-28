@@ -192,6 +192,14 @@ class NonStoppingCapture(FixtureCapture):
         return False
 
 
+class SlowStopCapture(EmptyCapture):
+    def stop(self, *, drain_timeout: float = 5.0) -> bool:
+        del drain_timeout
+        time.sleep(0.2)
+        self.running = False
+        return True
+
+
 class FixtureTargetManager:
     def __init__(self) -> None:
         self.target = WindowMetadata(
@@ -291,7 +299,7 @@ def test_controller_journals_before_ordered_injection_and_drains(tmp_path: Path)
     assert controller.start_dictation()
     wait_for_state(controller, AppState.LISTENING)
     assert controller.stop_dictation()
-    wait_for_state(controller, AppState.IDLE)
+    wait_for_state(controller, AppState.COMPLETED)
 
     records = session_repository.recent()
     assert len(records) == 1
@@ -320,14 +328,67 @@ def test_model_loading_accepts_only_one_queued_start(tmp_path: Path) -> None:
     )
     controller.initialize()
     assert controller.start_dictation()
-    assert controller.state is AppState.MODEL_LOADING
+    assert controller.state in {AppState.STARTING, AppState.MODEL_LOADING}
     assert not controller.start_dictation()
-    controller.toggle_dictation()
     wait_for_state(controller, AppState.LISTENING)
     assert backend.load_calls == 1
     assert len(repository.recent()) == 1
     assert controller.stop_dictation()
-    wait_for_state(controller, AppState.IDLE)
+    wait_for_state(controller, AppState.COMPLETED)
+    controller.shutdown()
+    repository.close()
+
+
+def test_start_command_returns_before_slow_runtime_preparation(tmp_path: Path) -> None:
+    def slow_segmenter() -> StreamingSegmenter:
+        time.sleep(0.2)
+        return StreamingSegmenter(AlwaysSpeech())
+
+    repository = SessionRepository(tmp_path / "sessions.sqlite3")
+    controller = ApplicationController(
+        settings_repository=SettingsRepository(tmp_path / "settings.json"),
+        session_repository=repository,
+        backend=DeterministicBackend(),
+        capture_factory=lambda queue: EmptyCapture(queue),  # type: ignore[arg-type,return-value]
+        segmenter_factory=slow_segmenter,
+        target_manager=FixtureTargetManager(),  # type: ignore[arg-type]
+        injection_service=FixtureInjection(),  # type: ignore[arg-type]
+        spool_root=tmp_path / "spool",
+    )
+    controller.initialize()
+    started = time.monotonic()
+    assert controller.start_dictation()
+    assert time.monotonic() - started < 0.05
+    assert controller.state is AppState.STARTING
+    wait_for_state(controller, AppState.LISTENING)
+    assert controller.stop_dictation()
+    wait_for_state(controller, AppState.COMPLETED)
+    assert len(repository.recent()) == 1
+    controller.shutdown()
+    repository.close()
+
+
+def test_stop_during_model_loading_is_immediate_and_finishes_once(tmp_path: Path) -> None:
+    repository = SessionRepository(tmp_path / "sessions.sqlite3")
+    controller = ApplicationController(
+        settings_repository=SettingsRepository(tmp_path / "settings.json"),
+        session_repository=repository,
+        backend=DelayedLoadBackend(),
+        capture_factory=lambda queue: EmptyCapture(queue),  # type: ignore[arg-type,return-value]
+        segmenter_factory=lambda: StreamingSegmenter(AlwaysSpeech()),
+        target_manager=FixtureTargetManager(),  # type: ignore[arg-type]
+        injection_service=FixtureInjection(),  # type: ignore[arg-type]
+        spool_root=tmp_path / "spool",
+    )
+    controller.initialize()
+    assert controller.start_dictation()
+    started = time.monotonic()
+    assert controller.stop_dictation()
+    assert time.monotonic() - started < 0.05
+    assert controller.state is AppState.FINISHING
+    assert not controller.stop_dictation()
+    wait_for_state(controller, AppState.COMPLETED)
+    assert len(repository.recent()) == 1
     controller.shutdown()
     repository.close()
 
@@ -356,13 +417,42 @@ def test_pause_resume_captures_no_text_while_paused(tmp_path: Path) -> None:
     wait_for_state(controller, AppState.LISTENING)
     assert controller.toggle_pause()
     wait_for_state(controller, AppState.PAUSED)
+    captures[0].feed(99)
     time.sleep(0.05)
     assert repository.recent()[0].committed_text == ""
     assert controller.toggle_pause()
     wait_for_state(controller, AppState.LISTENING)
     assert len(captures) == 2
     assert controller.stop_dictation()
-    wait_for_state(controller, AppState.IDLE)
+    wait_for_state(controller, AppState.COMPLETED)
+    assert repository.recent()[0].committed_text == ""
+    controller.shutdown()
+    repository.close()
+
+
+def test_stop_freezes_timer_before_slow_capture_drain(tmp_path: Path) -> None:
+    repository = SessionRepository(tmp_path / "sessions.sqlite3")
+    controller = ApplicationController(
+        settings_repository=SettingsRepository(tmp_path / "settings.json"),
+        session_repository=repository,
+        backend=DeterministicBackend(),
+        capture_factory=lambda queue: SlowStopCapture(queue),  # type: ignore[arg-type,return-value]
+        segmenter_factory=lambda: StreamingSegmenter(AlwaysSpeech()),
+        target_manager=FixtureTargetManager(),  # type: ignore[arg-type]
+        injection_service=FixtureInjection(),  # type: ignore[arg-type]
+        spool_root=tmp_path / "spool",
+    )
+    controller.initialize()
+    assert controller.start_dictation()
+    wait_for_state(controller, AppState.LISTENING)
+    time.sleep(0.03)
+    assert controller.stop_dictation()
+    stopped_elapsed = controller.snapshot().session_elapsed_s
+    time.sleep(0.08)
+    assert controller.state is AppState.FINISHING
+    assert controller.snapshot().session_elapsed_s == stopped_elapsed
+    assert not controller.stop_dictation()
+    wait_for_state(controller, AppState.COMPLETED)
     assert repository.recent()[0].committed_text == ""
     controller.shutdown()
     repository.close()
@@ -444,7 +534,7 @@ def test_long_silence_does_not_exhaust_durable_inflight_leases(
     assert controller.start_dictation()
     wait_for_state(controller, AppState.LISTENING, timeout_s=15.0)
     assert controller.stop_dictation()
-    wait_for_state(controller, AppState.IDLE, timeout_s=15.0)
+    wait_for_state(controller, AppState.COMPLETED, timeout_s=15.0)
 
     expected_samples = LongSilenceCapture.chunk_count * LongSilenceCapture.chunk_samples
     assert detector.samples_seen == expected_samples
@@ -524,7 +614,7 @@ def test_language_switch_preserves_segment_sequence_and_commits_both_languages(
     captures[0].feed(1)
     time.sleep(0.05)
     assert controller.stop_dictation()
-    wait_for_state(controller, AppState.IDLE)
+    wait_for_state(controller, AppState.COMPLETED)
 
     record = session_repository.recent()[0]
     assert "Русский" in record.committed_text

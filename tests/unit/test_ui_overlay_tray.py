@@ -89,3 +89,25 @@ def test_tray_menu_updates_and_routes_actions(qtbot) -> None:  # type: ignore[no
     assert controller.language_calls == 1
     assert controller.shutdown_calls == 1
     tray.close()
+
+
+def test_completed_overlay_persists_full_result_and_exposes_actions(qtbot) -> None:  # type: ignore[no-untyped-def]
+    overlay = DictationOverlay()
+    qtbot.addWidget(overlay)
+    overlay.update_snapshot(
+        UIState(
+            state=AppStatus.COMPLETED,
+            last_committed_text="последний",
+            full_transcript="полный подтверждённый результат",
+            delivery_status="queued_target_inactive",
+        )
+    )
+    overlay.show_without_activating()
+    qtbot.waitUntil(overlay.isVisible)
+    assert overlay.status_label.text() == "Готово"
+    assert overlay.result_text.toPlainText() == "полный подтверждённый результат"
+    assert overlay.result_buttons.isVisible()
+    assert overlay.copy_all_button.isEnabled()
+    assert overlay.insert_button.isEnabled()
+    assert not overlay.pause_button.isVisible()
+    assert not overlay.stop_button.isVisible()

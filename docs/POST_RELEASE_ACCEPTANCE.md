@@ -29,6 +29,18 @@
 | Release cleanup | PASS | No private audio/transcripts/logs/dumps/staging/screenshots; no exact private paths or credential assignments | 2026-07-28 21:34 MSK |
 | Release SHA-256 | PASS | ZIP `467618769881A979F84A992A776518DC89744B9A301535474083C9512402238E`; setup `7DC4F2B127D4DDC364C9F5C08C0733962C8573A10E7B342E9AD4D83961EF9298` | 2026-07-28 21:34 MSK |
 | Post-fix ordinary human voice | MANUAL CHECK | Controlled live human speech is unavailable to the agent; confirm GOOD/QUIET_BUT_USABLE and visible meter once | 2026-07-28 21:34 MSK |
+| 0.2.2 immediate command states | PASS | Slow-preparation Start returned <50 ms in regression test; Pause/Stop state changes immediate; Stop timer frozen; repeated Start/Stop ignored | 2026-07-28 21:31 MSK |
+| 0.2.2 pause boundary | PASS | Callback chunk timestamped after Pause was acknowledged without reaching segmenter/ASR; model remained loaded across Resume | 2026-07-28 21:31 MSK |
+| 0.2.2 delivery/result state | PASS | Journal precedes bounded single-worker FIFO; fragment IDs suppress duplicates; uncertain SendInput is not auto-retried; full transcript persists in COMPLETED with Copy/Retry/Close | 2026-07-28 21:34 MSK |
+| 0.2.2 five-minute continuous harness | PASS | 302.125 s; 300/300 chunks; 11/11 criteria; FIFO/journal/queue/spool PASS; dropped=0; duplicates=0; p50=1.078 s; p95=2.750 s | 2026-07-28 21:36 MSK |
+| 0.2.2 Windows native insertion | PASS | Installed/debug interactive Notepad matrix 4/4: Locked Target, Follow Focus, clipboard restore, SendInput fallback; empirical clipboard settle floor 350 ms | 2026-07-28 22:12 MSK |
+| 0.2.2 final source checks | PASS | Ruff format/check PASS; Mypy 88 files PASS; Pytest 199 passed, 5 deselected | 2026-07-28 22:20 MSK |
+| Portable 0.2.2 | PASS | One final Nuitka build; packaged smoke PASS; ZIP published without replacing 0.2.0/0.2.1 | 2026-07-28 22:41 MSK |
+| Installer 0.2.2 | PASS | Inno build with existing portable; per-user smoke-install PASS; real upgrade exit 0 | 2026-07-28 22:45 MSK |
+| Installed 0.2.2 | PASS | File/product 0.2.2.0; version, self-test, Qt, diagnostics/model discovery, VAD/inference all exit 0; 8 audio inputs | 2026-07-28 22:47 MSK |
+| 0.2.2 upgrade data preservation | PASS | Settings `5E752F28...E9AC` and sessions `DCC403CA...DA9B` unchanged; four user model directories retained | 2026-07-28 22:47 MSK |
+| 0.2.2 release cleanup | PASS | No OGG/WAV/private transcripts/.env/logs/dumps/staging/screenshots/calibration files or embedded private absolute paths found | 2026-07-28 22:48 MSK |
+| 0.2.2 release SHA-256 | PASS | ZIP `04095CB8EBAD209C298D60190D6A78A0DF0CC62DED82971FF1129776CE7867B9`; setup `29D255EB5279C56234238DB6D026055A0EE1ADE89278679589299CDDB9D6D4FA` | 2026-07-28 22:48 MSK |
 
 ## Human ground truth procedure
 

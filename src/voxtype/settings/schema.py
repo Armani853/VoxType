@@ -39,9 +39,13 @@ class DictationSettings:
     model_profile: ModelProfile = ModelProfile.BALANCED
     voice_commands: bool = False
     auto_insert: bool = True
+    copy_full_text_on_complete: bool = True
+    auto_hide_completed_result: bool = False
     injection_mode: InjectionMode = InjectionMode.AUTO
     target_mode: TargetMode = TargetMode.LOCKED
-    insertion_delay_ms: int = 80
+    # Clipboard consumers such as Chromium and VS Code may read CF_UNICODETEXT
+    # asynchronously after Ctrl+V. Restoring earlier can paste stale content.
+    insertion_delay_ms: int = 350
     add_fragment_space: bool = True
     capitalize_sentences: bool = True
     custom_vocabulary: list[str] = field(default_factory=list)

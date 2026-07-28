@@ -78,6 +78,9 @@ class _WorkerSignals(QObject):
     recovery_ready = Signal(str, bool, str)
     pending_flush_ready = Signal()
     hardware_ready = Signal(str, str)
+    devices_ready = Signal(object)
+    models_ready = Signal(object)
+    shutdown_ready = Signal(bool)
 
 
 class _HotkeyEventFilter(QAbstractNativeEventFilter):
@@ -130,12 +133,12 @@ class DesktopApplication:
         self.controller = runtime.controller
         self.signals = _WorkerSignals()
         self.main = MainWindow(
-            self.controller,
+            None,
             interface_language=runtime.settings.general.ui_language,
             minimize_to_tray=runtime.settings.general.minimize_to_tray,
         )
-        self.overlay = DictationOverlay(self.controller)
-        self.tray = TrayController(self.controller)
+        self.overlay = DictationOverlay(None)
+        self.tray = TrayController(None)
         self.settings_window = SettingsWindow(self.main)
         self.history_window = HistoryWindow(self.main)
         self.diagnostics_window = DiagnosticsWindow(self.main)
@@ -149,10 +152,17 @@ class DesktopApplication:
         self.timer = QTimer(self.main)
         self.timer.setInterval(50)
         self._last_state = ""
+        self._result_dismissed = False
         self._last_pending_flush = 0.0
         self._last_resource_sample = 0.0
         self._pending_flush_running = False
         self._closed = False
+        self._closing = False
+        self._heartbeat_last = time.monotonic()
+        self._heartbeat_stop = threading.Event()
+        self._heartbeat_timer = QTimer(self.main)
+        self._heartbeat_timer.setInterval(100)
+        self._heartbeat_timer.timeout.connect(self._heartbeat)
         if runtime.settings.general.start_with_windows:
             runtime.startup.enable()
         self._connect()
@@ -167,6 +177,10 @@ class DesktopApplication:
         self.tray.show()
         self.timer.timeout.connect(self._poll)
         self.timer.start()
+        self._heartbeat_timer.start()
+        threading.Thread(
+            target=self._heartbeat_monitor, name="voxtype-ui-watchdog", daemon=True
+        ).start()
         if not runtime.settings.general.onboarding_completed:
             QTimer.singleShot(100, self.show_onboarding)
         if runtime.session_repository.unfinished():
@@ -177,12 +191,57 @@ class DesktopApplication:
             QTimer.singleShot(250, self.show_history)
 
     def _connect(self) -> None:
+        self.main.dictation_toggle_requested.connect(
+            lambda: self._invoke_ui("main.toggle_dictation", self.controller.toggle_dictation)
+        )
+        self.main.pause_toggle_requested.connect(
+            lambda: self._invoke_ui("main.toggle_pause", self.controller.toggle_pause)
+        )
+        self.main.language_change_requested.connect(
+            lambda _language: self._invoke_ui(
+                "main.switch_language", self.controller.switch_language
+            )
+        )
+        self.overlay.pause_requested.connect(
+            lambda: self._invoke_ui("overlay.toggle_pause", self.controller.toggle_pause)
+        )
+        self.overlay.stop_requested.connect(
+            lambda: self._invoke_ui("overlay.stop", self.controller.toggle_dictation)
+        )
+        self.overlay.copy_all_requested.connect(
+            lambda: self._run_background(
+                "voxtype-copy-result", self.controller.copy_full_transcript
+            )
+        )
+        self.overlay.insert_requested.connect(
+            lambda: self._run_background(
+                "voxtype-retry-insertion", self.controller.retry_completed_insertion
+            )
+        )
+        self.overlay.close_result_requested.connect(self._dismiss_result)
+        self.tray.dictation_toggle_requested.connect(
+            lambda: self._invoke_ui("tray.toggle_dictation", self.controller.toggle_dictation)
+        )
+        self.tray.pause_toggle_requested.connect(
+            lambda: self._invoke_ui("tray.toggle_pause", self.controller.toggle_pause)
+        )
+        self.tray.language_change_requested.connect(
+            lambda _language: self._invoke_ui(
+                "tray.switch_language", self.controller.switch_language
+            )
+        )
         self.main.settings_requested.connect(self.show_settings)
         self.main.history_requested.connect(self.show_history)
         self.main.diagnostics_requested.connect(self.show_diagnostics)
         self.main.onboarding_requested.connect(self.show_onboarding)
-        self.main.retry_requested.connect(self.controller.toggle_dictation)
-        self.main.copy_text_button.clicked.connect(self.controller.copy_pending_text)
+        self.main.retry_requested.connect(
+            lambda: self._invoke_ui("main.retry", self.controller.toggle_dictation)
+        )
+        self.main.copy_text_button.clicked.connect(
+            lambda: self._run_background(
+                "voxtype-copy-full-result", self.controller.copy_full_transcript
+            )
+        )
         self.tray.open_window_requested.connect(self._show_main)
         self.tray.settings_requested.connect(self.show_settings)
         self.tray.quit_requested.connect(self.quit)
@@ -218,12 +277,55 @@ class DesktopApplication:
         self.signals.recovery_ready.connect(self._on_recovery_ready)
         self.signals.pending_flush_ready.connect(self._on_pending_flush_ready)
         self.signals.hardware_ready.connect(self._on_hardware_ready)
+        self.signals.devices_ready.connect(self._on_devices_ready)
+        self.signals.models_ready.connect(self._on_models_ready)
+        self.signals.shutdown_ready.connect(self._on_shutdown_ready)
         self.application.aboutToQuit.connect(self.close)
+
+    def _invoke_ui(self, handler: str, callback: Any) -> None:
+        started = time.monotonic()
+        state = self.controller.state.name
+        try:
+            callback()
+        finally:
+            elapsed_ms = (time.monotonic() - started) * 1_000.0
+            if elapsed_ms > 200.0:
+                _LOGGER.warning(
+                    "UI_BLOCK handler=%s state=%s elapsed_ms=%.1f",
+                    handler,
+                    state,
+                    elapsed_ms,
+                )
+
+    @staticmethod
+    def _run_background(name: str, callback: Any) -> None:
+        threading.Thread(target=callback, name=name, daemon=True).start()
+
+    def _heartbeat(self) -> None:
+        self._heartbeat_last = time.monotonic()
+
+    def _heartbeat_monitor(self) -> None:
+        reported = False
+        while not self._heartbeat_stop.wait(0.1):
+            elapsed = time.monotonic() - self._heartbeat_last
+            if elapsed > 0.5 and not reported:
+                _LOGGER.warning(
+                    "UI_STALL state=%s elapsed_ms=%.1f",
+                    self.controller.state.name,
+                    elapsed * 1_000.0,
+                )
+                reported = True
+            elif elapsed <= 0.25:
+                reported = False
 
     def _show_main(self) -> None:
         self.main.showNormal()
         self.main.raise_()
         self.main.activateWindow()
+
+    def _dismiss_result(self) -> None:
+        self._result_dismissed = True
+        self.overlay.hide()
 
     def _poll(self) -> None:
         if self.controller.state.name == "IDLE":
@@ -234,6 +336,8 @@ class DesktopApplication:
         self.tray.update_snapshot(snapshot)
         self.overlay.update_snapshot(snapshot)
         active = snapshot.state in {
+            "STARTING",
+            "MODEL_LOADING",
             "LISTENING",
             "SPEECH_DETECTED",
             "TRANSCRIBING",
@@ -242,8 +346,19 @@ class DesktopApplication:
             "FINISHING",
             "ERROR_RECOVERABLE",
             "ERROR_FATAL",
+            "COMPLETED",
         }
-        if active and self.runtime.settings.general.show_overlay:
+        if snapshot.state != self._last_state and snapshot.state == "COMPLETED":
+            self._result_dismissed = bool(
+                self.runtime.settings.dictation.auto_hide_completed_result
+            )
+        elif snapshot.state in {"STARTING", "MODEL_LOADING", "LISTENING"}:
+            self._result_dismissed = False
+        if (
+            active
+            and self.runtime.settings.general.show_overlay
+            and not (snapshot.state == "COMPLETED" and self._result_dismissed)
+        ):
             self.overlay.show_without_activating()
         else:
             self.overlay.hide()
@@ -317,8 +432,12 @@ class DesktopApplication:
             for specification, identifier, name, callback in definitions:
                 hotkey = parse_hotkey(specification, identifier=identifier, name=name)
 
-                def invoke(_item: object, fn: Any = callback) -> None:
-                    fn()
+                def invoke(
+                    _item: object,
+                    fn: Any = callback,
+                    handler_name: str = name,
+                ) -> None:
+                    self._invoke_ui(f"hotkey.{handler_name}", fn)
 
                 self.hotkeys.register(hotkey, invoke)
         except (ValueError, OSError, RuntimeError) as exc:
@@ -329,9 +448,15 @@ class DesktopApplication:
 
     def show_settings(self) -> None:
         self.settings_window.set_values(self.runtime.settings)
-        devices = [(f"{item.name} ({item.host_api})", item.index) for item in list_input_devices()]
+        devices = [(f"{item.name} ({item.host_api})", item.index) for item in self.runtime.devices]
         self.settings_window.set_audio_devices(devices, self.runtime.settings.audio.device_id)
-        installed = {item.model_id for item in self.runtime.model_manager.list_installed()}
+        self._set_model_choices(set())
+        self.settings_window.show()
+        self.settings_window.raise_()
+        self._run_background("voxtype-settings-devices", self._scan_settings_devices)
+        self._run_background("voxtype-settings-models", self._scan_settings_models)
+
+    def _set_model_choices(self, installed: set[str]) -> None:
         models = [
             (f"small — быстро/баланс{' ✓' if 'small' in installed else ''}", "small"),
             (
@@ -345,8 +470,27 @@ class DesktopApplication:
         self.settings_window.gpu_experimental_check.setToolTip(
             "В этой сборке используется проверенный CPU INT8; экспериментальный GPU отключён"
         )
-        self.settings_window.show()
-        self.settings_window.raise_()
+
+    def _scan_settings_devices(self) -> None:
+        self.signals.devices_ready.emit(list_input_devices())
+
+    def _scan_settings_models(self) -> None:
+        self.signals.models_ready.emit(
+            {item.model_id for item in self.runtime.model_manager.list_installed()}
+        )
+
+    def _on_devices_ready(self, items: object) -> None:
+        if not isinstance(items, (list, tuple)):
+            return
+        devices = [(f"{item.name} ({item.host_api})", item.index) for item in items]
+        self.settings_window.set_audio_devices(devices, self.runtime.settings.audio.device_id)
+        if self.onboarding is not None:
+            self.onboarding.set_microphones(devices, self.runtime.settings.audio.device_id)
+
+    def _on_models_ready(self, installed: object) -> None:
+        self._set_model_choices(
+            set(installed) if isinstance(installed, (set, frozenset)) else set()
+        )
 
     def _save_settings(self, values: object) -> None:
         if not isinstance(values, dict):
@@ -372,7 +516,7 @@ class DesktopApplication:
         self.controller.target_manager.set_policy(TargetPolicy(updated.dictation.target_mode.value))
         self.controller.injection_service.strategy = updated.dictation.injection_mode.value
         self.controller.injection_service.paste_delay = (
-            updated.dictation.insertion_delay_ms / 1_000.0
+            max(350, updated.dictation.insertion_delay_ms) / 1_000.0
         )
         self.main.set_minimize_to_tray(updated.general.minimize_to_tray)
         self.main.set_interface_language(updated.general.ui_language)
@@ -392,7 +536,7 @@ class DesktopApplication:
             )
             self.controller.injection_service.strategy = previous.dictation.injection_mode.value
             self.controller.injection_service.paste_delay = (
-                previous.dictation.insertion_delay_ms / 1_000.0
+                max(350, previous.dictation.insertion_delay_ms) / 1_000.0
             )
             self.runtime.startup.set_enabled(previous.general.start_with_windows)
             self.main.set_minimize_to_tray(previous.general.minimize_to_tray)
@@ -590,7 +734,7 @@ class DesktopApplication:
             return
         wizard = OnboardingWizard(self.main)
         self.onboarding = wizard
-        devices = [(f"{item.name} ({item.host_api})", item.index) for item in list_input_devices()]
+        devices = [(f"{item.name} ({item.host_api})", item.index) for item in self.runtime.devices]
         wizard.set_microphones(devices, self.runtime.device.index)
         wizard.microphone_refresh_requested.connect(self._refresh_onboarding_microphones)
         wizard.microphone_selected.connect(self._audio_test)
@@ -601,12 +745,12 @@ class DesktopApplication:
         wizard.insertion_test_requested.connect(self._test_insertion)
         wizard.setup_completed.connect(self._complete_onboarding)
         wizard.show()
+        self._run_background("voxtype-onboarding-devices", self._scan_settings_devices)
 
     def _refresh_onboarding_microphones(self) -> None:
         if self.onboarding is None:
             return
-        devices = [(f"{item.name} ({item.host_api})", item.index) for item in list_input_devices()]
-        self.onboarding.set_microphones(devices, self.runtime.settings.audio.device_id)
+        self._run_background("voxtype-onboarding-devices", self._scan_settings_devices)
 
     def _recommend_hardware(self) -> None:
         def worker() -> None:
@@ -998,26 +1142,44 @@ class DesktopApplication:
         os.startfile(self.runtime.data_directory)
 
     def quit(self) -> None:
-        if self.close():
-            self.application.quit()
+        self.close()
 
     def close(self) -> bool:
         if self._closed:
             return True
-        if not self.runtime.close():
-            self.tray.show_message(
-                "VoxType",
-                "Завершаю сохранённый аудиохвост; выход будет повторён автоматически",
-            )
-            QTimer.singleShot(1_000, self.quit)
+        if self._closing:
             return False
-        self._closed = True
+        self._closing = True
         self.timer.stop()
+        self._heartbeat_timer.stop()
+        self._heartbeat_stop.set()
+        self.tray.show_message("VoxType", "Безопасно завершаю работу в фоне")
+
+        def worker() -> None:
+            self.signals.shutdown_ready.emit(self.runtime.close())
+
+        threading.Thread(target=worker, name="voxtype-shutdown", daemon=True).start()
+        return False
+
+    def _on_shutdown_ready(self, closed: bool) -> None:
+        if not closed:
+            self._closing = False
+            self.timer.start()
+            self._heartbeat_stop.clear()
+            self._heartbeat_timer.start()
+            threading.Thread(
+                target=self._heartbeat_monitor, name="voxtype-ui-watchdog", daemon=True
+            ).start()
+            self.tray.show_message(
+                "VoxType", "Завершение inference продолжается; повторите выход позже"
+            )
+            return
+        self._closed = True
         self.hotkeys.close()
         self.overlay.close()
         self.tray.close()
         self.main.force_close()
-        return True
+        self.application.quit()
 
 
 def _tail(path: Path, lines: int) -> str:

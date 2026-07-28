@@ -100,3 +100,20 @@ def test_main_window_error_keeps_copy_action_available(qtbot) -> None:  # type: 
     assert not window.error_banner.isHidden()
     assert window.error_label.text() == "Микрофон отключён"
     assert window.copy_text_button.isEnabled()
+
+
+def test_main_window_completed_state_shows_full_transcript_and_new_start(qtbot) -> None:  # type: ignore[no-untyped-def]
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.update_snapshot(
+        UIState(
+            state=AppStatus.COMPLETED,
+            last_committed_text="последний",
+            full_transcript="весь завершённый текст",
+            delivery_status="delivered",
+        )
+    )
+    assert window.status_label.text() == "Готово"
+    assert window.fragment_label.text() == "весь завершённый текст"
+    assert window.dictation_button.text() == "Начать диктовку"
+    assert window.dictation_button.isEnabled()

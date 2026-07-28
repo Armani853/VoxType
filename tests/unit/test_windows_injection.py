@@ -10,6 +10,7 @@ from voxtype.windows.clipboard import (
 )
 from voxtype.windows.foreground import IntegrityLevel, WindowMetadata
 from voxtype.windows.injection import (
+    DeliveryStatus,
     InjectionStatus,
     InjectionStrategy,
     PendingTextQueue,
@@ -171,9 +172,25 @@ def test_partial_paste_failure_is_not_retried_as_unicode_or_discarded() -> None:
     service, _, sender = build_service(Resolver(decision(TargetStatus.READY)))
     sender.paste_error = SendInputError(2, 4)
     result = service.submit("uncertain")
-    assert result.status is InjectionStatus.FAILED
+    assert result.status is InjectionStatus.UNKNOWN
     assert sender.unicode == []
+    assert service.pending_fragments == 0
+
+
+def test_fragment_id_prevents_duplicate_delivery_and_tracks_fifo_status() -> None:
+    resolver = Resolver(decision(TargetStatus.TARGET_INACTIVE))
+    service, _, sender = build_service(resolver)
+    first = service.submit("one", fragment_id="session:1")
+    duplicate = service.submit("one", fragment_id="session:1")
+    assert first.status is InjectionStatus.QUEUED
+    assert duplicate.status is InjectionStatus.DUPLICATE
     assert service.pending_fragments == 1
+    assert service.delivery_status("session:1") is DeliveryStatus.QUEUED_TARGET_INACTIVE
+
+    resolver.current = decision(TargetStatus.READY)
+    assert service.flush().status is InjectionStatus.INSERTED
+    assert sender.pasted == ["one"]
+    assert service.delivery_status("session:1") is DeliveryStatus.DELIVERED
 
 
 def test_pressed_hotkey_modifier_queues_instead_of_triggering_unicode_fallback() -> None:

@@ -22,6 +22,7 @@ class AppStatus(StrEnum):
     TRANSCRIBING = "TRANSCRIBING"
     PAUSED_TARGET_LOST = "PAUSED_TARGET_LOST"
     FINISHING = "FINISHING"
+    COMPLETED = "COMPLETED"
     ERROR_RECOVERABLE = "ERROR_RECOVERABLE"
     ERROR_FATAL = "ERROR_FATAL"
     SHUTTING_DOWN = "SHUTTING_DOWN"
@@ -52,6 +53,8 @@ class AppStatus(StrEnum):
     @property
     def active(self) -> bool:
         return self in {
+            self.STARTING,
+            self.MODEL_LOADING,
             self.LISTENING,
             self.SPEECH_DETECTED,
             self.TRANSCRIBING,
@@ -121,6 +124,8 @@ class UIState:
     model_profile: ModelProfile = ModelProfile.BALANCED
     status_message: str = ""
     error_message: str = ""
+    full_transcript: str = ""
+    delivery_status: str = "pending"
 
     def __post_init__(self) -> None:
         self.state = AppStatus.coerce(self.state)
@@ -208,6 +213,8 @@ def snapshot_from(source: UIState | Mapping[str, Any] | object) -> UIState:
         model_profile=read("model_profile", read("profile", ModelProfile.BALANCED)),
         status_message=read("status_message", read("warning", "")),
         error_message=read("error_message", ""),
+        full_transcript=read("full_transcript", ""),
+        delivery_status=read("delivery_status", "pending"),
     )
 
 

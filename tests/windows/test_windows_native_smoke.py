@@ -133,7 +133,7 @@ def test_notepad_receives_real_unicode_and_clipboard_is_restored(tmp_path: Path)
 
     targets = TargetWindowManager()
     assert targets.start_session().can_inject
-    service = TextInjectionService(targets, clipboard=clipboard, paste_delay=0.2)
+    service = TextInjectionService(targets, clipboard=clipboard, paste_delay=0.35)
     expected = "VoxType smoke: English, Кириллица, 😀.\r\nSecond line"
     result = service.submit(expected)
     assert result.status is InjectionStatus.INSERTED
@@ -193,7 +193,7 @@ def test_locked_target_queues_during_real_window_change_then_returns_fifo(
 
     targets = TargetWindowManager()
     assert targets.start_session().can_inject
-    service = TextInjectionService(targets, paste_delay=0.2)
+    service = TextInjectionService(targets, paste_delay=0.35)
     application = QApplication.instance() or QApplication([])
     other_window = QWidget()
     other_window.setWindowTitle("VoxType target-change smoke")

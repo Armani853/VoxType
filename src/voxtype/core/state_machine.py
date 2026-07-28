@@ -22,6 +22,7 @@ class AppState(StrEnum):
     PAUSED = "paused"
     PAUSED_TARGET_LOST = "paused_target_lost"
     FINISHING = "finishing"
+    COMPLETED = "completed"
     ERROR_RECOVERABLE = "error_recoverable"
     ERROR_FATAL = "error_fatal"
     SHUTTING_DOWN = "shutting_down"
@@ -49,14 +50,27 @@ _COMMON_ACTIVE = {
 
 _ALLOWED: dict[AppState, frozenset[AppState]] = {
     AppState.STARTING: frozenset(
-        {AppState.MODEL_LOADING, AppState.IDLE, AppState.ERROR_FATAL, AppState.SHUTTING_DOWN}
+        {
+            AppState.MODEL_LOADING,
+            AppState.IDLE,
+            AppState.FINISHING,
+            AppState.ERROR_FATAL,
+            AppState.SHUTTING_DOWN,
+        }
     ),
     AppState.MODEL_LOADING: frozenset(
-        {AppState.IDLE, AppState.ERROR_RECOVERABLE, AppState.ERROR_FATAL, AppState.SHUTTING_DOWN}
+        {
+            AppState.IDLE,
+            AppState.FINISHING,
+            AppState.ERROR_RECOVERABLE,
+            AppState.ERROR_FATAL,
+            AppState.SHUTTING_DOWN,
+        }
     ),
     AppState.IDLE: frozenset(
         {
             AppState.MODEL_LOADING,
+            AppState.STARTING,
             AppState.LISTENING,
             AppState.ERROR_RECOVERABLE,
             AppState.ERROR_FATAL,
@@ -71,14 +85,19 @@ _ALLOWED: dict[AppState, frozenset[AppState]] = {
     AppState.FINISHING: frozenset(
         {
             AppState.IDLE,
+            AppState.COMPLETED,
             AppState.ERROR_RECOVERABLE,
             AppState.ERROR_FATAL,
             AppState.SHUTTING_DOWN,
         }
     ),
+    AppState.COMPLETED: frozenset(
+        {AppState.STARTING, AppState.IDLE, AppState.ERROR_FATAL, AppState.SHUTTING_DOWN}
+    ),
     AppState.ERROR_RECOVERABLE: frozenset(
         {
             AppState.IDLE,
+            AppState.STARTING,
             AppState.LISTENING,
             AppState.FINISHING,
             AppState.ERROR_FATAL,

@@ -18,13 +18,14 @@ from .models import (
 
 if PYSIDE6_AVAILABLE:
     from PySide6.QtCore import QPoint, QSettings, Qt, Signal
-    from PySide6.QtGui import QCloseEvent, QMouseEvent, QShowEvent
+    from PySide6.QtGui import QCloseEvent, QKeyEvent, QMouseEvent, QShowEvent
     from PySide6.QtWidgets import (
         QApplication,
         QFrame,
         QGraphicsDropShadowEffect,
         QHBoxLayout,
         QLabel,
+        QPlainTextEdit,
         QPushButton,
         QSizePolicy,
         QVBoxLayout,
@@ -43,6 +44,7 @@ if PYSIDE6_AVAILABLE:
         AppStatus.TRANSCRIBING: ("Обработка", "#7A55C5"),
         AppStatus.PAUSED_TARGET_LOST: ("Цель неактивна", "#D98B16"),
         AppStatus.FINISHING: ("Завершаю", "#7A55C5"),
+        AppStatus.COMPLETED: ("Готово", "#1A9B67"),
         AppStatus.ERROR_RECOVERABLE: ("Внимание", "#D98B16"),
         AppStatus.ERROR_FATAL: ("Ошибка", "#D34A55"),
         AppStatus.SHUTTING_DOWN: ("Завершение", "#657089"),
@@ -54,6 +56,9 @@ if PYSIDE6_AVAILABLE:
         stop_requested = Signal()
         compact_changed = Signal(bool)
         position_changed = Signal(int, int)
+        copy_all_requested = Signal()
+        insert_requested = Signal()
+        close_result_requested = Signal()
 
         def __init__(
             self,
@@ -169,6 +174,12 @@ if PYSIDE6_AVAILABLE:
                 Qt.TextInteractionFlag.TextSelectableByMouse
             )
             expanded_layout.addWidget(self.provisional_label)
+            self.result_text = QPlainTextEdit(self.expanded_panel)
+            self.result_text.setObjectName("overlayResultText")
+            self.result_text.setReadOnly(True)
+            self.result_text.setMaximumHeight(130)
+            self.result_text.hide()
+            expanded_layout.addWidget(self.result_text)
             metadata = QHBoxLayout()
             self.queue_label = QLabel("Очередь: 0.0 с", self.expanded_panel)
             self.queue_label.setObjectName("overlayQueueLabel")
@@ -194,6 +205,18 @@ if PYSIDE6_AVAILABLE:
             buttons.addWidget(self.pause_button)
             buttons.addWidget(self.stop_button)
             expanded_layout.addLayout(buttons)
+            self.result_buttons = QWidget(self.expanded_panel)
+            result_layout = QHBoxLayout(self.result_buttons)
+            result_layout.setContentsMargins(0, 0, 0, 0)
+            result_layout.addStretch(1)
+            self.copy_all_button = QPushButton("Копировать всё", self.result_buttons)
+            self.insert_button = QPushButton("Вставить / повторить", self.result_buttons)
+            self.close_result_button = QPushButton("Закрыть", self.result_buttons)
+            result_layout.addWidget(self.copy_all_button)
+            result_layout.addWidget(self.insert_button)
+            result_layout.addWidget(self.close_result_button)
+            self.result_buttons.hide()
+            expanded_layout.addWidget(self.result_buttons)
             panel_layout.addWidget(self.expanded_panel)
             outer.addWidget(self.panel)
 
@@ -201,6 +224,9 @@ if PYSIDE6_AVAILABLE:
             self.expand_button.clicked.connect(self.toggle_compact)
             self.pause_button.clicked.connect(self.pause_requested)
             self.stop_button.clicked.connect(self.stop_requested)
+            self.copy_all_button.clicked.connect(self.copy_all_requested)
+            self.insert_button.clicked.connect(self.insert_requested)
+            self.close_result_button.clicked.connect(self.close_result_requested)
 
         def bind_controller(self, controller: object) -> None:
             self.unbind_controller()
@@ -231,8 +257,18 @@ if PYSIDE6_AVAILABLE:
             self.timer_label.setText(format_duration(state.session_elapsed_s))
             self.audio_meter.set_level(rms_to_meter(state.input_rms), state.clipping_percentage)
             self.processing_label.setText(self._processing_text(state))
-            transcript = state.provisional_text or state.last_committed_text
-            self.provisional_label.setText(text_preview(transcript, 420) or "Ожидаю речь…")
+            transcript = (
+                state.full_transcript
+                if state.state is AppStatus.COMPLETED
+                else state.provisional_text or state.last_committed_text
+            )
+            completed = state.state is AppStatus.COMPLETED
+            self.provisional_label.setVisible(not completed)
+            self.result_text.setVisible(completed)
+            if completed:
+                self.result_text.setPlainText(transcript)
+            else:
+                self.provisional_label.setText(text_preview(transcript, 420) or "Ожидаю речь…")
             self.queue_label.setText(f"Очередь: {format_backlog(state.queued_audio_seconds)}")
             target = state.target_title or "не выбрана"
             self.target_label.setText(f"Цель: {target}")
@@ -240,6 +276,14 @@ if PYSIDE6_AVAILABLE:
             paused = state.state in {AppStatus.PAUSED, AppStatus.PAUSED_TARGET_LOST}
             self.pause_button.setText("Продолжить" if paused else "Пауза")
             self.stop_button.setEnabled(state.state.active)
+            self.pause_button.setVisible(not completed)
+            self.stop_button.setVisible(not completed)
+            self.result_buttons.setVisible(completed)
+            self.insert_button.setEnabled(
+                state.delivery_status in {"pending", "failed", "queued_target_inactive"}
+            )
+            if completed and self._compact:
+                self.set_compact(False, persist=False)
 
         @staticmethod
         def _processing_text(state: UIState) -> str:
@@ -266,7 +310,7 @@ if PYSIDE6_AVAILABLE:
             )
             self.setFixedWidth(410 if self._compact else 480)
             self.setMinimumHeight(70 if self._compact else 180)
-            self.setMaximumHeight(96 if self._compact else 260)
+            self.setMaximumHeight(96 if self._compact else 380)
             self.adjustSize()
             if persist:
                 self._settings.setValue("ui/overlayCompact", self._compact)
@@ -341,6 +385,13 @@ if PYSIDE6_AVAILABLE:
         def showEvent(self, event: QShowEvent) -> None:
             super().showEvent(event)
             self._apply_windows_no_activate()
+
+        def keyPressEvent(self, event: QKeyEvent) -> None:
+            if event.key() == Qt.Key.Key_Escape and self._state.state is AppStatus.COMPLETED:
+                self.close_result_requested.emit()
+                event.accept()
+                return
+            super().keyPressEvent(event)
 
         def closeEvent(self, event: QCloseEvent) -> None:
             self._save_position()

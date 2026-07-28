@@ -9,7 +9,7 @@ import wave
 from collections import deque
 from collections.abc import Callable
 from pathlib import Path
-from queue import Empty, Queue
+from queue import Empty, Full, Queue
 
 import numpy as np
 
@@ -102,6 +102,10 @@ class ApplicationController:
         self._journal: SessionJournal | None = None
         self._session_id: str | None = None
         self._session_started_monotonic: float | None = None
+        self._session_stopped_monotonic: float | None = None
+        self._completed_duration_s = 0.0
+        self._completed_transcript = ""
+        self._delivery_status = "pending"
         self._capture_started_monotonic: float | None = None
         self._pipeline_thread: threading.Thread | None = None
         self._stop_thread: threading.Thread | None = None
@@ -109,6 +113,7 @@ class ApplicationController:
         self._finish_thread: threading.Thread | None = None
         self._pending_delivery_thread: threading.Thread | None = None
         self._language_switches: deque[tuple[float, Language]] = deque()
+        self._pause_intervals: deque[tuple[float, float | None]] = deque()
         self._worker_language = self._language
         self._user_paused = False
         self._last_fragment = ""
@@ -122,6 +127,14 @@ class ApplicationController:
         self._last_prompt_result_uncertain = False
         self._audio_archive: wave.Wave_write | None = None
         self._shutdown_requested = threading.Event()
+        self._start_cancelled = threading.Event()
+        self._delivery_queue: Queue[tuple[str, str] | None] = Queue(maxsize=256)
+        self._delivery_thread = threading.Thread(
+            target=self._delivery_loop,
+            name="voxtype-text-delivery",
+            daemon=True,
+        )
+        self._delivery_thread.start()
 
     @property
     def state(self) -> AppState:
@@ -164,9 +177,11 @@ class ApplicationController:
 
     def toggle_dictation(self) -> None:
         current = self.state
-        if current in {AppState.IDLE, AppState.ERROR_RECOVERABLE}:
+        if current in {AppState.IDLE, AppState.COMPLETED, AppState.ERROR_RECOVERABLE}:
             self.start_dictation()
         elif current in {
+            AppState.STARTING,
+            AppState.MODEL_LOADING,
             AppState.LISTENING,
             AppState.SPEECH_DETECTED,
             AppState.TRANSCRIBING,
@@ -177,83 +192,130 @@ class ApplicationController:
 
     def start_dictation(self) -> bool:
         with self._lock:
-            if self.state not in {AppState.IDLE, AppState.ERROR_RECOVERABLE}:
+            if self.state not in {
+                AppState.IDLE,
+                AppState.COMPLETED,
+                AppState.ERROR_RECOVERABLE,
+            }:
                 return False
+            self._start_cancelled.clear()
             decision = self.target_manager.start_session()
-            target_name = decision.target.process_name if decision.target is not None else ""
-            profile = self.settings.dictation.model_profile
-            self._session_id = self.session_repository.create(
-                self._language,
-                self.backend.model_id,
-                profile,
-                target_name,
-            )
-            self._journal = SessionJournal(self.session_repository, self._session_id)
-            self._journal.append(
-                "session_started",
-                {
-                    "target_status": decision.status.value,
-                    "language": self._language.value,
-                    "model": self.backend.model_id,
-                },
-            )
-            self.logger.info(
-                "session_started session_id=%s language=%s model=%s profile=%s target_process=%s",
-                self._session_id,
-                self._language.value,
-                self.backend.model_id,
-                profile.value,
-                target_name or "none",
-            )
-            if self.settings.privacy.save_audio:
-                audio_directory = self.session_repository.path.parent / "audio"
-                audio_directory.mkdir(parents=True, exist_ok=True)
-                archive = wave.open(  # noqa: SIM115 - session owns it until finalization
-                    str(audio_directory / f"{self._session_id}.wav"), "wb"
-                )
-                archive.setnchannels(1)
-                archive.setsampwidth(2)
-                archive.setframerate(16_000)
-                self._audio_archive = archive
-            session_spool = self.spool_root / self._session_id
-            self._spool = DiskSpool(session_spool, max_bytes=4 * 1024**3)
-            self._audio_queue = LosslessAudioQueue(
-                max_ram_chunks=128,
-                spool=self._spool,
-                spill_threshold=0.70,
-                max_inflight=2048,
-                durable=True,
-            )
-            self._segmenter = self.segmenter_factory()
-            self._capture = self.capture_factory(self._audio_queue)
-            self._worker_language = self._language
-            self._language_switches.clear()
+            if self.state is AppState.ERROR_RECOVERABLE:
+                self.state_machine.transition(AppState.IDLE, "retry requested")
+            self.state_machine.transition(AppState.STARTING, "user requested dictation")
             self._session_started_monotonic = time.monotonic()
+            self._session_stopped_monotonic = None
+            self._completed_duration_s = 0.0
+            self._completed_transcript = ""
+            self._delivery_status = "pending"
             self._last_fragment = ""
             self._provisional = ""
             self._error_message = ""
-            self._status_message = "Подготовка модели"
+            self._status_message = "Запускаю…"
             self._user_paused = False
             self._processing_seconds = 0.0
             self._prompt_language = None
             self._last_prompt_segment_end_s = None
             self._last_prompt_result_uncertain = False
+            self._pause_intervals.clear()
             self.merger.reset()
-            if self.state is AppState.ERROR_RECOVERABLE:
-                self.state_machine.transition(AppState.IDLE, "retry requested")
-            self.state_machine.transition(AppState.MODEL_LOADING, "starting dictation")
         starter = threading.Thread(
-            target=self._load_and_start_runtime,
+            target=self._prepare_and_start_runtime,
+            args=(decision,),
             name="voxtype-session-starter",
             daemon=True,
         )
         starter.start()
         return True
 
+    def _prepare_and_start_runtime(self, decision: object) -> None:
+        """Build disk/audio/model runtime away from the Qt and hotkey threads."""
+
+        try:
+            target = getattr(decision, "target", None)
+            target_name = target.process_name if target is not None else ""
+            profile = self.settings.dictation.model_profile
+            session_id = self.session_repository.create(
+                self._language,
+                self.backend.model_id,
+                profile,
+                target_name,
+            )
+            journal = SessionJournal(self.session_repository, session_id)
+            journal.append(
+                "session_started",
+                {
+                    "target_status": getattr(getattr(decision, "status", None), "value", "unknown"),
+                    "language": self._language.value,
+                    "model": self.backend.model_id,
+                },
+            )
+            self.logger.info(
+                "session_started session_id=%s language=%s model=%s profile=%s target_process=%s",
+                session_id,
+                self._language.value,
+                self.backend.model_id,
+                profile.value,
+                target_name or "none",
+            )
+            audio_archive: wave.Wave_write | None = None
+            if self.settings.privacy.save_audio:
+                audio_directory = self.session_repository.path.parent / "audio"
+                audio_directory.mkdir(parents=True, exist_ok=True)
+                audio_archive = wave.open(  # noqa: SIM115 - session owns it until finalization
+                    str(audio_directory / f"{session_id}.wav"), "wb"
+                )
+                audio_archive.setnchannels(1)
+                audio_archive.setsampwidth(2)
+                audio_archive.setframerate(16_000)
+            session_spool = self.spool_root / session_id
+            spool = DiskSpool(session_spool, max_bytes=4 * 1024**3)
+            audio_queue = LosslessAudioQueue(
+                max_ram_chunks=128,
+                spool=spool,
+                spill_threshold=0.70,
+                max_inflight=2048,
+                durable=True,
+            )
+            segmenter = self.segmenter_factory()
+            capture = self.capture_factory(audio_queue)
+            with self._lock:
+                self._session_id = session_id
+                self._journal = journal
+                self._audio_archive = audio_archive
+                self._spool = spool
+                self._audio_queue = audio_queue
+                self._segmenter = segmenter
+                self._capture = capture
+                self._worker_language = self._language
+                self._language_switches.clear()
+            if self._start_cancelled.is_set() or self.state is AppState.FINISHING:
+                audio_queue.close()
+                self._finalize_session("cancelled")
+                return
+            self.state_machine.transition_if(
+                {AppState.STARTING}, AppState.MODEL_LOADING, "session runtime prepared"
+            )
+            with self._lock:
+                if self.state is not AppState.MODEL_LOADING:
+                    audio_queue.close()
+                    self._finalize_session("cancelled")
+                    return
+                self._status_message = "Подготовка модели"
+            self._load_and_start_runtime()
+        except Exception as exc:
+            self._handle_runtime_error("Не удалось начать диктовку", exc)
+
     def _load_and_start_runtime(self) -> None:
         try:
+            if self._start_cancelled.is_set():
+                self._finalize_session("cancelled")
+                return
             self.backend.load()
             with self._lock:
+                if self._start_cancelled.is_set():
+                    self._finalize_session("cancelled")
+                    return
                 if self._shutdown_requested.is_set():
                     raise RuntimeError("shutdown requested while loading model")
                 audio_queue = self._audio_queue
@@ -269,16 +331,20 @@ class ApplicationController:
                 capture.start()
                 self._capture_started_monotonic = time.monotonic()
                 self._status_message = "Слушаю"
-            if self.state is AppState.MODEL_LOADING:
-                self.state_machine.transition(AppState.IDLE, "model ready for session")
-            if self.state is AppState.IDLE:
-                self.state_machine.transition(AppState.LISTENING, "microphone capture started")
+            self.state_machine.transition_if(
+                {AppState.MODEL_LOADING}, AppState.IDLE, "model ready for session"
+            )
+            self.state_machine.transition_if(
+                {AppState.IDLE}, AppState.LISTENING, "microphone capture started"
+            )
         except Exception as exc:
             self._handle_runtime_error("Не удалось начать диктовку", exc)
 
     def stop_dictation(self) -> bool:
         with self._lock:
             if self.state not in {
+                AppState.STARTING,
+                AppState.MODEL_LOADING,
                 AppState.LISTENING,
                 AppState.SPEECH_DETECTED,
                 AppState.TRANSCRIBING,
@@ -286,10 +352,17 @@ class ApplicationController:
                 AppState.PAUSED_TARGET_LOST,
             }:
                 return False
+            was_starting = self.state in {AppState.STARTING, AppState.MODEL_LOADING}
+            self._start_cancelled.set()
+            self._session_stopped_monotonic = time.monotonic()
             self.state_machine.transition(AppState.FINISHING, "user stopped dictation")
-            self._status_message = "Обрабатываю оставшийся звук"
+            self._status_message = (
+                "Отменяю запуск" if was_starting else "Обрабатываю оставшийся звук"
+            )
             capture = self._capture
             audio_queue = self._audio_queue
+            if was_starting:
+                return True
         stopper = threading.Thread(
             target=self._stop_capture_and_drain,
             args=(capture, audio_queue),
@@ -340,6 +413,7 @@ class ApplicationController:
                 pipeline.join(timeout=0.25)
                 if self._shutdown_requested.is_set() and pipeline.is_alive():
                     self._status_message = "Ожидаю завершения локального inference"
+        self._delivery_queue.join()
         self._complete_session("completed" if not self._error_message else "error")
 
     def _pipeline_loop(self) -> None:
@@ -385,6 +459,9 @@ class ApplicationController:
                     continue
                 if lease.chunk.input_overflow:
                     raise RuntimeError("PortAudio input overflow detected")
+                if self._captured_during_pause(lease.chunk.captured_at):
+                    audio_queue.ack(lease)
+                    continue
                 if self._apply_language_switches(lease.chunk.captured_at, segmenter):
                     ack_pending()
                 pending.append(lease)
@@ -542,55 +619,25 @@ class ApplicationController:
             if journal is None:
                 raise RuntimeError("committed text has no active journal")
             journal.commit_text(outcome.insertion_text)
-            injection = (
-                self.injection_service.submit(outcome.insertion_text)
-                if self.settings.dictation.auto_insert
-                else None
-            )
             with self._lock:
                 self._last_fragment = outcome.insertion_text.strip()
                 self._provisional = ""
-                if injection is None:
+                if not self.settings.dictation.auto_insert:
+                    self._delivery_status = "pending"
                     self._status_message = "Текст сохранён в истории; автовставка выключена"
-                elif injection.status in {InjectionStatus.QUEUED, InjectionStatus.BLOCKED}:
-                    reason = self._target_warning(injection.target_status)
-                    self._status_message = reason
-                    self._error_message = (
-                        f"{reason}. Вернитесь в целевое окно или используйте «Копировать текст»."
-                    )
-                elif injection.status is InjectionStatus.FAILED:
-                    self._status_message = "Вставка не удалась; текст сохранён"
-                    self._error_message = (
-                        "Вставка не удалась. Текст сохранён — используйте «Копировать текст»."
-                    )
                 else:
-                    self._error_message = ""
-            if injection is not None and injection.status in {
-                InjectionStatus.QUEUED,
-                InjectionStatus.BLOCKED,
-            }:
-                self.state_machine.transition_if(
-                    {
-                        AppState.LISTENING,
-                        AppState.SPEECH_DETECTED,
-                        AppState.TRANSCRIBING,
-                    },
-                    AppState.PAUSED_TARGET_LOST,
-                    "target unavailable for injection",
-                )
-                self.logger.warning(
-                    "injection_deferred session_id=%s status=%s target_status=%s pending=%d",
-                    self._session_id or "none",
-                    injection.status.value,
-                    getattr(injection.target_status, "value", "unknown"),
-                    injection.pending_fragments,
-                )
-            elif injection is not None and not self._user_paused:
-                self.state_machine.transition_if(
-                    {AppState.PAUSED_TARGET_LOST},
-                    AppState.LISTENING,
-                    "target became available",
-                )
+                    self._delivery_status = "pending"
+                    self._status_message = "Подтверждённый текст ожидает вставки"
+            if self.settings.dictation.auto_insert:
+                fragment_id = f"{self._session_id or 'none'}:{segment.sequence}"
+                try:
+                    self._delivery_queue.put_nowait((fragment_id, outcome.insertion_text))
+                except Full:
+                    with self._lock:
+                        self._delivery_status = "failed"
+                        self._error_message = (
+                            "Очередь вставки заполнена; весь текст сохранён в результате"
+                        )
         else:
             with self._lock:
                 self._provisional = ""
@@ -599,6 +646,69 @@ class ApplicationController:
             AppState.LISTENING,
             "segment committed",
         )
+
+    def _delivery_loop(self) -> None:
+        """Single bounded FIFO owner for every automatic target insertion."""
+
+        while True:
+            item = self._delivery_queue.get()
+            try:
+                if item is None:
+                    return
+                fragment_id, text = item
+                try:
+                    injection = (
+                        self.injection_service.submit(text, fragment_id=fragment_id)
+                        if isinstance(self.injection_service, TextInjectionService)
+                        else self.injection_service.submit(text)
+                    )
+                except Exception as exc:
+                    self.logger.warning("delivery_failed kind=%s", type(exc).__name__)
+                    with self._lock:
+                        self._delivery_status = "failed"
+                        self._error_message = "Вставка не удалась; весь текст сохранён"
+                    continue
+                with self._lock:
+                    if injection.status in {
+                        InjectionStatus.QUEUED,
+                        InjectionStatus.BLOCKED,
+                    }:
+                        self._delivery_status = "queued_target_inactive"
+                        reason = self._target_warning(injection.target_status)
+                        self._status_message = reason
+                        self._error_message = (
+                            f"{reason}. Вернитесь в целевое окно или скопируйте весь текст."
+                        )
+                    elif injection.status in {
+                        InjectionStatus.FAILED,
+                        InjectionStatus.UNKNOWN,
+                    }:
+                        self._delivery_status = "failed"
+                        self._status_message = "Вставка не удалась; текст сохранён"
+                        self._error_message = (
+                            "Вставка не подтверждена. Автоповтор отключён во избежание дубля."
+                        )
+                    else:
+                        self._delivery_status = "delivered"
+                        self._error_message = ""
+                if injection.status in {InjectionStatus.QUEUED, InjectionStatus.BLOCKED}:
+                    self.state_machine.transition_if(
+                        {
+                            AppState.LISTENING,
+                            AppState.SPEECH_DETECTED,
+                            AppState.TRANSCRIBING,
+                        },
+                        AppState.PAUSED_TARGET_LOST,
+                        "target unavailable for injection",
+                    )
+                elif not self._user_paused:
+                    self.state_machine.transition_if(
+                        {AppState.PAUSED_TARGET_LOST},
+                        AppState.LISTENING,
+                        "target became available",
+                    )
+            finally:
+                self._delivery_queue.task_done()
 
     def _safe_prompt_context(
         self,
@@ -844,6 +954,7 @@ class ApplicationController:
         )
 
     def toggle_pause(self) -> bool:
+        boundary = time.time()
         with self._lock:
             if self.state not in {
                 AppState.LISTENING,
@@ -857,6 +968,7 @@ class ApplicationController:
             audio_queue = self._audio_queue
             if not self._user_paused:
                 self._user_paused = True
+                self._pause_intervals.append((boundary, None))
                 self._status_message = "Пауза"
                 if self.state is not AppState.PAUSED:
                     self.state_machine.transition(AppState.PAUSED, "user paused capture")
@@ -864,6 +976,9 @@ class ApplicationController:
                 if audio_queue is None:
                     return False
                 self._user_paused = False
+                if self._pause_intervals and self._pause_intervals[-1][1] is None:
+                    started, _ = self._pause_intervals[-1]
+                    self._pause_intervals[-1] = (started, boundary)
                 decision = self.target_manager.resolve()
                 target_ready = decision.status.value == "ready"
                 target_state = AppState.LISTENING if target_ready else AppState.PAUSED_TARGET_LOST
@@ -895,6 +1010,15 @@ class ApplicationController:
             pauser.start()
         return True
 
+    def _captured_during_pause(self, captured_at: float) -> bool:
+        """Reject callback chunks captured after Pause and before Resume."""
+
+        with self._lock:
+            return any(
+                captured_at >= started and (ended is None or captured_at < ended)
+                for started, ended in self._pause_intervals
+            )
+
     def _resume_capture(
         self,
         audio_queue: LosslessAudioQueue,
@@ -922,7 +1046,12 @@ class ApplicationController:
             capture = self._capture
             stats = capture.stats() if capture is not None else self._last_stats
             started = self._session_started_monotonic
-            elapsed = time.monotonic() - started if started is not None else 0.0
+            stopped = self._session_stopped_monotonic
+            elapsed = (
+                (stopped if stopped is not None else time.monotonic()) - started
+                if started is not None
+                else self._completed_duration_s
+            )
             if (
                 getattr(self.target_manager, "policy", TargetPolicy.LOCKED)
                 is TargetPolicy.FOLLOW_FOCUS
@@ -949,6 +1078,8 @@ class ApplicationController:
                 model_profile=self.settings.dictation.model_profile,
                 status_message=self._status_message,
                 error_message=self._error_message,
+                full_transcript=self.merger.committed_text or self._completed_transcript,
+                delivery_status=self._delivery_status,
             )
 
     def sample_resources(self) -> None:
@@ -1012,24 +1143,9 @@ class ApplicationController:
         self._handle_runtime_error("Ошибка интерфейса; накопленный текст сохранён", error)
 
     def _complete_session(self, status: str) -> None:
-        pending = int(getattr(self.injection_service, "pending_fragments", 0))
-        if status == "completed" and pending > 0 and not self._shutdown_requested.is_set():
-            with self._lock:
-                self._status_message = (
-                    "Распознавание завершено; вернитесь в целевое окно для вставки"
-                )
-            delivery = threading.Thread(
-                target=self._drain_pending_injection,
-                name="voxtype-pending-injection",
-                daemon=True,
-            )
-            with self._lock:
-                existing = self._pending_delivery_thread
-                if existing is not None and existing.is_alive():
-                    return
-                self._pending_delivery_thread = delivery
-            delivery.start()
-            return
+        # A completed recording is a durable user-visible state. Target loss must
+        # not keep the UI in FINISHING for 30 seconds: the FIFO remains available
+        # for explicit retry/copy from the completed-result panel.
         self._finalize_session(status)
 
     def _drain_pending_injection(self) -> None:
@@ -1076,10 +1192,44 @@ class ApplicationController:
             self._finalize_session("completed_safe_copy")
         return result.delivered_text
 
+    def copy_full_transcript(self) -> bool:
+        """Copy the complete durable result; intended for a background UI worker."""
+
+        with self._lock:
+            text = self.merger.committed_text or self._completed_transcript
+        copied = self.injection_service.copy_text_to_clipboard(text)
+        with self._lock:
+            if copied:
+                self._status_message = "Весь текст скопирован"
+            else:
+                self._error_message = "Не удалось скопировать текст"
+        return copied
+
+    def retry_completed_insertion(self) -> bool:
+        """Retry retained FIFO without blocking a Qt handler."""
+
+        result = self.injection_service.flush()
+        with self._lock:
+            if result.status is InjectionStatus.INSERTED:
+                self._delivery_status = "delivered"
+                self._status_message = "Текст вставлен"
+                self._error_message = ""
+                return True
+            if result.status in {InjectionStatus.QUEUED, InjectionStatus.BLOCKED}:
+                self._delivery_status = "queued_target_inactive"
+                self._status_message = "Целевое окно неактивно; текст сохранён"
+            else:
+                self._delivery_status = "failed"
+                self._error_message = "Вставка не удалась; весь текст можно скопировать"
+        return False
+
     def _finalize_session(self, status: str, *, requires_recovery: bool = False) -> None:
         with self._lock:
             session_id = self._session_id
             if session_id is None:
+                if self.state is AppState.FINISHING:
+                    self._status_message = "Остановлено"
+                    self.state_machine.transition(AppState.COMPLETED, "empty session stopped")
                 return
             # Claim finalization before I/O so safe-copy and foreground polling
             # cannot finish the same SQLite session concurrently.
@@ -1089,6 +1239,9 @@ class ApplicationController:
             audio_archive = self._audio_archive
             self._audio_archive = None
             stats = capture.stats() if capture is not None else self._last_stats
+            completed_text = self.merger.committed_text
+            started = self._session_started_monotonic
+            stopped = self._session_stopped_monotonic or time.monotonic()
         if session_id is not None:
             if stats is not None:
                 self.session_repository.update_metrics(
@@ -1125,17 +1278,38 @@ class ApplicationController:
             self._spool = None
             self._segmenter = None
             self._journal = None
+            self._completed_transcript = completed_text
+            self._completed_duration_s = max(0.0, stopped - started) if started is not None else 0.0
             self._session_started_monotonic = None
+            self._session_stopped_monotonic = None
             self._capture_started_monotonic = None
             self._pipeline_thread = None
             self._pending_delivery_thread = None
             self._status_message = "Готово" if status == "completed" else self._status_message
+            if not self.settings.dictation.auto_insert:
+                self._delivery_status = "pending"
+            elif self._delivery_status != "failed":
+                self._delivery_status = (
+                    "delivered"
+                    if int(getattr(self.injection_service, "pending_fragments", 0)) == 0
+                    else "queued_target_inactive"
+                )
             self._user_paused = False
         if self.state is AppState.FINISHING:
-            self.state_machine.transition(AppState.IDLE, "session drained and committed")
+            self.state_machine.transition(AppState.COMPLETED, "session drained and committed")
+            if self.settings.dictation.copy_full_text_on_complete and completed_text:
+                copier = getattr(self.injection_service, "copy_text_to_clipboard", None)
+                copied = bool(copier(completed_text)) if callable(copier) else False
+                with self._lock:
+                    if copied:
+                        self._status_message = "Готово — весь текст скопирован"
+                    else:
+                        self._error_message = "Текст сохранён, но буфер обмена недоступен"
 
     def shutdown(self) -> bool:
         self._shutdown_requested.set()
+        if self.state in {AppState.STARTING, AppState.MODEL_LOADING}:
+            self._start_cancelled.set()
         if self.state is AppState.MODEL_LOADING and self._session_id is not None:
             with self._lock:
                 audio_queue = self._audio_queue
@@ -1148,6 +1322,8 @@ class ApplicationController:
             AppState.TRANSCRIBING,
             AppState.PAUSED,
             AppState.PAUSED_TARGET_LOST,
+            AppState.STARTING,
+            AppState.MODEL_LOADING,
         }:
             self.stop_dictation()
         with self._lock:
@@ -1170,6 +1346,16 @@ class ApplicationController:
                 self.logger.exception("shutdown_transition_failed")
         if pipeline_alive:
             self.logger.error("shutdown_deferred pipeline_still_running=true")
+            return False
+        try:
+            self._delivery_queue.put(None, timeout=1.0)
+        except Full:
+            self.logger.error("shutdown_deferred delivery_queue_full=true")
+            return False
+        if self._delivery_thread is not threading.current_thread():
+            self._delivery_thread.join(timeout=2.0)
+        if self._delivery_thread.is_alive():
+            self.logger.error("shutdown_deferred delivery_worker_alive=true")
             return False
         self.injection_service.close()
         return True

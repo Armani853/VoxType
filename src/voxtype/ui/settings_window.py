@@ -185,6 +185,12 @@ if PYSIDE6_AVAILABLE:
             )
             self.vocabulary_edit.setMaximumHeight(110)
             self.auto_insert_check = QCheckBox("Автоматически вставлять подтверждённый текст", page)
+            self.copy_complete_check = QCheckBox(
+                "Копировать весь текст в буфер после завершения", page
+            )
+            self.auto_hide_result_check = QCheckBox(
+                "Автоматически скрывать результат после завершения", page
+            )
             self.safe_clipboard_check = QCheckBox("Безопасный режим буфера обмена", page)
             self.target_policy_combo = self._combo(
                 (("Закрепить окно при старте", "locked"), ("Следовать за фокусом", "follow_focus")),
@@ -201,6 +207,8 @@ if PYSIDE6_AVAILABLE:
             form.addRow(self.voice_commands_check)
             form.addRow("Пользовательский словарь", self.vocabulary_edit)
             form.addRow(self.auto_insert_check)
+            form.addRow(self.copy_complete_check)
+            form.addRow(self.auto_hide_result_check)
             form.addRow(self.safe_clipboard_check)
             form.addRow("Целевое окно", self.target_policy_combo)
             form.addRow("Задержка перед вставкой", self.insertion_delay_spin)
@@ -380,6 +388,8 @@ if PYSIDE6_AVAILABLE:
                 self.sounds_check,
                 self.voice_commands_check,
                 self.auto_insert_check,
+                self.copy_complete_check,
+                self.auto_hide_result_check,
                 self.safe_clipboard_check,
                 self.spacing_check,
                 self.capitalize_check,
@@ -458,6 +468,8 @@ if PYSIDE6_AVAILABLE:
                         if line.strip()
                     ][:200],
                     "auto_insert": self.auto_insert_check.isChecked(),
+                    "copy_full_text_on_complete": self.copy_complete_check.isChecked(),
+                    "auto_hide_completed_result": self.auto_hide_result_check.isChecked(),
                     "injection_mode": (
                         "safe_clipboard"
                         if self.safe_clipboard_check.isChecked()
@@ -536,6 +548,12 @@ if PYSIDE6_AVAILABLE:
                 self.auto_insert_check.setChecked(
                     bool(_setting(dictation, "auto_insert", default=True))
                 )
+                self.copy_complete_check.setChecked(
+                    bool(_setting(dictation, "copy_full_text_on_complete", default=True))
+                )
+                self.auto_hide_result_check.setChecked(
+                    bool(_setting(dictation, "auto_hide_completed_result", default=False))
+                )
                 injection_mode = _setting(
                     dictation, "injection_mode", "safe_clipboard", default="safe_clipboard"
                 )
@@ -550,7 +568,7 @@ if PYSIDE6_AVAILABLE:
                     _setting(dictation, "target_mode", "target_policy", default="locked"),
                 )
                 self.insertion_delay_spin.setValue(
-                    int(str(_setting(dictation, "insertion_delay_ms", default=80)))
+                    int(str(_setting(dictation, "insertion_delay_ms", default=350)))
                 )
                 self.spacing_check.setChecked(
                     bool(

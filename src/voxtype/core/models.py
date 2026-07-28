@@ -131,3 +131,5 @@ class ControllerSnapshot:
     model_profile: ModelProfile = ModelProfile.BALANCED
     status_message: str = ""
     error_message: str = ""
+    full_transcript: str = ""
+    delivery_status: str = "pending"
