@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.2.1
+
+- Fixed microphone calibration rejecting quiet but clearly separated speech:
+  calibration now reports explicit result states, keeps completed progress at
+  100%, and uses the same float32 PCM/device/sample-rate contract as capture.
+- Fixed History filters leaving a hidden session in the detail pane, added a
+  strict visible-selection invariant and made the base table fit without a
+  horizontal scrollbar.
+- Made first-run pages more compact with an exact step indicator, simplified
+  privacy text, human-friendly mode names and useful listening/processing text.
+- Made low but usable microphone levels visible on the main, settings and
+  overlay meters through a dBFS display mapping without changing ASR PCM.
+- Made Balanced Local the first-run default and added an isolated data/cache
+  override used to verify a truly clean profile without touching user data.
+- Hardened model installation against Hugging Face/Xet stalls with bounded HTTP,
+  progress reporting and a direct HTTPS fallback inside the existing atomic
+  marker/rename state machine.
+- Verified the daily-use pipeline with a 5-minute 300-chunk run, deterministic
+  SAPI RU/EN, crash recovery, hotkey/target/clipboard regression tests and an
+  installer install/self-test/uninstall smoke.
+
 ## 0.2.0
 
 - Fixed stateful Silero VAD input context so real microphone speech reaches ASR.

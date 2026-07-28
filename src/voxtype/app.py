@@ -24,6 +24,11 @@ from voxtype.asr.base import TranscriptionRequest
 from voxtype.asr.benchmark import BenchmarkCase, benchmark_backend, save_benchmark_results
 from voxtype.asr.model_manager import DEFAULT_MODEL_SPECS
 from voxtype.asr.profiles import ASRProfile
+from voxtype.audio.calibration import (
+    CalibrationResult,
+    analyze_calibration,
+    device_error_result,
+)
 from voxtype.audio.capture import AudioCaptureConfig, AudioCaptureService
 from voxtype.audio.devices import choose_capture_rate, list_input_devices
 from voxtype.audio.preprocessing import (
@@ -64,7 +69,8 @@ _LOGGER = logging.getLogger("voxtype.app")
 class _WorkerSignals(QObject):
     model_progress = Signal(int, str)
     model_ready = Signal(bool, str, str)
-    calibration_ready = Signal(bool, str)
+    calibration_progress = Signal(int, str)
+    calibration_ready = Signal(object)
     phrase_ready = Signal(str, str, bool)
     diagnostics_ready = Signal(object)
     settings_status = Signal(str, object)
@@ -141,7 +147,7 @@ class DesktopApplication:
         )
         self.hotkey_filter = _HotkeyEventFilter(self.hotkeys, self.power_events, self.close)
         self.timer = QTimer(self.main)
-        self.timer.setInterval(100)
+        self.timer.setInterval(50)
         self._last_state = ""
         self._last_pending_flush = 0.0
         self._last_resource_sample = 0.0
@@ -202,6 +208,7 @@ class DesktopApplication:
         self.diagnostics_window.export_requested.connect(self._export_diagnostics)
         self.signals.model_progress.connect(self._on_model_progress)
         self.signals.model_ready.connect(self._on_model_ready)
+        self.signals.calibration_progress.connect(self._on_calibration_progress)
         self.signals.calibration_ready.connect(self._on_calibration_ready)
         self.signals.phrase_ready.connect(self._on_phrase_ready)
         self.signals.diagnostics_ready.connect(self._on_diagnostics_ready)
@@ -625,36 +632,62 @@ class DesktopApplication:
             device = self.runtime.device.index
 
         def worker() -> None:
+            capture_rate = 48_000
             try:
                 import sounddevice as sd
 
-                audio = sd.rec(
-                    48_000 * 4, samplerate=48_000, channels=1, dtype="float32", device=device
+                selected = next(
+                    (candidate for candidate in self.runtime.devices if candidate.index == device),
+                    self.runtime.device,
                 )
-                sd.wait()
-                mono = np.asarray(audio, dtype=np.float32).reshape(-1)
-                silence = mono[: 48_000 * 3 // 2]
-                speech = mono[48_000 * 3 // 2 :]
-                noise_rms = float(np.sqrt(np.mean(np.square(silence, dtype=np.float64))))
-                speech_rms = float(np.sqrt(np.mean(np.square(speech, dtype=np.float64))))
-                clipping = float(np.mean(np.abs(speech) >= 0.98) * 100.0)
-                separation_db = 20 * np.log10(max(speech_rms, 1e-9) / max(noise_rms, 1e-9))
-                ok = speech_rms > 0.003 and separation_db >= 6.0 and clipping < 0.5
-                message = (
-                    f"Шум {20 * np.log10(max(noise_rms, 1e-9)):.1f} dBFS; "
-                    f"речь {20 * np.log10(max(speech_rms, 1e-9)):.1f} dBFS; "
-                    f"запас {separation_db:.1f} dB; клиппинг {clipping:.2f}% — "
-                    + ("норма" if ok else "проверьте уровень и повторите")
+                capture_rate = choose_capture_rate(selected)
+                silence_blocks: list[np.ndarray[Any, np.dtype[np.float32]]] = []
+                speech_blocks: list[np.ndarray[Any, np.dtype[np.float32]]] = []
+                phase_seconds = ((2.5, silence_blocks), (5.0, speech_blocks))
+                block_frames = max(1, round(capture_rate * 0.1))
+                with sd.InputStream(
+                    device=device,
+                    samplerate=capture_rate,
+                    channels=1,
+                    dtype="float32",
+                    blocksize=block_frames,
+                ) as stream:
+                    elapsed_total = 0.0
+                    for phase_index, (duration, destination) in enumerate(phase_seconds):
+                        phase_frames = round(capture_rate * duration)
+                        captured = 0
+                        while captured < phase_frames:
+                            frames = min(block_frames, phase_frames - captured)
+                            block, _overflowed = stream.read(frames)
+                            destination.append(np.asarray(block, dtype=np.float32).copy())
+                            captured += frames
+                            elapsed_total += frames / capture_rate
+                            percent = min(89, round(elapsed_total / 7.5 * 90))
+                            instruction = (
+                                "Пожалуйста, помолчите 2–3 секунды."
+                                if phase_index == 0
+                                else "Теперь произнесите обычным голосом несколько предложений."
+                            )
+                            self.signals.calibration_progress.emit(percent, instruction)
+                self.signals.calibration_progress.emit(90, "Анализирую измеренный сигнал…")
+                result = analyze_calibration(
+                    np.concatenate(silence_blocks),
+                    np.concatenate(speech_blocks),
+                    sample_rate=capture_rate,
                 )
             except Exception as exc:
-                ok, message = False, f"Калибровка не завершена: {type(exc).__name__}"
-            self.signals.calibration_ready.emit(ok, message)
+                result = device_error_result(type(exc).__name__, sample_rate=capture_rate)
+            self.signals.calibration_ready.emit(result)
 
         threading.Thread(target=worker, name="voxtype-calibration", daemon=True).start()
 
-    def _on_calibration_ready(self, ok: bool, message: str) -> None:
+    def _on_calibration_progress(self, percent: int, message: str) -> None:
         if self.onboarding is not None:
-            self.onboarding.set_calibration_result(ok, message)
+            self.onboarding.set_calibration_progress(percent, message)
+
+    def _on_calibration_ready(self, result: CalibrationResult) -> None:
+        if self.onboarding is not None:
+            self.onboarding.set_calibration_result(result)
 
     def _on_audio_level(self, level: float, clipping: float, message: str) -> None:
         if self.onboarding is not None and self.onboarding.isVisible():
@@ -787,12 +820,9 @@ class DesktopApplication:
                     device=device,
                 )
                 sd.wait()
-                peak = float(np.max(np.abs(audio)))
                 rms = float(np.sqrt(np.mean(np.square(audio, dtype=np.float64))))
                 clipping = float(np.mean(np.abs(audio) >= 0.98) * 100.0)
-                self.signals.audio_level.emit(
-                    min(1.0, rms * 8.0), clipping, f"Peak {peak:.2f}; RMS {rms:.4f}"
-                )
+                self.signals.audio_level.emit(rms, clipping, "Говорите обычным голосом")
             except Exception as exc:
                 self.signals.audio_level.emit(
                     0.0, 0.0, f"Тест микрофона не завершён: {type(exc).__name__}"

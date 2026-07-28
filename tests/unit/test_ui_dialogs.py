@@ -66,7 +66,7 @@ def test_settings_accepts_slots_based_application_schema(qtbot) -> None:  # type
     assert values["general"]["start_with_windows"] is True
     assert values["general"]["ui_language"] == "ru"
     assert values["dictation"]["target_mode"] == "locked"
-    assert values["dictation"]["model_profile"] == "fast"
+    assert values["dictation"]["model_profile"] == "balanced"
     assert values["audio"]["device_id"] == 3
     assert values["model"]["installed_model"] == "small"
 
@@ -102,6 +102,70 @@ def test_history_filters_displays_and_copies(qtbot) -> None:  # type: ignore[no-
     window.search_edit.setText("English")
     hidden = [window.table.isRowHidden(row) for row in range(window.table.rowCount())]
     assert hidden.count(False) == 1
+    assert window.selected_session_id() == "two"
+    assert window.detail_session_id == "two"
+    assert window.visible_session_ids == {"two"}
+    assert window.text_edit.toPlainText() == "English text"
+    assert "EN" in window.metadata_label.text()
+    assert "Notepad" in window.metadata_label.text()
+
+    window.search_edit.setText("no matching transcript")
+    assert window.visible_session_ids == set()
+    assert window.detail_session_id is None
+    assert window.text_edit.toPlainText() == ""
+    assert window.metadata_label.text() == "Выберите запись в истории"
+    assert window.empty_label.text() == "Записей не найдено"
+
+
+def test_history_language_filter_never_keeps_stale_detail_and_delete_selects_next(
+    qtbot,
+) -> None:  # type: ignore[no-untyped-def]
+    window = HistoryWindow()
+    qtbot.addWidget(window)
+    window.resize(1200, 650)
+    window.set_sessions(
+        [
+            HistoryEntry(
+                session_id="ru",
+                started_at=datetime(2026, 7, 22, 10, 0),
+                language="ru",  # type: ignore[arg-type]
+                confirmed_text="Русский текст",
+                target_application="Блокнот",
+            ),
+            HistoryEntry(
+                session_id="en-new",
+                started_at=datetime(2026, 7, 21, 10, 0),
+                language="en",  # type: ignore[arg-type]
+                confirmed_text="New English",
+                target_application="Browser",
+                completion_status="recovered",
+            ),
+            HistoryEntry(
+                session_id="en-old",
+                started_at=datetime(2026, 7, 20, 10, 0),
+                language="en",  # type: ignore[arg-type]
+                confirmed_text="Old English",
+                target_application="Notepad",
+            ),
+        ]
+    )
+    window.language_filter.setCurrentIndex(window.language_filter.findData("en"))
+    assert window.selected_session_id() == "en-new"
+    assert window.detail_session_id == "en-new"
+    assert window.detail_session_id in window.visible_session_ids
+    assert "EN" in window.metadata_label.text()
+    assert "Восстановлено" in window.metadata_label.text()
+
+    window.remove_session("en-new")
+    assert window.selected_session_id() == "en-old"
+    assert window.detail_session_id == "en-old"
+    assert window.text_edit.toPlainText() == "Old English"
+    assert window.detail_session_id in window.visible_session_ids
+
+    window.show()
+    QGuiApplication.processEvents()
+    assert window.table.horizontalScrollBarPolicy() is Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+    assert not window.table.horizontalScrollBar().isVisible()
 
 
 def test_diagnostics_renders_and_copies_report(qtbot) -> None:  # type: ignore[no-untyped-def]

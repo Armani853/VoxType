@@ -56,6 +56,7 @@ def test_overlay_is_nonactivating_and_has_both_modes(qtbot) -> None:  # type: ig
     assert overlay.status_label.text() == "Обработка"
     assert overlay.language_label.text() == "EN"
     assert overlay.timer_label.text() == "00:00:12"
+    assert overlay.processing_label.text() == "LOCAL"
 
     overlay.set_compact(False)
     assert not overlay.is_compact()

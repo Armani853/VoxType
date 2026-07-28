@@ -27,7 +27,7 @@ if (-not $SkipChecks) {
 }
 
 Write-Host '[3/6] Cleaning old packaging output'
-foreach ($Target in @($BuildRoot, $AssetRoot, $PortableRoot, $ReleaseRoot)) {
+foreach ($Target in @($BuildRoot, $AssetRoot, $PortableRoot)) {
     $FullTarget = [IO.Path]::GetFullPath($Target)
     if (-not $FullTarget.StartsWith($RepoRoot, [StringComparison]::OrdinalIgnoreCase)) {
         throw "Unsafe build target: $FullTarget"
@@ -37,6 +37,15 @@ foreach ($Target in @($BuildRoot, $AssetRoot, $PortableRoot, $ReleaseRoot)) {
     }
 }
 New-Item -ItemType Directory -Path $BuildRoot, $DistRoot, $ReleaseRoot -Force | Out-Null
+$CurrentReleaseFiles = @(
+    (Join-Path $ReleaseRoot 'VoxType-0.2.1-win64-portable.zip')
+    (Join-Path $ReleaseRoot 'VoxType-0.2.1-win64-portable.zip.sha256')
+)
+foreach ($CurrentReleaseFile in $CurrentReleaseFiles) {
+    if (Test-Path -LiteralPath $CurrentReleaseFile) {
+        Remove-Item -LiteralPath $CurrentReleaseFile -Force
+    }
+}
 
 Write-Host '[3/6] Preparing pinned VAD and native icon assets'
 & $Python (Join-Path $RepoRoot 'tools\prepare_packaging_assets.py') --output $AssetRoot --icon-svg $IconSvg
@@ -73,8 +82,8 @@ $NuitkaArguments = @(
     '--windows-company-name=VoxType',
     '--windows-product-name=VoxType',
     '--windows-file-description=Local continuous dictation',
-    '--windows-file-version=0.2.0.0',
-    '--windows-product-version=0.2.0.0',
+    '--windows-file-version=0.2.1.0',
+    '--windows-product-version=0.2.1.0',
     '--output-filename=VoxType.exe',
     "--output-dir=$BuildRoot",
     $EntryPoint
@@ -111,10 +120,10 @@ finally {
 }
 
 Write-Host '[6/6] Creating ZIP and SHA-256 checksum'
-$Archive = Join-Path $ReleaseRoot 'VoxType-0.2.0-win64-portable.zip'
+$Archive = Join-Path $ReleaseRoot 'VoxType-0.2.1-win64-portable.zip'
 Compress-Archive -LiteralPath $PortableRoot -DestinationPath $Archive -CompressionLevel Optimal
 $Hash = Get-FileHash -Algorithm SHA256 -LiteralPath $Archive
-$Checksum = Join-Path $ReleaseRoot 'VoxType-0.2.0-win64-portable.zip.sha256'
+$Checksum = Join-Path $ReleaseRoot 'VoxType-0.2.1-win64-portable.zip.sha256'
 Set-Content -LiteralPath $Checksum -Encoding ascii -Value "$($Hash.Hash.ToLowerInvariant())  $($Hash.Path | Split-Path -Leaf)"
 Write-Host "Portable: $PortableRoot"
 Write-Host "Archive:  $Archive"

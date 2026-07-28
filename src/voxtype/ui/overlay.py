@@ -32,7 +32,7 @@ if PYSIDE6_AVAILABLE:
     )
 
     from .theme import create_app_icon
-    from .widgets import AudioLevelMeter, StatusDot
+    from .widgets import AudioLevelMeter, StatusDot, rms_to_meter
 
     _OVERLAY_STATES: dict[AppStatus, tuple[str, str]] = {
         AppStatus.STARTING: ("Запуск", "#657089"),
@@ -229,7 +229,7 @@ if PYSIDE6_AVAILABLE:
             self.status_dot.set_color(color)
             self.language_label.setText(state.language.value.upper())
             self.timer_label.setText(format_duration(state.session_elapsed_s))
-            self.audio_meter.set_level(state.input_rms, state.clipping_percentage)
+            self.audio_meter.set_level(rms_to_meter(state.input_rms), state.clipping_percentage)
             self.processing_label.setText(self._processing_text(state))
             transcript = state.provisional_text or state.last_committed_text
             self.provisional_label.setText(text_preview(transcript, 420) or "Ожидаю речь…")
@@ -251,7 +251,7 @@ if PYSIDE6_AVAILABLE:
                 return "Слишком громко"
             if state.state is AppStatus.PAUSED_TARGET_LOST:
                 return "Текст сохранён в очереди"
-            return "Локальная обработка"
+            return "LOCAL"
 
         def toggle_compact(self) -> None:
             self.set_compact(not self._compact)

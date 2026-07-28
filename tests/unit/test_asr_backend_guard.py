@@ -326,6 +326,32 @@ def test_model_manager_rejects_bad_checksum_without_publishing(tmp_path: Path) -
     assert not manager.path_for("bad-model").exists()
 
 
+def test_model_manager_disables_xet_and_uses_atomic_http_fallback(
+    tmp_path: Path, monkeypatch
+) -> None:  # type: ignore[no-untyped-def]
+    manager = ModelManager(tmp_path / "models")
+    spec = ModelSpec("fallback-model", repository_id="local/example", revision="pinned")
+    snapshot_calls: list[dict[str, object]] = []
+
+    def fail_snapshot(**kwargs: object) -> str:
+        snapshot_calls.append(dict(kwargs))
+        raise OSError("network route failed")
+
+    def fallback(received: ModelSpec, staging: Path, progress: object) -> None:
+        assert received is spec
+        (staging / "config.json").write_text("{}", encoding="utf-8")
+        (staging / "model.bin").write_bytes(b"weights")
+
+    monkeypatch.setattr("huggingface_hub.snapshot_download", fail_snapshot)
+    monkeypatch.setattr(manager, "_download_snapshot_http", fallback)
+    installed = manager.install(spec)
+
+    assert snapshot_calls[0]["etag_timeout"] == 15
+    assert __import__("os").environ["HF_HUB_DISABLE_XET"] == "1"
+    assert manager.verify(installed.name)
+    assert not tuple((tmp_path / "models").glob("*.staging"))
+
+
 def test_backlog_profile_only_reduces_optional_search() -> None:
     balanced = get_profile(ASRProfile.BALANCED)
     backlog = balanced.for_backlog()

@@ -43,6 +43,7 @@ if PYSIDE6_AVAILABLE:
             self.resize(1000, 650)
             self.setMinimumSize(760, 500)
             self._entries: dict[str, HistoryEntry] = {}
+            self._detail_session_id: str | None = None
             self._build_ui()
             self._connect_ui()
 
@@ -91,6 +92,8 @@ if PYSIDE6_AVAILABLE:
             self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
             self.table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
             self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+            self.table.setWordWrap(False)
+            self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
             self.table.setSortingEnabled(True)
             self.table.verticalHeader().setVisible(False)
             table_header = self.table.horizontalHeader()
@@ -118,7 +121,11 @@ if PYSIDE6_AVAILABLE:
             self.copy_button = QPushButton("Копировать", detail)
             self.export_button = QPushButton("Экспорт…", detail)
             self.recover_button = QPushButton("Восстановить", detail)
+            self.recover_button.setToolTip(
+                "Повторно отправить сохранённый текст незавершённой сессии в её целевое окно"
+            )
             self.delete_button = QPushButton("Удалить", detail)
+            self.delete_button.setToolTip("Безвозвратно удалить выбранную локальную запись")
             self.delete_button.setProperty("danger", True)
             actions.addWidget(self.copy_button)
             actions.addWidget(self.export_button)
@@ -136,7 +143,7 @@ if PYSIDE6_AVAILABLE:
             splitter.setStretchFactor(1, 4)
             splitter.setSizes((440, 540))
             root.addWidget(splitter, 1)
-            self.empty_label = QLabel("История пока пуста", self)
+            self.empty_label = QLabel("Записей не найдено", self)
             self.empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self.empty_label.setProperty("muted", True)
             root.addWidget(self.empty_label)
@@ -154,9 +161,11 @@ if PYSIDE6_AVAILABLE:
             self.recover_button.clicked.connect(self._recover_selected)
 
         def set_sessions(self, sessions: list[HistoryEntry | object]) -> None:
+            previous_session_id = self.selected_session_id() or self._detail_session_id
             entries = [history_entry_from(session) for session in sessions]
             entries.sort(key=lambda entry: _datetime_sort_key(entry.started_at), reverse=True)
             self._entries = {entry.session_id: entry for entry in entries if entry.session_id}
+            self.table.blockSignals(True)
             self.table.setSortingEnabled(False)
             self.table.setRowCount(0)
             for entry in entries:
@@ -178,12 +187,8 @@ if PYSIDE6_AVAILABLE:
                     item.setToolTip(value)
                     self.table.setItem(row, column, item)
             self.table.setSortingEnabled(True)
-            self.empty_label.setVisible(not entries)
-            self.table.setVisible(bool(entries))
-            if entries:
-                self.table.selectRow(0)
-            else:
-                self._set_action_state(None)
+            self.table.blockSignals(False)
+            self._apply_filters(preferred_session_id=previous_session_id)
 
         def selected_session_id(self) -> str | None:
             row = self.table.currentRow()
@@ -199,6 +204,7 @@ if PYSIDE6_AVAILABLE:
             self._set_action_state(self.selected_entry())
 
         def _set_action_state(self, entry: HistoryEntry | None) -> None:
+            self._detail_session_id = entry.session_id if entry is not None else None
             enabled = entry is not None
             self.copy_button.setEnabled(enabled and bool(entry and entry.confirmed_text))
             self.export_button.setEnabled(enabled)
@@ -210,13 +216,16 @@ if PYSIDE6_AVAILABLE:
             self.recover_button.setVisible(recoverable)
             self.recover_button.setEnabled(recoverable)
             if entry is None:
-                self.metadata_label.setText("Выберите сессию слева")
+                self.metadata_label.setText("Выберите запись в истории")
                 self.text_edit.clear()
                 self.warning_label.clear()
                 return
             self.metadata_label.setText(
                 f"{_format_datetime(entry.started_at)} · {entry.language.value.upper()} · "
-                f"{entry.model or 'модель не указана'} · {format_duration(entry.duration_s)}"
+                f"{self._profile_text(entry)} · {entry.model or 'модель не указана'} · "
+                f"{format_duration(entry.duration_s)} · "
+                f"{entry.target_application or 'приложение не указано'} · "
+                f"{_status_text(entry.completion_status)}"
             )
             self.text_edit.setPlainText(entry.confirmed_text)
             messages = list(entry.warnings)
@@ -224,11 +233,12 @@ if PYSIDE6_AVAILABLE:
                 messages.append(f"Потеряно кадров: {entry.dropped_frames}")
             self.warning_label.setText(" · ".join(messages))
 
-        def _apply_filters(self, *_args: object) -> None:
+        def _apply_filters(self, *_args: object, preferred_session_id: str | None = None) -> None:
             needle = self.search_edit.text().strip().casefold()
             language = str(self.language_filter.currentData() or "")
             status = str(self.status_filter.currentData() or "")
-            visible_rows = 0
+            visible_rows: list[int] = []
+            visible_session_ids: set[str] = set()
             for row in range(self.table.rowCount()):
                 item = self.table.item(row, 0)
                 session_id = str(item.data(Qt.ItemDataRole.UserRole)) if item else ""
@@ -251,8 +261,60 @@ if PYSIDE6_AVAILABLE:
                         else:
                             visible = visible and normalized == status
                 self.table.setRowHidden(row, not visible)
-                visible_rows += int(visible)
-            self.empty_label.setVisible(visible_rows == 0)
+                if visible:
+                    visible_rows.append(row)
+                    visible_session_ids.add(session_id)
+            has_visible = bool(visible_rows)
+            self.empty_label.setVisible(not has_visible)
+            self.table.setVisible(has_visible)
+
+            selected_id = preferred_session_id or self.selected_session_id()
+            if selected_id in visible_session_ids:
+                selected_row = self._row_for_session(selected_id)
+            else:
+                selected_row = visible_rows[0] if visible_rows else -1
+            self.table.blockSignals(True)
+            if selected_row >= 0:
+                self.table.selectRow(selected_row)
+            else:
+                self.table.clearSelection()
+                self.table.setCurrentCell(-1, -1)
+            self.table.blockSignals(False)
+            self._set_action_state(self.selected_entry() if selected_row >= 0 else None)
+            assert (
+                self._detail_session_id is None or self._detail_session_id in visible_session_ids
+            ), "history detail must belong to the filtered dataset"
+
+        @staticmethod
+        def _profile_text(entry: HistoryEntry) -> str:
+            return {
+                "fast": "Быстро",
+                "balanced": "Баланс",
+                "accurate": "Максимальная точность",
+            }.get(entry.profile.value, entry.profile.value)
+
+        def _row_for_session(self, session_id: str) -> int:
+            for row in range(self.table.rowCount()):
+                item = self.table.item(row, 0)
+                if item is not None and item.data(Qt.ItemDataRole.UserRole) == session_id:
+                    return row
+            return -1
+
+        @property
+        def detail_session_id(self) -> str | None:
+            return self._detail_session_id
+
+        @property
+        def visible_session_ids(self) -> set[str]:
+            identifiers: set[str] = set()
+            for row in range(self.table.rowCount()):
+                if self.table.isRowHidden(row):
+                    continue
+                item = self.table.item(row, 0)
+                value = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+                if value:
+                    identifiers.add(str(value))
+            return identifiers
 
         def _copy_selected(self) -> None:
             entry = self.selected_entry()
@@ -289,11 +351,7 @@ if PYSIDE6_AVAILABLE:
                 item = self.table.item(row, 0)
                 if item is not None and item.data(Qt.ItemDataRole.UserRole) == session_id:
                     self.table.removeRow(row)
-            empty = self.table.rowCount() == 0
-            self.table.setVisible(not empty)
-            self.empty_label.setVisible(empty)
-            if empty:
-                self._set_action_state(None)
+            self._apply_filters()
 
     def _datetime_sort_key(value: datetime | str | float) -> float:
         parsed = _parse_datetime(value)

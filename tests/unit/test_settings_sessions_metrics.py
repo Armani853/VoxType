@@ -8,7 +8,12 @@ from voxtype.asr.model_manager import DEFAULT_MODEL_SPECS
 from voxtype.asr.profiles import ASRProfile, get_profile
 from voxtype.core.models import InjectionMode, Language, ModelProfile, PreprocessingProfile
 from voxtype.monitoring.metrics import PerformanceMonitor
-from voxtype.runtime import configured_profile, effective_cpu_threads
+from voxtype.runtime import (
+    cache_directory_path,
+    configured_profile,
+    data_directory_path,
+    effective_cpu_threads,
+)
 from voxtype.sessions.journal import SessionJournal
 from voxtype.sessions.recovery import mark_recovered, recoverable_sessions
 from voxtype.sessions.repository import SessionRepository
@@ -46,10 +51,21 @@ def test_power_modes_change_effective_cpu_budget(monkeypatch) -> None:  # type: 
 def test_default_injection_uses_clipboard_with_unicode_fallback() -> None:
     settings = AppSettings()
     assert settings.dictation.injection_mode is InjectionMode.AUTO
-    assert settings.dictation.model_profile is ModelProfile.FAST
+    assert settings.dictation.model_profile is ModelProfile.BALANCED
     assert settings.model.installed_model == "small"
     assert settings.audio.preprocessing_profile is PreprocessingProfile.RAW
     assert not settings.audio.normalization
+
+
+def test_acceptance_profile_directories_are_explicitly_isolated(
+    tmp_path: Path, monkeypatch
+) -> None:  # type: ignore[no-untyped-def]
+    data = tmp_path / "fresh-data"
+    cache = tmp_path / "fresh-cache"
+    monkeypatch.setenv("VOXTYPE_DATA_DIRECTORY", str(data))
+    monkeypatch.setenv("VOXTYPE_CACHE_DIRECTORY", str(cache))
+    assert data_directory_path() == data.resolve()
+    assert cache_directory_path() == cache.resolve()
 
 
 def test_measured_profiles_choose_small_balanced_and_turbo_maximum() -> None:

@@ -50,11 +50,31 @@ def test_main_window_renders_snapshot_and_routes_commands(qtbot) -> None:  # typ
     assert window.target_tile.value_label.text() == "Блокнот"
     assert window.fragment_label.text() == "Последний распознанный фрагмент"
     assert window.microphone_label.text() == "USB Microphone"
+    assert window.model_title.text() == "Режим"
+    assert window.model_label.text() == "Быстро"
+    assert window.profile_label.text() == "Локальная модель: small"
+    assert window.audio_meter.level() > 0.5
 
     qtbot.mouseClick(window.dictation_button, Qt.MouseButton.LeftButton)
     qtbot.mouseClick(window.language_control.en_button, Qt.MouseButton.LeftButton)
     assert controller.toggles == 1
     assert controller.language_switches == 1
+
+
+def test_main_window_uses_state_text_without_showing_provisional_as_final(qtbot) -> None:  # type: ignore[no-untyped-def]
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.update_snapshot(
+        UIState(
+            state=AppStatus.LISTENING,
+            provisional_text="Это ещё не окончательный текст",
+            input_rms=10 ** (-64.4 / 20),
+        )
+    )
+    assert window.fragment_label.text() == "Слушаю…"
+    assert window.audio_meter.level() > 0.1
+    window.update_snapshot(UIState(state=AppStatus.TRANSCRIBING))
+    assert window.fragment_label.text() == "Распознаю…"
 
 
 def test_main_window_minimizes_to_tray_and_can_force_close(qtbot) -> None:  # type: ignore[no-untyped-def]

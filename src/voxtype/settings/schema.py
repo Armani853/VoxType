@@ -34,9 +34,9 @@ class GeneralSettings:
 @dataclass(slots=True)
 class DictationSettings:
     language: Language = Language.RU
-    # FAST keeps first-run memory low. BALANCED can add a lazy turbo retry when
-    # that optional model is installed; MAXIMUM runs turbo on every segment.
-    model_profile: ModelProfile = ModelProfile.FAST
+    # BALANCED is the local-first product default. It uses small normally and
+    # only adds the lazy turbo retry when that optional model is installed.
+    model_profile: ModelProfile = ModelProfile.BALANCED
     voice_commands: bool = False
     auto_insert: bool = True
     injection_mode: InjectionMode = InjectionMode.AUTO

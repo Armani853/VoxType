@@ -105,6 +105,17 @@ class HangingBackend(DeterministicBackend):
         return super().transcribe(request)
 
 
+class DelayedLoadBackend(DeterministicBackend):
+    def __init__(self) -> None:
+        super().__init__()
+        self.load_calls = 0
+
+    def load(self) -> None:
+        self.load_calls += 1
+        time.sleep(0.1)
+        super().load()
+
+
 class LanguageBackend(DeterministicBackend):
     def transcribe(self, request: TranscriptionRequest) -> TranscriptionResult:
         self.languages.append(request.language)
@@ -170,6 +181,11 @@ class LongSilenceCapture(FixtureCapture):
             self.output_queue.record_capture(samples.size)
 
 
+class EmptyCapture(FixtureCapture):
+    def start(self) -> None:
+        self.running = True
+
+
 class NonStoppingCapture(FixtureCapture):
     def stop(self, *, drain_timeout: float = 5.0) -> bool:
         del drain_timeout
@@ -187,6 +203,9 @@ class FixtureTargetManager:
         return self.target
 
     def start_session(self) -> TargetDecision:
+        return TargetDecision(TargetStatus.READY, self.target, self.target, "ready")
+
+    def resolve(self) -> TargetDecision:
         return TargetDecision(TargetStatus.READY, self.target, self.target, "ready")
 
     def end_session(self) -> None:
@@ -284,6 +303,69 @@ def test_controller_journals_before_ordered_injection_and_drains(tmp_path: Path)
     assert not any((tmp_path / "spool").rglob("*.vtxpcm"))
     controller.shutdown()
     session_repository.close()
+
+
+def test_model_loading_accepts_only_one_queued_start(tmp_path: Path) -> None:
+    repository = SessionRepository(tmp_path / "sessions.sqlite3")
+    backend = DelayedLoadBackend()
+    controller = ApplicationController(
+        settings_repository=SettingsRepository(tmp_path / "settings.json"),
+        session_repository=repository,
+        backend=backend,
+        capture_factory=lambda queue: FixtureCapture(queue),  # type: ignore[arg-type,return-value]
+        segmenter_factory=lambda: StreamingSegmenter(AlwaysSpeech()),
+        target_manager=FixtureTargetManager(),  # type: ignore[arg-type]
+        injection_service=FixtureInjection(),  # type: ignore[arg-type]
+        spool_root=tmp_path / "spool",
+    )
+    controller.initialize()
+    assert controller.start_dictation()
+    assert controller.state is AppState.MODEL_LOADING
+    assert not controller.start_dictation()
+    controller.toggle_dictation()
+    wait_for_state(controller, AppState.LISTENING)
+    assert backend.load_calls == 1
+    assert len(repository.recent()) == 1
+    assert controller.stop_dictation()
+    wait_for_state(controller, AppState.IDLE)
+    controller.shutdown()
+    repository.close()
+
+
+def test_pause_resume_captures_no_text_while_paused(tmp_path: Path) -> None:
+    repository = SessionRepository(tmp_path / "sessions.sqlite3")
+    captures: list[EmptyCapture] = []
+
+    def capture_factory(queue: LosslessAudioQueue) -> EmptyCapture:
+        capture = EmptyCapture(queue)
+        captures.append(capture)
+        return capture
+
+    controller = ApplicationController(
+        settings_repository=SettingsRepository(tmp_path / "settings.json"),
+        session_repository=repository,
+        backend=DeterministicBackend(),
+        capture_factory=capture_factory,  # type: ignore[arg-type]
+        segmenter_factory=lambda: StreamingSegmenter(AlwaysSpeech()),
+        target_manager=FixtureTargetManager(),  # type: ignore[arg-type]
+        injection_service=FixtureInjection(),  # type: ignore[arg-type]
+        spool_root=tmp_path / "spool",
+    )
+    controller.initialize()
+    assert controller.start_dictation()
+    wait_for_state(controller, AppState.LISTENING)
+    assert controller.toggle_pause()
+    wait_for_state(controller, AppState.PAUSED)
+    time.sleep(0.05)
+    assert repository.recent()[0].committed_text == ""
+    assert controller.toggle_pause()
+    wait_for_state(controller, AppState.LISTENING)
+    assert len(captures) == 2
+    assert controller.stop_dictation()
+    wait_for_state(controller, AppState.IDLE)
+    assert repository.recent()[0].committed_text == ""
+    controller.shutdown()
+    repository.close()
 
 
 def test_controller_never_finalizes_completed_when_audio_dispatcher_does_not_stop(

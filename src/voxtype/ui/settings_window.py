@@ -38,7 +38,7 @@ if PYSIDE6_AVAILABLE:
         QWidget,
     )
 
-    from .widgets import AudioLevelMeter, Card
+    from .widgets import AudioLevelMeter, Card, rms_to_meter
 
     class SettingsWindow(QDialog):
         settings_submitted = Signal(object)
@@ -670,7 +670,7 @@ if PYSIDE6_AVAILABLE:
         def update_microphone_level(
             self, level: float, clipping_percentage: float = 0.0, message: str = ""
         ) -> None:
-            self.mic_meter.set_level(level, clipping_percentage)
+            self.mic_meter.set_level(rms_to_meter(level), clipping_percentage)
             if message:
                 self.mic_status_label.setText(message)
             elif clipping_percentage > 0.1 or level >= 0.98:

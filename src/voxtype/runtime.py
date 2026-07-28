@@ -155,6 +155,20 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def data_directory_path() -> Path:
+    """Return the production data root, with an explicit acceptance-test override."""
+
+    override = os.environ.get("VOXTYPE_DATA_DIRECTORY", "").strip()
+    return Path(override).resolve() if override else user_data_path(APP_NAME, APP_AUTHOR)
+
+
+def cache_directory_path() -> Path:
+    """Return the cache root without coupling tests to Windows Known Folder APIs."""
+
+    override = os.environ.get("VOXTYPE_CACHE_DIRECTORY", "").strip()
+    return Path(override).resolve() if override else user_cache_path(APP_NAME, APP_AUTHOR)
+
+
 @dataclass(slots=True)
 class RuntimeBundle:
     settings_repository: SettingsRepository
@@ -205,20 +219,32 @@ class RuntimeBundle:
 def build_runtime(*, verbose: bool = False) -> RuntimeBundle:
     """Create one production runtime without starting capture or model download."""
 
-    data_directory = user_data_path(APP_NAME, APP_AUTHOR)
-    cache_directory = user_cache_path(APP_NAME, APP_AUTHOR)
+    data_directory = data_directory_path()
+    cache_directory = cache_directory_path()
+    isolated_profile = bool(os.environ.get("VOXTYPE_DATA_DIRECTORY", "").strip())
     data_directory.mkdir(parents=True, exist_ok=True)
     cache_directory.mkdir(parents=True, exist_ok=True)
-    log_path = configure_logging(verbose=verbose)
+    log_path = configure_logging(
+        data_directory / "logs" if isolated_profile else None,
+        verbose=verbose,
+    )
     logging.getLogger("voxtype.runtime").info(
         "application_start version=%s python=%s os=%s",
         __version__,
         platform.python_version(),
         platform.platform(),
     )
-    settings_repository = SettingsRepository()
+    settings_repository = (
+        SettingsRepository(data_directory / "settings.json")
+        if isolated_profile
+        else SettingsRepository()
+    )
     settings = settings_repository.load()
-    session_repository = SessionRepository()
+    session_repository = (
+        SessionRepository(data_directory / "sessions.sqlite3")
+        if isolated_profile
+        else SessionRepository()
+    )
     cleanup_retention(
         session_repository,
         data_directory / "audio",
@@ -312,7 +338,9 @@ __all__ = [
     "RuntimeBundle",
     "asr_profile",
     "build_runtime",
+    "cache_directory_path",
     "configured_profile",
+    "data_directory_path",
     "domain_profile",
     "effective_cpu_threads",
     "install_silero_vad",

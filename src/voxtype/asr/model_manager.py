@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import shutil
 import time
@@ -14,6 +15,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import RLock
+from urllib.error import HTTPError, URLError
+from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 from .profiles import ASRProfile
@@ -190,6 +193,11 @@ class ModelManager:
     def _download_snapshot(
         self, spec: ModelSpec, staging: Path, callback: ProgressCallback
     ) -> None:
+        # Xet has historically been able to stall indefinitely on some Windows
+        # installations. Force the ordinary HTTP path and bound Hub requests.
+        os.environ["HF_HUB_DISABLE_XET"] = "1"
+        os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", "15")
+        os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "30")
         try:
             from huggingface_hub import snapshot_download
         except ImportError as exc:
@@ -203,10 +211,88 @@ class ModelManager:
                 repo_id=repository_id,
                 revision=spec.revision,
                 local_dir=staging,
+                etag_timeout=15,
             )
-        except (OSError, RuntimeError, ValueError) as exc:
-            raise ModelManagerError(f"Сетевая загрузка {spec.repository_id} не завершена.") from exc
+        except (OSError, RuntimeError, ValueError):
+            # A direct HTTPS fallback avoids Xet and still publishes only through
+            # the same verified staging/marker/rename state machine.
+            if staging.exists():
+                shutil.rmtree(staging, ignore_errors=True)
+            staging.mkdir(parents=True, exist_ok=True)
+            try:
+                self._download_snapshot_http(spec, staging, callback)
+            except ModelManagerError as fallback_exc:
+                raise ModelManagerError(
+                    f"Сетевая загрузка {spec.repository_id} не завершена."
+                ) from fallback_exc
         callback(self._directory_size(staging), spec.expected_size_bytes)
+
+    def _download_snapshot_http(
+        self, spec: ModelSpec, staging: Path, callback: ProgressCallback
+    ) -> None:
+        repository_id = spec.repository_id
+        if repository_id is None:
+            raise ModelManagerError("Для HTTP-загрузки не указан repository_id.")
+        encoded_repository = quote(repository_id, safe="/")
+        encoded_revision = quote(spec.revision, safe="")
+        metadata_url = (
+            f"https://huggingface.co/api/models/{encoded_repository}/revision/{encoded_revision}"
+        )
+        try:
+            with urlopen(
+                Request(metadata_url, headers={"User-Agent": "VoxType/1"}), timeout=30
+            ) as response:
+                metadata = json.loads(response.read().decode("utf-8"))
+        except (
+            HTTPError,
+            URLError,
+            OSError,
+            TimeoutError,
+            UnicodeError,
+            json.JSONDecodeError,
+        ) as exc:
+            raise ModelManagerError("Не удалось получить список файлов модели.") from exc
+        siblings = metadata.get("siblings") if isinstance(metadata, dict) else None
+        if not isinstance(siblings, list):
+            raise ModelManagerError("Hugging Face вернул некорректный список файлов модели.")
+        files: list[tuple[str, int | None]] = []
+        for item in siblings:
+            if not isinstance(item, dict):
+                continue
+            name = item.get("rfilename")
+            if not isinstance(name, str) or not name or name == ".gitattributes":
+                continue
+            relative = Path(name)
+            if relative.is_absolute() or ".." in relative.parts:
+                raise ModelManagerError("Источник модели содержит небезопасный путь.")
+            size_value = item.get("size")
+            size = int(size_value) if isinstance(size_value, int) and size_value >= 0 else None
+            files.append((name, size))
+        if not files:
+            raise ModelManagerError("Hugging Face не вернул файлы модели.")
+        known_total = sum(size for _, size in files if size is not None)
+        total = (
+            known_total if all(size is not None for _, size in files) else spec.expected_size_bytes
+        )
+        downloaded = 0
+        callback(0, total)
+        for name, _size in files:
+            encoded_name = quote(name, safe="/")
+            url = (
+                f"https://huggingface.co/{encoded_repository}/resolve/"
+                f"{encoded_revision}/{encoded_name}?download=true"
+            )
+            destination = staging / Path(name)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            request = Request(url, headers={"User-Agent": "VoxType/1"})
+            try:
+                with urlopen(request, timeout=30) as response, destination.open("xb") as output:
+                    while block := response.read(1024 * 1024):
+                        output.write(block)
+                        downloaded += len(block)
+                        callback(downloaded, total)
+            except (HTTPError, URLError, OSError, TimeoutError) as exc:
+                raise ModelManagerError(f"Загрузка файла модели {name} прервана.") from exc
 
     @staticmethod
     def _download_archive(spec: ModelSpec, destination: Path, callback: ProgressCallback) -> None:

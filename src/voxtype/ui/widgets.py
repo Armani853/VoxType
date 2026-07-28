@@ -2,9 +2,21 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from ._optional import PYSIDE6_AVAILABLE, require_pyside6
+
+
+def rms_to_meter(value: float) -> float:
+    """Map normalized PCM RMS to a perceptually useful dBFS meter."""
+
+    rms = max(0.0, float(value))
+    if rms <= 1e-8:
+        return 0.0
+    dbfs = 20.0 * math.log10(rms)
+    return min(1.0, max(0.0, (dbfs + 75.0) / 69.0))
+
 
 if PYSIDE6_AVAILABLE:
     from PySide6.QtCore import Property, QRectF, QSize, Qt, Signal
@@ -76,9 +88,9 @@ if PYSIDE6_AVAILABLE:
             painter.drawRoundedRect(rect, rect.height() / 2, rect.height() / 2)
             filled = QRectF(rect)
             filled.setWidth(rect.width() * self._level)
-            if self._clipping > 0.1 or self._level >= 0.98:
+            if self._clipping > 0.1:
                 color = QColor("#D34A55")
-            elif self._level >= 0.78:
+            elif self._level >= 0.90:
                 color = QColor("#D98B16")
             else:
                 color = QColor("#31B77A")

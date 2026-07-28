@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Any
 
+from voxtype.audio.calibration import CalibrationResult, CalibrationStatus
+
 from ._optional import PYSIDE6_AVAILABLE, require_pyside6
 
 if PYSIDE6_AVAILABLE:
@@ -12,6 +14,7 @@ if PYSIDE6_AVAILABLE:
     from PySide6.QtGui import QFont, QTextCursor
     from PySide6.QtWidgets import (
         QComboBox,
+        QHBoxLayout,
         QLabel,
         QLineEdit,
         QPlainTextEdit,
@@ -24,7 +27,7 @@ if PYSIDE6_AVAILABLE:
     )
 
     from .theme import create_app_icon
-    from .widgets import AudioLevelMeter, Card
+    from .widgets import AudioLevelMeter, Card, rms_to_meter
 
     class _ManagedPage(QWizardPage):
         def __init__(self, title: str, subtitle: str, *, initially_complete: bool = False) -> None:
@@ -64,33 +67,35 @@ if PYSIDE6_AVAILABLE:
             self.setWizardStyle(QWizard.WizardStyle.ModernStyle)
             self.setOption(QWizard.WizardOption.NoBackButtonOnStartPage, True)
             self.setOption(QWizard.WizardOption.NoCancelButtonOnLastPage, True)
-            self.resize(760, 580)
-            self.setMinimumSize(680, 520)
+            self.resize(740, 540)
+            self.setMinimumSize(640, 480)
             self.setButtonText(QWizard.WizardButton.NextButton, "Далее")
             self.setButtonText(QWizard.WizardButton.BackButton, "Назад")
             self.setButtonText(QWizard.WizardButton.CancelButton, "Отмена")
             self.setButtonText(QWizard.WizardButton.FinishButton, "Начать работу")
             self._hardware_probe_emitted = False
             self._build_pages()
+            self._add_step_indicators()
             self.currentIdChanged.connect(self._page_changed)
 
         def _build_pages(self) -> None:
             self.intro_page = QWizardPage()
-            self.intro_page.setTitle("VoxType работает локально")
-            self.intro_page.setSubTitle("Без аккаунта, облачного API и отправки аудио.")
+            self.intro_page.setTitle("Приватность")
+            self.intro_page.setSubTitle("Локальная диктовка без аккаунта и облачного API.")
             intro_layout = QVBoxLayout(self.intro_page)
             hero = Card(self.intro_page)
             hero_title = QLabel("Ваш голос остаётся на этом компьютере", hero)
             hero_title.setProperty("heading", True)
             hero_text = QLabel(
-                "VoxType записывает микрофон только во время активной диктовки и "
-                "распознаёт речь локальной моделью. Для первой загрузки модели "
-                "понадобится интернет; после этого диктовка работает офлайн.",
+                "VoxType распознаёт речь локально. Аудио не отправляется в облако.",
                 hero,
             )
             hero_text.setWordWrap(True)
             privacy_text = QLabel(
-                "Технические логи не содержат продиктованный текст или PCM-аудио.", hero
+                "Для первой загрузки модели требуется интернет. После установки "
+                "модели диктовка работает офлайн.\n\n"
+                "Технические логи не содержат аудио или текста диктовки.",
+                hero,
             )
             privacy_text.setProperty("muted", True)
             privacy_text.setWordWrap(True)
@@ -128,11 +133,14 @@ if PYSIDE6_AVAILABLE:
 
             self.calibration_page = _ManagedPage(
                 "Калибровка тишины и речи",
-                "Сначала сохраняйте тишину, затем произнесите несколько слов обычным голосом.",
+                "VoxType измерит фоновый шум и голос. Это займёт около 8 секунд.",
             )
             calibration_layout = QVBoxLayout(self.calibration_page)
             calibration_card = Card(self.calibration_page)
-            self.calibration_status = QLabel("Калибровка ещё не запускалась", calibration_card)
+            self.calibration_status = QLabel(
+                "Сейчас VoxType измерит уровень фонового шума и вашего голоса.",
+                calibration_card,
+            )
             self.calibration_status.setWordWrap(True)
             self.calibration_progress = QProgressBar(calibration_card)
             self.calibration_progress.setRange(0, 100)
@@ -140,9 +148,35 @@ if PYSIDE6_AVAILABLE:
             self.calibration_button = QPushButton("Начать калибровку", calibration_card)
             self.calibration_button.setProperty("primary", True)
             self.calibration_button.clicked.connect(self._request_calibration)
+            self.calibration_details = QLabel("", calibration_card)
+            self.calibration_details.setProperty("muted", True)
+            self.calibration_details.setWordWrap(True)
+            self.calibration_details.hide()
+            self.calibration_details_button = QPushButton("Подробнее", calibration_card)
+            self.calibration_details_button.setProperty("flat", True)
+            self.calibration_details_button.hide()
+            self.calibration_details_button.clicked.connect(
+                lambda: self.calibration_details.setVisible(
+                    not self.calibration_details.isVisible()
+                )
+            )
+            calibration_actions = QHBoxLayout()
+            calibration_actions.addWidget(self.calibration_button)
+            self.choose_microphone_button = QPushButton("Выбрать другой микрофон", calibration_card)
+            self.choose_microphone_button.clicked.connect(self._choose_another_microphone)
+            self.choose_microphone_button.hide()
+            calibration_actions.addWidget(self.choose_microphone_button)
+            self.continue_anyway_button = QPushButton("Продолжить всё равно", calibration_card)
+            self.continue_anyway_button.clicked.connect(
+                lambda: self.calibration_page.set_complete(True)
+            )
+            self.continue_anyway_button.hide()
+            calibration_actions.addWidget(self.continue_anyway_button)
             calibration_card.content_layout.addWidget(self.calibration_status)
             calibration_card.content_layout.addWidget(self.calibration_progress)
-            calibration_card.content_layout.addWidget(self.calibration_button)
+            calibration_card.content_layout.addLayout(calibration_actions)
+            calibration_card.content_layout.addWidget(self.calibration_details_button)
+            calibration_card.content_layout.addWidget(self.calibration_details)
             calibration_layout.addWidget(calibration_card)
             calibration_layout.addStretch(1)
             self.addPage(self.calibration_page)
@@ -264,6 +298,19 @@ if PYSIDE6_AVAILABLE:
             finish_layout.addStretch(1)
             self.addPage(self.finish_page)
 
+        def _add_step_indicators(self) -> None:
+            page_ids = list(self.pageIds())
+            total = len(page_ids)
+            for index, page_id in enumerate(page_ids, start=1):
+                page = self.page(page_id)
+                layout = page.layout()
+                if not isinstance(layout, QVBoxLayout):
+                    continue
+                label = QLabel(f"Шаг {index} из {total}", page)
+                label.setObjectName(f"onboardingStep{index}")
+                label.setProperty("muted", True)
+                layout.insertWidget(0, label)
+
         def _phrase_card(
             self, parent: QWidget, language: str, phrase: str
         ) -> tuple[Card, QLabel, QPushButton]:
@@ -318,7 +365,7 @@ if PYSIDE6_AVAILABLE:
         def update_microphone_level(
             self, level: float, clipping_percentage: float = 0.0, message: str = ""
         ) -> None:
-            self.live_meter.set_level(level, clipping_percentage)
+            self.live_meter.set_level(rms_to_meter(level), clipping_percentage)
             if message:
                 text = message
             elif clipping_percentage > 0.1 or level >= 0.98:
@@ -335,18 +382,45 @@ if PYSIDE6_AVAILABLE:
                 self.calibration_status.setText("Сначала выберите микрофон")
                 return
             self.calibration_button.setEnabled(False)
-            self.calibration_status.setText("Слушаю тишину и речь…")
-            self.calibration_progress.setRange(0, 0)
+            self.calibration_status.setText("Пожалуйста, помолчите 2–3 секунды.")
+            self.calibration_progress.setRange(0, 100)
+            self.calibration_progress.setValue(0)
+            self.calibration_details.clear()
+            self.calibration_details.hide()
+            self.calibration_details_button.hide()
+            self.choose_microphone_button.hide()
+            self.continue_anyway_button.hide()
+            self.calibration_page.set_complete(False)
             self.calibration_requested.emit(identifier)
 
-        def set_calibration_result(self, ok: bool, message: str) -> None:
+        def set_calibration_progress(self, percent: int, message: str) -> None:
             self.calibration_progress.setRange(0, 100)
-            self.calibration_progress.setValue(100 if ok else 0)
+            self.calibration_progress.setValue(min(100, max(0, int(percent))))
             self.calibration_status.setText(message)
-            self.calibration_status.setStyleSheet(f"color: {'#1A9B67' if ok else '#D34A55'};")
+
+        def set_calibration_result(self, result: CalibrationResult) -> None:
+            self.calibration_progress.setRange(0, 100)
+            self.calibration_progress.setValue(100)
+            self.calibration_status.setText(f"{result.title}\n{result.message}")
+            color = (
+                "#1A9B67"
+                if result.status is CalibrationStatus.GOOD
+                else "#D98B16"
+                if result.status is CalibrationStatus.QUIET_BUT_USABLE
+                else "#D34A55"
+            )
+            self.calibration_status.setStyleSheet(f"color: {color};")
             self.calibration_button.setEnabled(True)
-            self.calibration_button.setText("Повторить калибровку")
-            self.calibration_page.set_complete(ok)
+            self.calibration_button.setText("Повторить")
+            self.calibration_details.setText(result.technical_details)
+            self.calibration_details_button.setVisible(result.capture_worked)
+            self.choose_microphone_button.setVisible(not result.usable)
+            self.continue_anyway_button.setVisible(result.capture_worked and not result.usable)
+            self.calibration_page.set_complete(result.usable)
+
+        def _choose_another_microphone(self) -> None:
+            self.back()
+            self.microphone_combo.setFocus(Qt.FocusReason.OtherFocusReason)
 
         def _page_changed(self, page_id: int) -> None:
             if page_id == self.hardware_page_id and not self._hardware_probe_emitted:

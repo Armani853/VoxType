@@ -46,6 +46,7 @@ if PYSIDE6_AVAILABLE:
         MetricTile,
         SegmentedLanguageControl,
         StatusDot,
+        rms_to_meter,
     )
 
     _STATUS_PRESENTATION: dict[AppStatus, tuple[str, str]] = {
@@ -212,13 +213,13 @@ if PYSIDE6_AVAILABLE:
 
             model = Card(canvas, spacing=7)
             model.setObjectName("modelCard")
-            self.model_title = QLabel("Модель", model)
+            self.model_title = QLabel("Режим", model)
             self.model_title.setProperty("muted", True)
-            self.model_label = QLabel("Модель не загружена", model)
+            self.model_label = QLabel("Баланс", model)
             self.model_label.setObjectName("modelLabel")
             self.model_label.setProperty("sectionHeading", True)
             self.model_label.setWordWrap(True)
-            self.profile_label = QLabel("Баланс", model)
+            self.profile_label = QLabel("Локальная модель: не загружена", model)
             self.profile_label.setProperty("muted", True)
             model.content_layout.addWidget(self.model_title)
             model.content_layout.addWidget(self.model_label)
@@ -321,20 +322,17 @@ if PYSIDE6_AVAILABLE:
             self.language_control.set_language(state.language.value)
             self.microphone_label.setText(state.microphone_name or "—")
             self.microphone_label.setToolTip(state.microphone_name)
-            self.audio_meter.set_level(state.input_rms, state.clipping_percentage)
+            self.audio_meter.set_level(rms_to_meter(state.input_rms), state.clipping_percentage)
             self.audio_hint.setText(self._audio_hint(state))
-            self.model_label.setText(state.model_name or "—")
-            self.profile_label.setText(self._profile_text(state.model_profile))
+            self.model_label.setText(self._profile_text(state.model_profile))
+            self.profile_label.setText(f"Локальная модель: {state.model_name or 'не загружена'}")
             self.duration_tile.set_value(format_duration(state.session_elapsed_s))
             self.backlog_tile.set_value(format_backlog(state.queued_audio_seconds))
             self.target_tile.set_value(
                 state.target_title or ui_text("no_target", self._interface_language),
                 state.target_title,
             )
-            self.fragment_label.setText(
-                text_preview(state.last_committed_text)
-                or ui_text("no_fragment", self._interface_language)
-            )
+            self.fragment_label.setText(self._fragment_text(state))
             active = state.state.active
             self.dictation_button.setText(
                 ui_text("stop" if active else "start", self._interface_language)
@@ -390,6 +388,16 @@ if PYSIDE6_AVAILABLE:
                 ModelProfile.ACCURATE: "Максимальная точность",
             }[profile]
 
+        def _fragment_text(self, state: UIState) -> str:
+            committed = text_preview(state.last_committed_text)
+            if committed:
+                return committed
+            if state.state in {AppStatus.LISTENING, AppStatus.SPEECH_DETECTED}:
+                return "Слушаю…" if self._interface_language == "ru" else "Listening…"
+            if state.state in {AppStatus.TRANSCRIBING, AppStatus.FINISHING}:
+                return "Распознаю…" if self._interface_language == "ru" else "Transcribing…"
+            return ui_text("no_fragment", self._interface_language)
+
         @staticmethod
         def _audio_hint(state: UIState) -> str:
             if state.clipping_percentage > 0.1 or state.input_rms >= 0.98:
@@ -430,7 +438,7 @@ if PYSIDE6_AVAILABLE:
             self.diagnostics_button.setText(ui_text("diagnostics", locale))
             self.settings_button.setText(ui_text("settings", locale))
             self.microphone_title.setText(ui_text("microphone", locale))
-            self.model_title.setText(ui_text("model", locale))
+            self.model_title.setText("Режим" if locale == "ru" else "Mode")
             self.duration_tile.title_label.setText(ui_text("duration", locale))
             self.backlog_tile.title_label.setText(ui_text("backlog", locale))
             self.target_tile.title_label.setText(ui_text("target", locale))

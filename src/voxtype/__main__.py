@@ -8,16 +8,14 @@ import sys
 from dataclasses import asdict
 
 import numpy as np
-from platformdirs import user_data_path
 
 from voxtype.asr.base import TranscriptionRequest
 from voxtype.asr.faster_whisper_backend import FasterWhisperBackend
 from voxtype.asr.model_manager import DEFAULT_MODEL_SPECS, ModelManager
 from voxtype.asr.profiles import ASRProfile, get_profile
-from voxtype.constants import APP_AUTHOR, APP_NAME
 from voxtype.monitoring.hardware import probe_hardware
 from voxtype.monitoring.health import run_health_checks
-from voxtype.runtime import build_runtime, install_silero_vad
+from voxtype.runtime import build_runtime, data_directory_path, install_silero_vad
 from voxtype.version import __version__
 
 
@@ -35,7 +33,7 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _diagnostics() -> dict[str, object]:
-    data = user_data_path(APP_NAME, APP_AUTHOR)
+    data = data_directory_path()
     hardware = probe_hardware()
     checks = run_health_checks(data)
     return {
@@ -61,15 +59,15 @@ def main(argv: list[str] | None = None) -> int:
     arguments = _parser().parse_args(argv)
     if arguments.install_model:
         profile = ASRProfile(arguments.install_model)
-        manager = ModelManager(user_data_path(APP_NAME, APP_AUTHOR) / "models")
+        manager = ModelManager(data_directory_path() / "models")
         path = manager.install(DEFAULT_MODEL_SPECS[profile])
-        vad_path = install_silero_vad(user_data_path(APP_NAME, APP_AUTHOR))
+        vad_path = install_silero_vad(data_directory_path())
         sys.stdout.write(
             json.dumps({"installed": str(path), "vad": str(vad_path)}, ensure_ascii=False) + "\n"
         )
         return 0
     if arguments.inference_smoke_test:
-        data = user_data_path(APP_NAME, APP_AUTHOR)
+        data = data_directory_path()
         vad_path = install_silero_vad(data)
         from voxtype.vad.silero import SileroVAD
 
