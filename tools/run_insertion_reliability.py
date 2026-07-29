@@ -155,6 +155,11 @@ def _run_vscode(root: Path, attempts: int) -> ReliabilityResult:
     (settings_directory / "settings.json").write_text(
         json.dumps(
             {
+                # The verifier profile is intentionally disposable. Keep account-
+                # backed features disabled so its window never asks the user to
+                # authenticate into a profile that will be deleted after the run.
+                "chat.disableAIFeatures": True,
+                "github.copilot.enable": {"*": False},
                 "workbench.startupEditor": "none",
                 "security.workspace.trust.enabled": False,
                 "window.commandCenter": False,
@@ -173,6 +178,12 @@ def _run_vscode(root: Path, attempts: int) -> ReliabilityResult:
             f"--extensions-dir={root / 'vscode-extensions'}",
             "--new-window",
             "--disable-extensions",
+            "--disable-extension",
+            "GitHub.copilot-chat",
+            "--disable-extension",
+            "vscode.github-authentication",
+            "--disable-extension",
+            "vscode.github",
             "--skip-welcome",
             str(document),
         ]
