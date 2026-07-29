@@ -37,6 +37,7 @@ class _ClipboardApplication:
 def test_settings_roundtrip_and_submit(qtbot) -> None:  # type: ignore[no-untyped-def]
     window = SettingsWindow()
     qtbot.addWidget(window)
+    assert window.navigation.horizontalScrollBarPolicy() is (Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
     window.set_audio_devices([("USB Mic", "mic-1")], "mic-1")
     window.set_models([("Whisper small", "small")], "small")
     window.set_values(

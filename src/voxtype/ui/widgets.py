@@ -32,14 +32,52 @@ if PYSIDE6_AVAILABLE:
         QWidget,
     )
 
+    from .theme import LIGHT_PALETTE, SPACING
+
     class Card(QFrame):
         def __init__(self, parent: QWidget | None = None, *, spacing: int = 10) -> None:
             super().__init__(parent)
             self.setProperty("card", True)
             self.setFrameShape(QFrame.Shape.NoFrame)
             self.content_layout = QVBoxLayout(self)
-            self.content_layout.setContentsMargins(18, 16, 18, 16)
+            self.content_layout.setContentsMargins(
+                SPACING.space_5,
+                SPACING.space_4,
+                SPACING.space_5,
+                SPACING.space_4,
+            )
             self.content_layout.setSpacing(spacing)
+
+    class ElidedLabel(QLabel):
+        """Single-line label that preserves long values in its tooltip."""
+
+        def __init__(self, text: str = "", parent: QWidget | None = None) -> None:
+            super().__init__("", parent)
+            self._full_text = str(text)
+            self.setWordWrap(False)
+            self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+            self._update_elision()
+
+        def setText(self, text: str) -> None:
+            self._full_text = str(text)
+            self._update_elision()
+
+        def full_text(self) -> str:
+            return self._full_text
+
+        def resizeEvent(self, event: Any) -> None:
+            super().resizeEvent(event)
+            self._update_elision()
+
+        def _update_elision(self) -> None:
+            available = max(0, self.contentsRect().width())
+            visible = self.fontMetrics().elidedText(
+                self._full_text,
+                Qt.TextElideMode.ElideRight,
+                available,
+            )
+            super().setText(visible)
+            self.setToolTip(self._full_text if visible != self._full_text else "")
 
     class AudioLevelMeter(QWidget):
         level_changed = Signal(float)
@@ -84,16 +122,16 @@ if PYSIDE6_AVAILABLE:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
             rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
             painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor("#DDE3ED"))
+            painter.setBrush(QColor(LIGHT_PALETTE.border))
             painter.drawRoundedRect(rect, rect.height() / 2, rect.height() / 2)
             filled = QRectF(rect)
             filled.setWidth(rect.width() * self._level)
             if self._clipping > 0.1:
-                color = QColor("#D34A55")
+                color = QColor(LIGHT_PALETTE.error)
             elif self._level >= 0.90:
-                color = QColor("#D98B16")
+                color = QColor(LIGHT_PALETTE.warning)
             else:
-                color = QColor("#31B77A")
+                color = QColor(LIGHT_PALETTE.success)
             painter.setBrush(color)
             if filled.width() > 0:
                 painter.drawRoundedRect(filled, rect.height() / 2, rect.height() / 2)
@@ -101,7 +139,7 @@ if PYSIDE6_AVAILABLE:
     class StatusDot(QWidget):
         def __init__(self, parent: QWidget | None = None) -> None:
             super().__init__(parent)
-            self._color = QColor("#1A9B67")
+            self._color = QColor(LIGHT_PALETTE.success)
             self.setFixedSize(14, 14)
             self.setAccessibleName("Индикатор состояния")
 
@@ -122,7 +160,7 @@ if PYSIDE6_AVAILABLE:
 
         def __init__(self, parent: QWidget | None = None) -> None:
             super().__init__(parent)
-            self.setProperty("card", True)
+            self.setProperty("segmented", True)
             self.setAccessibleName("Язык диктовки")
             layout = QHBoxLayout(self)
             layout.setContentsMargins(3, 3, 3, 3)
@@ -142,6 +180,7 @@ if PYSIDE6_AVAILABLE:
             button.setProperty("segment", True)
             button.setProperty("language", language)
             button.setAccessibleName(f"Язык {text}")
+            button.setMinimumWidth(54)
             self.group.addButton(button)
             return button
 
@@ -159,9 +198,10 @@ if PYSIDE6_AVAILABLE:
     class MetricTile(Card):
         def __init__(self, title: str, value: str = "—", parent: QWidget | None = None) -> None:
             super().__init__(parent, spacing=4)
+            self.setMinimumHeight(82)
             self.title_label = QLabel(title, self)
-            self.title_label.setProperty("muted", True)
-            self.value_label = QLabel(value, self)
+            self.title_label.setProperty("caption", True)
+            self.value_label = ElidedLabel(value, self)
             self.value_label.setProperty("sectionHeading", True)
             self.value_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             self.content_layout.addWidget(self.title_label)
@@ -169,7 +209,7 @@ if PYSIDE6_AVAILABLE:
 
         def set_value(self, value: str, tooltip: str = "") -> None:
             self.value_label.setText(value)
-            self.value_label.setToolTip(tooltip or value)
+            self.value_label.setToolTip(tooltip or self.value_label.toolTip())
 
 else:
 
@@ -182,6 +222,9 @@ else:
         """Import guard that fails clearly at construction."""
 
     class AudioLevelMeter(_UnavailableWidget):  # type: ignore[no-redef]
+        """Import guard that fails clearly at construction."""
+
+    class ElidedLabel(_UnavailableWidget):  # type: ignore[no-redef]
         """Import guard that fails clearly at construction."""
 
     class StatusDot(_UnavailableWidget):  # type: ignore[no-redef]

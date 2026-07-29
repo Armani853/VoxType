@@ -77,6 +77,24 @@ def test_main_window_uses_state_text_without_showing_provisional_as_final(qtbot)
     assert window.fragment_label.text() == "Распознаю…"
 
 
+def test_main_window_visual_state_matrix_is_complete(qtbot) -> None:  # type: ignore[no-untyped-def]
+    window = MainWindow()
+    qtbot.addWidget(window)
+
+    for status in AppStatus:
+        window.update_snapshot(
+            UIState(
+                state=status,
+                error_message="Проверяемое предупреждение"
+                if status in {AppStatus.ERROR_RECOVERABLE, AppStatus.ERROR_FATAL}
+                else "",
+                full_transcript="Сохранённый результат" if status is AppStatus.COMPLETED else "",
+            )
+        )
+        assert window.status_label.text()
+        assert window.status_detail_label.text()
+
+
 def test_main_window_minimizes_to_tray_and_can_force_close(qtbot) -> None:  # type: ignore[no-untyped-def]
     window = MainWindow(minimize_to_tray=True)
     qtbot.addWidget(window)

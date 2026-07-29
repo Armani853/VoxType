@@ -5,10 +5,12 @@ from __future__ import annotations
 
 import argparse
 import shutil
+import struct
 from pathlib import Path
+from typing import Any, cast
 
 from platformdirs import user_data_path
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QBuffer, QByteArray, QIODevice, Qt
 from PySide6.QtGui import QColor, QImage, QPainter
 from PySide6.QtSvg import QSvgRenderer
 
@@ -25,18 +27,52 @@ def prepare(output: Path, icon_svg: Path) -> tuple[Path, Path]:
     renderer = QSvgRenderer(str(icon_svg))
     if not renderer.isValid():
         raise RuntimeError("VoxType SVG icon is invalid")
-    image = QImage(256, 256, QImage.Format.Format_ARGB32)
+    icon = output / "voxtype.ico"
+    _write_multiresolution_icon(renderer, icon)
+    return packaged_vad, icon
+
+
+def _write_multiresolution_icon(renderer: QSvgRenderer, destination: Path) -> None:
+    """Write PNG-backed ICO frames for crisp shell, taskbar and installer sizes."""
+
+    frames = [_render_png(renderer, side) for side in (16, 20, 24, 32, 48, 256)]
+    header_size = 6 + (16 * len(frames))
+    offset = header_size
+    entries: list[bytes] = []
+    for side, payload in zip((16, 20, 24, 32, 48, 256), frames, strict=True):
+        dimension = 0 if side == 256 else side
+        entries.append(
+            struct.pack(
+                "<BBBBHHII",
+                dimension,
+                dimension,
+                0,
+                0,
+                1,
+                32,
+                len(payload),
+                offset,
+            )
+        )
+        offset += len(payload)
+    destination.write_bytes(
+        struct.pack("<HHH", 0, 1, len(frames)) + b"".join(entries) + b"".join(frames)
+    )
+
+
+def _render_png(renderer: QSvgRenderer, side: int) -> bytes:
+    image = QImage(side, side, QImage.Format.Format_ARGB32)
     image.fill(QColor(Qt.GlobalColor.transparent))
     painter = QPainter(image)
     renderer.render(painter)
     painter.end()
-    icon = output / "voxtype.ico"
-    # PySide 6.11 advertises the ICO writer but rejects an explicit format
-    # argument on Windows.  Let Qt select the writer from the .ico suffix;
-    # this is also the documented QImage.save fallback when format is omitted.
-    if not image.save(str(icon)):
-        raise RuntimeError("Qt could not encode the Windows ICO asset")
-    return packaged_vad, icon
+    payload = QByteArray()
+    buffer = QBuffer(payload)
+    qt_image = cast(Any, image)
+    if not buffer.open(QIODevice.OpenModeFlag.WriteOnly) or not qt_image.save(buffer, "PNG"):
+        raise RuntimeError(f"Qt could not encode the {side}px icon frame")
+    buffer.close()
+    return bytes(payload.data())
 
 
 def main() -> int:

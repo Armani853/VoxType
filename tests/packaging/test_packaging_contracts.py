@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import re
+import struct
 from pathlib import Path
+
+from PySide6.QtSvg import QSvgRenderer
+from tools.prepare_packaging_assets import _write_multiresolution_icon
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -55,8 +59,25 @@ def test_inno_manifest_is_per_user_unsigned_and_not_admin() -> None:
     assert 'uiAccess="false"' in manifest
 
 
-def test_asset_preparation_uses_extension_selected_ico_writer() -> None:
+def test_asset_preparation_builds_multiresolution_windows_icon() -> None:
     script = _read("tools/prepare_packaging_assets.py")
 
-    assert "image.save(str(icon))" in script
-    assert 'image.save(str(icon), b"ICO")' not in script
+    assert "_write_multiresolution_icon(renderer, icon)" in script
+    assert "(16, 20, 24, 32, 48, 256)" in script
+    assert 'struct.pack("<HHH", 0, 1, len(frames))' in script
+
+
+def test_multiresolution_icon_contains_all_shell_sizes(tmp_path: Path) -> None:
+    renderer = QSvgRenderer(str(ROOT / "packaging/icons/voxtype.svg"))
+    destination = tmp_path / "voxtype.ico"
+
+    _write_multiresolution_icon(renderer, destination)
+
+    payload = destination.read_bytes()
+    reserved, image_type, count = struct.unpack_from("<HHH", payload)
+    widths = [
+        256 if payload[6 + (index * 16)] == 0 else payload[6 + (index * 16)]
+        for index in range(count)
+    ]
+    assert (reserved, image_type, count) == (0, 1, 6)
+    assert widths == [16, 20, 24, 32, 48, 256]

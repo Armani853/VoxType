@@ -108,6 +108,28 @@ def test_completed_overlay_persists_full_result_and_exposes_actions(qtbot) -> No
     assert overlay.result_text.toPlainText() == "полный подтверждённый результат"
     assert overlay.result_buttons.isVisible()
     assert overlay.copy_all_button.isEnabled()
+    assert overlay.copy_all_button.property("primary") is True
     assert overlay.insert_button.isEnabled()
+    assert overlay.result_text.minimumHeight() >= 110
+    assert overlay.processing_label.text() == "Текст сохранён"
     assert not overlay.pause_button.isVisible()
     assert not overlay.stop_button.isVisible()
+
+
+def test_overlay_visual_state_matrix_is_complete(qtbot) -> None:  # type: ignore[no-untyped-def]
+    overlay = DictationOverlay()
+    qtbot.addWidget(overlay)
+    overlay.set_compact(False, persist=False)
+
+    for status in AppStatus:
+        overlay.update_snapshot(
+            UIState(
+                state=status,
+                error_message="Проверяемое предупреждение"
+                if status in {AppStatus.ERROR_RECOVERABLE, AppStatus.ERROR_FATAL}
+                else "",
+                full_transcript="Сохранённый результат" if status is AppStatus.COMPLETED else "",
+            )
+        )
+        assert overlay.status_label.text()
+        assert overlay.processing_label.text()

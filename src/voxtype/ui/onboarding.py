@@ -13,6 +13,7 @@ if PYSIDE6_AVAILABLE:
     from PySide6.QtCore import QSignalBlocker, Qt, Signal
     from PySide6.QtGui import QFont, QTextCursor
     from PySide6.QtWidgets import (
+        QAbstractButton,
         QComboBox,
         QHBoxLayout,
         QLabel,
@@ -26,7 +27,7 @@ if PYSIDE6_AVAILABLE:
         QWizardPage,
     )
 
-    from .theme import create_app_icon
+    from .theme import SPACING, create_app_icon, state_color
     from .widgets import AudioLevelMeter, Card, rms_to_meter
 
     class _ManagedPage(QWizardPage):
@@ -76,6 +77,7 @@ if PYSIDE6_AVAILABLE:
             self._hardware_probe_emitted = False
             self._build_pages()
             self._add_step_indicators()
+            self._style_navigation_buttons()
             self.currentIdChanged.connect(self._page_changed)
 
         def _build_pages(self) -> None:
@@ -83,6 +85,7 @@ if PYSIDE6_AVAILABLE:
             self.intro_page.setTitle("Приватность")
             self.intro_page.setSubTitle("Локальная диктовка без аккаунта и облачного API.")
             intro_layout = QVBoxLayout(self.intro_page)
+            intro_layout.setSpacing(SPACING.space_4)
             hero = Card(self.intro_page)
             hero_title = QLabel("Ваш голос остаётся на этом компьютере", hero)
             hero_title.setProperty("heading", True)
@@ -111,6 +114,7 @@ if PYSIDE6_AVAILABLE:
                 "Говорите обычным голосом — индикатор должен уверенно двигаться.",
             )
             mic_layout = QVBoxLayout(self.microphone_page)
+            mic_layout.setSpacing(SPACING.space_4)
             mic_card = Card(self.microphone_page)
             self.microphone_combo = QComboBox(mic_card)
             self.microphone_combo.setObjectName("onboardingMicrophoneCombo")
@@ -120,12 +124,19 @@ if PYSIDE6_AVAILABLE:
             self.microphone_status.setProperty("muted", True)
             self.microphone_status.setWordWrap(True)
             self.refresh_microphones_button = QPushButton("Обновить список", mic_card)
+            self.refresh_microphones_button.setProperty("flat", True)
             self.refresh_microphones_button.clicked.connect(self.microphone_refresh_requested)
             mic_card.content_layout.addWidget(QLabel("Устройство записи", mic_card))
             mic_card.content_layout.addWidget(self.microphone_combo)
+            level_label = QLabel("Уровень микрофона", mic_card)
+            level_label.setProperty("caption", True)
+            mic_card.content_layout.addWidget(level_label)
             mic_card.content_layout.addWidget(self.live_meter)
             mic_card.content_layout.addWidget(self.microphone_status)
-            mic_card.content_layout.addWidget(self.refresh_microphones_button)
+            refresh_row = QHBoxLayout()
+            refresh_row.addStretch(1)
+            refresh_row.addWidget(self.refresh_microphones_button)
+            mic_card.content_layout.addLayout(refresh_row)
             mic_layout.addWidget(mic_card)
             mic_layout.addStretch(1)
             self.microphone_combo.currentIndexChanged.connect(self._microphone_changed)
@@ -136,6 +147,7 @@ if PYSIDE6_AVAILABLE:
                 "VoxType измерит фоновый шум и голос. Это займёт около 8 секунд.",
             )
             calibration_layout = QVBoxLayout(self.calibration_page)
+            calibration_layout.setSpacing(SPACING.space_4)
             calibration_card = Card(self.calibration_page)
             self.calibration_status = QLabel(
                 "Сейчас VoxType измерит уровень фонового шума и вашего голоса.",
@@ -172,6 +184,7 @@ if PYSIDE6_AVAILABLE:
             )
             self.continue_anyway_button.hide()
             calibration_actions.addWidget(self.continue_anyway_button)
+            calibration_actions.addStretch(1)
             calibration_card.content_layout.addWidget(self.calibration_status)
             calibration_card.content_layout.addWidget(self.calibration_progress)
             calibration_card.content_layout.addLayout(calibration_actions)
@@ -206,6 +219,7 @@ if PYSIDE6_AVAILABLE:
                 "Выберите предложенный профиль и дождитесь проверки или загрузки модели.",
             )
             model_layout = QVBoxLayout(self.model_page)
+            model_layout.setSpacing(SPACING.space_4)
             model_card = Card(self.model_page)
             self.model_combo = QComboBox(model_card)
             self.model_combo.addItem("Быстро — меньше нагрузка", "fast")
@@ -278,8 +292,8 @@ if PYSIDE6_AVAILABLE:
             shortcut = QLabel("Ctrl + Alt + Space", finish_card)
             shortcut.setAlignment(Qt.AlignmentFlag.AlignCenter)
             shortcut_font = QFont(shortcut.font())
-            shortcut_font.setPointSize(19)
-            shortcut_font.setBold(True)
+            shortcut_font.setPointSize(18)
+            shortcut_font.setWeight(QFont.Weight.DemiBold)
             shortcut.setFont(shortcut_font)
             self.hotkey_edit = QLineEdit("Ctrl+Alt+Space", finish_card)
             self.hotkey_edit.setObjectName("onboardingHotkey")
@@ -308,8 +322,34 @@ if PYSIDE6_AVAILABLE:
                     continue
                 label = QLabel(f"Шаг {index} из {total}", page)
                 label.setObjectName(f"onboardingStep{index}")
-                label.setProperty("muted", True)
+                label.setProperty("caption", True)
                 layout.insertWidget(0, label)
+                layout.setContentsMargins(
+                    SPACING.space_5,
+                    SPACING.space_4,
+                    SPACING.space_5,
+                    SPACING.space_4,
+                )
+                layout.setSpacing(SPACING.space_4)
+
+        def _style_navigation_buttons(self) -> None:
+            styled_buttons: list[QAbstractButton] = []
+            for role in (
+                QWizard.WizardButton.NextButton,
+                QWizard.WizardButton.FinishButton,
+            ):
+                button = self.button(role)
+                button.setProperty("compactPrimary", True)
+                styled_buttons.append(button)
+            for role in (
+                QWizard.WizardButton.BackButton,
+                QWizard.WizardButton.CancelButton,
+            ):
+                button = self.button(role)
+                button.setProperty("flat", True)
+                styled_buttons.append(button)
+            for button in styled_buttons:
+                self._refresh_dynamic_style(button)
 
         def _phrase_card(
             self, parent: QWidget, language: str, phrase: str
@@ -329,6 +369,7 @@ if PYSIDE6_AVAILABLE:
 
         def _microphone_changed(self, _index: int) -> None:
             identifier = str(self.microphone_combo.currentData() or "")
+            self.microphone_combo.setToolTip(self.microphone_combo.currentText())
             self.microphone_page.set_complete(bool(identifier))
             if identifier:
                 self.microphone_selected.emit(identifier)
@@ -349,12 +390,19 @@ if PYSIDE6_AVAILABLE:
                     name = getattr(microphone, "name", str(microphone))
                     identifier = getattr(microphone, "id", getattr(microphone, "device_id", name))
                     self.microphone_combo.addItem(str(name), identifier)
+            for index in range(self.microphone_combo.count()):
+                self.microphone_combo.setItemData(
+                    index,
+                    self.microphone_combo.itemText(index),
+                    Qt.ItemDataRole.ToolTipRole,
+                )
             if selected_id is not None:
                 selected_index = self.microphone_combo.findData(selected_id)
                 if selected_index >= 0:
                     self.microphone_combo.setCurrentIndex(selected_index)
             del blocker
             identifier = str(self.microphone_combo.currentData() or "")
+            self.microphone_combo.setToolTip(self.microphone_combo.currentText())
             self.microphone_page.set_complete(bool(identifier))
             self.microphone_status.setText(
                 "Говорите обычным голосом" if identifier else "Устройства записи не найдены"
@@ -382,6 +430,8 @@ if PYSIDE6_AVAILABLE:
                 self.calibration_status.setText("Сначала выберите микрофон")
                 return
             self.calibration_button.setEnabled(False)
+            self.calibration_button.setProperty("primary", True)
+            self._refresh_dynamic_style(self.calibration_button)
             self.calibration_status.setText("Пожалуйста, помолчите 2–3 секунды.")
             self.calibration_progress.setRange(0, 100)
             self.calibration_progress.setValue(0)
@@ -403,15 +453,17 @@ if PYSIDE6_AVAILABLE:
             self.calibration_progress.setValue(100)
             self.calibration_status.setText(f"{result.title}\n{result.message}")
             color = (
-                "#1A9B67"
+                state_color("success")
                 if result.status is CalibrationStatus.GOOD
-                else "#D98B16"
+                else state_color("warning")
                 if result.status is CalibrationStatus.QUIET_BUT_USABLE
-                else "#D34A55"
+                else state_color("error")
             )
             self.calibration_status.setStyleSheet(f"color: {color};")
             self.calibration_button.setEnabled(True)
             self.calibration_button.setText("Повторить")
+            self.calibration_button.setProperty("primary", False)
+            self._refresh_dynamic_style(self.calibration_button)
             self.calibration_details.setText(result.technical_details)
             self.calibration_details_button.setVisible(result.capture_worked)
             self.choose_microphone_button.setVisible(not result.usable)
@@ -460,7 +512,9 @@ if PYSIDE6_AVAILABLE:
             self.model_progress.setRange(0, 100)
             self.model_progress.setValue(100 if ready else 0)
             self.model_status.setText(message)
-            self.model_status.setStyleSheet(f"color: {'#1A9B67' if ready else '#D34A55'};")
+            self.model_status.setStyleSheet(
+                f"color: {state_color('success' if ready else 'error')};"
+            )
             self.download_button.setEnabled(True)
             self.download_button.setText("Проверить снова" if ready else "Повторить")
             self.model_page.set_complete(ready)
@@ -472,7 +526,7 @@ if PYSIDE6_AVAILABLE:
                 ("Распознано: " if ok else "Не удалось распознать: ")
                 + (recognized_text or "пустой результат")
             )
-            label.setStyleSheet(f"color: {'#1A9B67' if ok else '#D34A55'};")
+            label.setStyleSheet(f"color: {state_color('success' if ok else 'error')};")
             self._phrase_ok[normalized] = bool(ok)
             self.phrase_page.set_complete(all(self._phrase_ok.values()))
 
@@ -497,10 +551,10 @@ if PYSIDE6_AVAILABLE:
             self.insertion_page.set_complete(ok)
             if ok:
                 self.insertion_status.setText("Вставка Unicode работает")
-                self.insertion_status.setStyleSheet("color: #1A9B67;")
+                self.insertion_status.setStyleSheet(f"color: {state_color('success')};")
             elif actual:
                 self.insertion_status.setText("Текст отличается — повторите проверку")
-                self.insertion_status.setStyleSheet("color: #D34A55;")
+                self.insertion_status.setStyleSheet(f"color: {state_color('error')};")
 
         def setup_values(self) -> dict[str, object]:
             return {
@@ -513,6 +567,13 @@ if PYSIDE6_AVAILABLE:
         def accept(self) -> None:
             self.setup_completed.emit(self.setup_values())
             super().accept()
+
+        @staticmethod
+        def _refresh_dynamic_style(widget: QWidget) -> None:
+            style = widget.style()
+            style.unpolish(widget)
+            style.polish(widget)
+            widget.update()
 
 else:
 

@@ -38,6 +38,7 @@ if PYSIDE6_AVAILABLE:
         QWidget,
     )
 
+    from .theme import SPACING, state_color
     from .widgets import AudioLevelMeter, Card, rms_to_meter
 
     class SettingsWindow(QDialog):
@@ -70,7 +71,13 @@ if PYSIDE6_AVAILABLE:
 
         def _build_ui(self) -> None:
             root = QVBoxLayout(self)
-            root.setContentsMargins(22, 20, 22, 18)
+            root.setContentsMargins(
+                SPACING.space_5,
+                SPACING.space_5,
+                SPACING.space_5,
+                SPACING.space_4,
+            )
+            root.setSpacing(SPACING.space_4)
             header = QHBoxLayout()
             heading = QLabel("Настройки", self)
             heading.setProperty("heading", True)
@@ -83,7 +90,8 @@ if PYSIDE6_AVAILABLE:
             content = QHBoxLayout()
             self.navigation = QListWidget(self)
             self.navigation.setObjectName("settingsNavigation")
-            self.navigation.setFixedWidth(190)
+            self.navigation.setFixedWidth(210)
+            self.navigation.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
             self.pages = QStackedWidget(self)
             self.pages.setObjectName("settingsPages")
             content.addWidget(self.navigation)
@@ -105,9 +113,18 @@ if PYSIDE6_AVAILABLE:
                 | QDialogButtonBox.StandardButton.Cancel,
                 parent=self,
             )
-            self.button_box.button(QDialogButtonBox.StandardButton.Ok).setText("Сохранить")
-            self.button_box.button(QDialogButtonBox.StandardButton.Apply).setText("Применить")
-            self.button_box.button(QDialogButtonBox.StandardButton.Cancel).setText("Отмена")
+            save_button = self.button_box.button(QDialogButtonBox.StandardButton.Ok)
+            apply_button = self.button_box.button(QDialogButtonBox.StandardButton.Apply)
+            cancel_button = self.button_box.button(QDialogButtonBox.StandardButton.Cancel)
+            save_button.setText("Сохранить")
+            save_button.setProperty("compactPrimary", True)
+            apply_button.setText("Применить")
+            cancel_button.setText("Отмена")
+            cancel_button.setProperty("flat", True)
+            for button in (save_button, cancel_button):
+                style = button.style()
+                style.unpolish(button)
+                style.polish(button)
             root.addWidget(self.button_box)
 
         def _page(self, title: str, description: str) -> tuple[QWidget, QFormLayout]:
@@ -117,7 +134,13 @@ if PYSIDE6_AVAILABLE:
             scroll.setWidgetResizable(True)
             canvas = QWidget(scroll)
             layout = QVBoxLayout(canvas)
-            layout.setContentsMargins(22, 6, 22, 18)
+            layout.setContentsMargins(
+                SPACING.space_5,
+                SPACING.space_2,
+                SPACING.space_5,
+                SPACING.space_4,
+            )
+            layout.setSpacing(SPACING.space_3)
             heading = QLabel(title, canvas)
             heading.setProperty("heading", True)
             hint = QLabel(description, canvas)
@@ -129,8 +152,9 @@ if PYSIDE6_AVAILABLE:
             form = QFormLayout()
             form.setContentsMargins(0, 0, 0, 0)
             form.setHorizontalSpacing(24)
-            form.setVerticalSpacing(13)
+            form.setVerticalSpacing(SPACING.space_3)
             form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+            form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
             form_card.content_layout.addLayout(form)
             layout.addWidget(form_card)
             layout.addStretch(1)
@@ -660,6 +684,12 @@ if PYSIDE6_AVAILABLE:
                     name = getattr(device, "name", str(device))
                     identifier = getattr(device, "id", getattr(device, "device_id", name))
                     self.audio_device_combo.addItem(str(name), identifier)
+            for index in range(self.audio_device_combo.count()):
+                self.audio_device_combo.setItemData(
+                    index,
+                    self.audio_device_combo.itemText(index),
+                    Qt.ItemDataRole.ToolTipRole,
+                )
             del blocker
             _select_data(self.audio_device_combo, previous)
 
@@ -682,6 +712,12 @@ if PYSIDE6_AVAILABLE:
                     name = getattr(model, "name", str(model))
                     identifier = getattr(model, "id", name)
                     self.model_combo.addItem(str(name), identifier)
+            for index in range(self.model_combo.count()):
+                self.model_combo.setItemData(
+                    index,
+                    self.model_combo.itemText(index),
+                    Qt.ItemDataRole.ToolTipRole,
+                )
             del blocker
             _select_data(self.model_combo, previous)
 
@@ -708,7 +744,7 @@ if PYSIDE6_AVAILABLE:
             self.diagnostics_status_label.setText(message)
             if ok is not None:
                 self.diagnostics_status_label.setStyleSheet(
-                    f"color: {'#1A9B67' if ok else '#D34A55'};"
+                    f"color: {state_color('success' if ok else 'error')};"
                 )
 
         def _confirm_model_delete(self) -> None:

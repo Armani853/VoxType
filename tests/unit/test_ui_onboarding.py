@@ -15,6 +15,7 @@ def test_onboarding_has_eight_real_steps_and_collects_choices(qtbot) -> None:  #
 
     wizard.set_microphones([("USB Microphone", "mic-1")], "mic-1")
     assert wizard.microphone_page.isComplete()
+    assert wizard.microphone_combo.toolTip() == "USB Microphone"
     wizard.set_calibration_result(
         analyze_calibration(
             np.zeros(16_000, dtype=np.float32),
@@ -25,6 +26,7 @@ def test_onboarding_has_eight_real_steps_and_collects_choices(qtbot) -> None:  #
     )
     assert wizard.calibration_page.isComplete()
     assert wizard.calibration_progress.value() == 100
+    assert wizard.calibration_button.property("primary") is False
     assert wizard.findChild(type(wizard.calibration_status), "onboardingStep1").text() == (
         "Шаг 1 из 8"
     )

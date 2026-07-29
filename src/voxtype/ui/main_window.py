@@ -39,10 +39,11 @@ if PYSIDE6_AVAILABLE:
         QWidget,
     )
 
-    from .theme import create_app_icon
+    from .theme import SPACING, create_app_icon, state_color
     from .widgets import (
         AudioLevelMeter,
         Card,
+        ElidedLabel,
         MetricTile,
         SegmentedLanguageControl,
         StatusDot,
@@ -50,19 +51,19 @@ if PYSIDE6_AVAILABLE:
     )
 
     _STATUS_PRESENTATION: dict[AppStatus, tuple[str, str]] = {
-        AppStatus.STARTING: ("starting", "#657089"),
-        AppStatus.MODEL_LOADING: ("model_loading", "#5B5FEF"),
-        AppStatus.IDLE: ("ready", "#1A9B67"),
-        AppStatus.LISTENING: ("listening", "#5B5FEF"),
-        AppStatus.SPEECH_DETECTED: ("speech", "#1A9B67"),
-        AppStatus.TRANSCRIBING: ("transcribing", "#7A55C5"),
-        AppStatus.PAUSED_TARGET_LOST: ("target_lost", "#D98B16"),
-        AppStatus.FINISHING: ("finishing", "#7A55C5"),
-        AppStatus.COMPLETED: ("ready", "#1A9B67"),
-        AppStatus.ERROR_RECOVERABLE: ("recoverable_error", "#D98B16"),
-        AppStatus.ERROR_FATAL: ("fatal_error", "#D34A55"),
-        AppStatus.SHUTTING_DOWN: ("shutting_down", "#657089"),
-        AppStatus.PAUSED: ("paused", "#D98B16"),
+        AppStatus.STARTING: ("starting", "neutral"),
+        AppStatus.MODEL_LOADING: ("model_loading", "primary"),
+        AppStatus.IDLE: ("ready", "success"),
+        AppStatus.LISTENING: ("listening", "primary"),
+        AppStatus.SPEECH_DETECTED: ("speech", "success"),
+        AppStatus.TRANSCRIBING: ("transcribing", "primary"),
+        AppStatus.PAUSED_TARGET_LOST: ("target_lost", "warning"),
+        AppStatus.FINISHING: ("finishing", "primary"),
+        AppStatus.COMPLETED: ("ready", "success"),
+        AppStatus.ERROR_RECOVERABLE: ("recoverable_error", "warning"),
+        AppStatus.ERROR_FATAL: ("fatal_error", "error"),
+        AppStatus.SHUTTING_DOWN: ("shutting_down", "neutral"),
+        AppStatus.PAUSED: ("paused", "warning"),
     }
 
     class MainWindow(QMainWindow):
@@ -112,8 +113,13 @@ if PYSIDE6_AVAILABLE:
             canvas = QWidget(scroll)
             scroll.setWidget(canvas)
             outer = QVBoxLayout(canvas)
-            outer.setContentsMargins(28, 24, 28, 28)
-            outer.setSpacing(18)
+            outer.setContentsMargins(
+                SPACING.space_6,
+                SPACING.space_6,
+                SPACING.space_6,
+                SPACING.space_6,
+            )
+            outer.setSpacing(SPACING.space_5)
 
             header = QHBoxLayout()
             title_column = QVBoxLayout()
@@ -127,10 +133,7 @@ if PYSIDE6_AVAILABLE:
             header.addLayout(title_column)
             self.local_badge = QLabel("ЛОКАЛЬНО", canvas)
             self.local_badge.setObjectName("localBadge")
-            self.local_badge.setStyleSheet(
-                "padding: 4px 8px; border-radius: 7px; color: #1A9B67; "
-                "background: #E4F7EF; font-size: 8pt; font-weight: 700;"
-            )
+            self.local_badge.setProperty("statusBadge", "success")
             header.addWidget(self.local_badge)
             header.addStretch(1)
             self.history_button = self._header_button("История", "historyButton")
@@ -143,10 +146,7 @@ if PYSIDE6_AVAILABLE:
 
             self.error_banner = QFrame(canvas)
             self.error_banner.setObjectName("errorBanner")
-            self.error_banner.setStyleSheet(
-                "QFrame#errorBanner { background: #FFF4E1; border: 1px solid #F2CA83; "
-                "border-radius: 11px; }"
-            )
+            self.error_banner.setProperty("warningBanner", True)
             banner_layout = QHBoxLayout(self.error_banner)
             banner_layout.setContentsMargins(14, 10, 12, 10)
             self.error_label = QLabel("", self.error_banner)
@@ -187,8 +187,12 @@ if PYSIDE6_AVAILABLE:
             hero.content_layout.addWidget(self.dictation_button)
             self.hotkey_label = QLabel("Ctrl+Alt+Space", hero)
             self.hotkey_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.hotkey_label.setProperty("muted", True)
-            hero.content_layout.addWidget(self.hotkey_label)
+            self.hotkey_label.setProperty("keyHint", True)
+            hero.content_layout.addWidget(
+                self.hotkey_label,
+                0,
+                Qt.AlignmentFlag.AlignHCenter,
+            )
             outer.addWidget(hero)
 
             device_grid = QGridLayout()
@@ -197,15 +201,14 @@ if PYSIDE6_AVAILABLE:
             microphone = Card(canvas, spacing=7)
             microphone.setObjectName("microphoneCard")
             self.microphone_title = QLabel("Микрофон", microphone)
-            self.microphone_title.setProperty("muted", True)
-            self.microphone_label = QLabel("Системный микрофон", microphone)
+            self.microphone_title.setProperty("caption", True)
+            self.microphone_label = ElidedLabel("Системный микрофон", microphone)
             self.microphone_label.setObjectName("microphoneLabel")
             self.microphone_label.setProperty("sectionHeading", True)
-            self.microphone_label.setWordWrap(True)
             self.audio_meter = AudioLevelMeter(microphone)
             self.audio_meter.setObjectName("audioMeter")
             self.audio_hint = QLabel("Нет клиппинга", microphone)
-            self.audio_hint.setProperty("muted", True)
+            self.audio_hint.setProperty("caption", True)
             microphone.content_layout.addWidget(self.microphone_title)
             microphone.content_layout.addWidget(self.microphone_label)
             microphone.content_layout.addWidget(self.audio_meter)
@@ -215,13 +218,13 @@ if PYSIDE6_AVAILABLE:
             model = Card(canvas, spacing=7)
             model.setObjectName("modelCard")
             self.model_title = QLabel("Режим", model)
-            self.model_title.setProperty("muted", True)
+            self.model_title.setProperty("caption", True)
             self.model_label = QLabel("Баланс", model)
             self.model_label.setObjectName("modelLabel")
             self.model_label.setProperty("sectionHeading", True)
             self.model_label.setWordWrap(True)
             self.profile_label = QLabel("Локальная модель: не загружена", model)
-            self.profile_label.setProperty("muted", True)
+            self.profile_label.setProperty("caption", True)
             model.content_layout.addWidget(self.model_title)
             model.content_layout.addWidget(self.model_label)
             model.content_layout.addWidget(self.profile_label)
@@ -247,7 +250,7 @@ if PYSIDE6_AVAILABLE:
             fragment = Card(canvas, spacing=8)
             fragment.setObjectName("lastFragmentCard")
             self.fragment_title = QLabel("Последний фрагмент", fragment)
-            self.fragment_title.setProperty("muted", True)
+            self.fragment_title.setProperty("caption", True)
             self.fragment_label = QLabel("Распознанный текст появится здесь", fragment)
             self.fragment_label.setObjectName("lastFragmentLabel")
             self.fragment_label.setWordWrap(True)
@@ -313,8 +316,8 @@ if PYSIDE6_AVAILABLE:
         def update_snapshot(self, snapshot: UIState | object) -> None:
             state = snapshot_from(snapshot)
             self._state = state
-            key, color = _STATUS_PRESENTATION[state.state]
-            self.status_dot.set_color(color)
+            key, color_role = _STATUS_PRESENTATION[state.state]
+            self.status_dot.set_color(state_color(color_role))
             self.status_label.setText(ui_text(key, self._interface_language))
             detail = state.error_message or state.status_message
             if not detail:
@@ -334,6 +337,11 @@ if PYSIDE6_AVAILABLE:
                 state.target_title,
             )
             self.fragment_label.setText(self._fragment_text(state))
+            self.fragment_label.setProperty(
+                "tertiary",
+                not bool(state.last_committed_text or state.full_transcript),
+            )
+            self._refresh_dynamic_style(self.fragment_label)
             active = state.state.active
             self.dictation_button.setText(
                 ui_text("stop" if active else "start", self._interface_language)

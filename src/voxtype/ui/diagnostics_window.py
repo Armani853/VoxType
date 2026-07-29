@@ -9,8 +9,8 @@ from ._optional import PYSIDE6_AVAILABLE, require_pyside6
 from .models import DiagnosticReport, diagnostic_report_from
 
 if PYSIDE6_AVAILABLE:
-    from PySide6.QtCore import Qt, Signal
-    from PySide6.QtGui import QGuiApplication
+    from PySide6.QtCore import Signal
+    from PySide6.QtGui import QColor, QGuiApplication
     from PySide6.QtWidgets import (
         QDialog,
         QHBoxLayout,
@@ -25,6 +25,8 @@ if PYSIDE6_AVAILABLE:
         QVBoxLayout,
         QWidget,
     )
+
+    from .theme import SPACING, state_color
 
     class DiagnosticsWindow(QDialog):
         refresh_requested = Signal()
@@ -46,7 +48,13 @@ if PYSIDE6_AVAILABLE:
 
         def _build_ui(self) -> None:
             root = QVBoxLayout(self)
-            root.setContentsMargins(22, 20, 22, 18)
+            root.setContentsMargins(
+                SPACING.space_5,
+                SPACING.space_5,
+                SPACING.space_5,
+                SPACING.space_4,
+            )
+            root.setSpacing(SPACING.space_3)
             header = QHBoxLayout()
             heading_column = QVBoxLayout()
             heading = QLabel("Диагностика", self)
@@ -59,9 +67,9 @@ if PYSIDE6_AVAILABLE:
             header.addLayout(heading_column)
             header.addStretch(1)
             self.refresh_button = QPushButton("Обновить", self)
+            self.refresh_button.setProperty("flat", True)
             self.self_test_button = QPushButton("Выполнить self-test", self)
-            self.self_test_button.setProperty("primary", True)
-            self.self_test_button.setStyleSheet("min-height: 34px; font-size: 10pt;")
+            self.self_test_button.setProperty("compactPrimary", True)
             header.addWidget(self.refresh_button)
             header.addWidget(self.self_test_button)
             root.addLayout(header)
@@ -80,7 +88,9 @@ if PYSIDE6_AVAILABLE:
             self.checks_table.setObjectName("checksTable")
             self.checks_table.setHorizontalHeaderLabels(("Проверка", "Результат", "Подробности"))
             self.checks_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+            self.checks_table.setShowGrid(False)
             self.checks_table.verticalHeader().setVisible(False)
+            self.checks_table.verticalHeader().setDefaultSectionSize(38)
             checks_header = self.checks_table.horizontalHeader()
             checks_header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
             checks_header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
@@ -119,6 +129,7 @@ if PYSIDE6_AVAILABLE:
             self.copy_button = QPushButton("Копировать отчёт", self)
             self.export_button = QPushButton("Экспортировать…", self)
             self.close_button = QPushButton("Закрыть", self)
+            self.close_button.setProperty("flat", True)
             actions.addWidget(self.open_log_button)
             actions.addWidget(self.copy_button)
             actions.addWidget(self.export_button)
@@ -130,7 +141,9 @@ if PYSIDE6_AVAILABLE:
             table = QTableWidget(0, 2, self.tabs)
             table.setHorizontalHeaderLabels(("Параметр", "Значение"))
             table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+            table.setShowGrid(False)
             table.verticalHeader().setVisible(False)
+            table.verticalHeader().setDefaultSectionSize(38)
             header = table.horizontalHeader()
             header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
             header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
@@ -172,9 +185,7 @@ if PYSIDE6_AVAILABLE:
             for row, (name, ok, detail) in enumerate(checks):
                 name_item = QTableWidgetItem(name)
                 result_item = QTableWidgetItem("Готово" if ok else "Проблема")
-                result_item.setForeground(
-                    Qt.GlobalColor.darkGreen if ok else Qt.GlobalColor.darkRed
-                )
+                result_item.setForeground(QColor(state_color("success" if ok else "error")))
                 detail_item = QTableWidgetItem(detail)
                 detail_item.setToolTip(detail)
                 self.checks_table.setItem(row, 0, name_item)

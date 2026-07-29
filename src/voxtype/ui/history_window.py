@@ -21,6 +21,7 @@ if PYSIDE6_AVAILABLE:
         QMessageBox,
         QPushButton,
         QSplitter,
+        QStackedLayout,
         QTableWidget,
         QTableWidgetItem,
         QTextEdit,
@@ -28,6 +29,7 @@ if PYSIDE6_AVAILABLE:
         QWidget,
     )
 
+    from .theme import SPACING, state_color
     from .widgets import Card
 
     class HistoryWindow(QDialog):
@@ -41,7 +43,7 @@ if PYSIDE6_AVAILABLE:
             self.setObjectName("historyWindow")
             self.setWindowTitle("История диктовки — VoxType")
             self.resize(1000, 650)
-            self.setMinimumSize(760, 500)
+            self.setMinimumSize(980, 520)
             self._entries: dict[str, HistoryEntry] = {}
             self._detail_session_id: str | None = None
             self._build_ui()
@@ -49,7 +51,13 @@ if PYSIDE6_AVAILABLE:
 
         def _build_ui(self) -> None:
             root = QVBoxLayout(self)
-            root.setContentsMargins(22, 20, 22, 18)
+            root.setContentsMargins(
+                SPACING.space_5,
+                SPACING.space_5,
+                SPACING.space_5,
+                SPACING.space_4,
+            )
+            root.setSpacing(SPACING.space_3)
             header = QHBoxLayout()
             heading_column = QVBoxLayout()
             heading = QLabel("История диктовки", self)
@@ -61,6 +69,7 @@ if PYSIDE6_AVAILABLE:
             header.addLayout(heading_column)
             header.addStretch(1)
             self.refresh_button = QPushButton("Обновить", self)
+            self.refresh_button.setProperty("flat", True)
             header.addWidget(self.refresh_button)
             root.addLayout(header)
 
@@ -84,7 +93,11 @@ if PYSIDE6_AVAILABLE:
             root.addLayout(filters)
 
             splitter = QSplitter(Qt.Orientation.Horizontal, self)
-            self.table = QTableWidget(0, 5, splitter)
+            left_panel = QWidget(splitter)
+            left_panel.setMinimumWidth(520)
+            left_stack = QStackedLayout(left_panel)
+            left_stack.setContentsMargins(0, 0, 0, 0)
+            self.table = QTableWidget(0, 5, left_panel)
             self.table.setObjectName("historyTable")
             self.table.setHorizontalHeaderLabels(
                 ("Начало", "Язык", "Длительность", "Приложение", "Статус")
@@ -95,28 +108,51 @@ if PYSIDE6_AVAILABLE:
             self.table.setWordWrap(False)
             self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
             self.table.setSortingEnabled(True)
+            self.table.setShowGrid(False)
             self.table.verticalHeader().setVisible(False)
+            self.table.verticalHeader().setDefaultSectionSize(38)
             table_header = self.table.horizontalHeader()
             table_header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-            table_header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-            table_header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+            table_header.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
+            table_header.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
             table_header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
-            table_header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+            table_header.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
+            table_header.resizeSection(1, 68)
+            table_header.resizeSection(2, 108)
+            table_header.resizeSection(4, 108)
+
+            empty_panel = Card(left_panel)
+            empty_panel.content_layout.addStretch(1)
+            self.empty_label = QLabel("Записей не найдено", empty_panel)
+            self.empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.empty_label.setProperty("sectionHeading", True)
+            self.empty_hint = QLabel("Попробуйте изменить фильтры.", empty_panel)
+            self.empty_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.empty_hint.setProperty("muted", True)
+            empty_panel.content_layout.addWidget(self.empty_label)
+            empty_panel.content_layout.addWidget(self.empty_hint)
+            empty_panel.content_layout.addStretch(1)
+            left_stack.addWidget(self.table)
+            left_stack.addWidget(empty_panel)
+            self._history_left_stack = left_stack
+            self._history_empty_panel = empty_panel
 
             detail = Card(splitter)
+            detail.setMinimumWidth(400)
             detail.setObjectName("historyDetail")
             detail_title = QLabel("Расшифровка", detail)
             detail_title.setProperty("sectionHeading", True)
             self.metadata_label = QLabel("Выберите сессию слева", detail)
-            self.metadata_label.setProperty("muted", True)
+            self.metadata_label.setProperty("caption", True)
             self.metadata_label.setWordWrap(True)
             self.text_edit = QTextEdit(detail)
             self.text_edit.setObjectName("historyText")
             self.text_edit.setReadOnly(True)
+            self.text_edit.setProperty("contentSurface", True)
             self.text_edit.setPlaceholderText("Текст выбранной сессии")
             self.warning_label = QLabel("", detail)
             self.warning_label.setWordWrap(True)
-            self.warning_label.setStyleSheet("color: #D98B16;")
+            self.warning_label.setStyleSheet(f"color: {state_color('warning')};")
             actions = QHBoxLayout()
             self.copy_button = QPushButton("Копировать", detail)
             self.export_button = QPushButton("Экспорт…", detail)
@@ -137,16 +173,12 @@ if PYSIDE6_AVAILABLE:
             detail.content_layout.addWidget(self.text_edit, 1)
             detail.content_layout.addWidget(self.warning_label)
             detail.content_layout.addLayout(actions)
-            splitter.addWidget(self.table)
+            splitter.addWidget(left_panel)
             splitter.addWidget(detail)
             splitter.setStretchFactor(0, 3)
             splitter.setStretchFactor(1, 4)
             splitter.setSizes((440, 540))
             root.addWidget(splitter, 1)
-            self.empty_label = QLabel("Записей не найдено", self)
-            self.empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.empty_label.setProperty("muted", True)
-            root.addWidget(self.empty_label)
             self._set_action_state(None)
 
         def _connect_ui(self) -> None:
@@ -265,8 +297,9 @@ if PYSIDE6_AVAILABLE:
                     visible_rows.append(row)
                     visible_session_ids.add(session_id)
             has_visible = bool(visible_rows)
-            self.empty_label.setVisible(not has_visible)
-            self.table.setVisible(has_visible)
+            self._history_left_stack.setCurrentWidget(
+                self.table if has_visible else self._history_empty_panel
+            )
 
             selected_id = preferred_session_id or self.selected_session_id()
             if selected_id in visible_session_ids:

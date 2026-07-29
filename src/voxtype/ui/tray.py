@@ -13,7 +13,7 @@ if PYSIDE6_AVAILABLE:
     from PySide6.QtGui import QAction, QActionGroup, QIcon
     from PySide6.QtWidgets import QMenu, QSystemTrayIcon
 
-    from .theme import create_app_icon
+    from .theme import create_app_icon, state_color
 
     class TrayController(QObject):
         dictation_toggle_requested = Signal()
@@ -153,11 +153,11 @@ if PYSIDE6_AVAILABLE:
         @staticmethod
         def _icon_for_state(state: AppStatus) -> QIcon:
             if state in {AppStatus.ERROR_FATAL, AppStatus.ERROR_RECOVERABLE}:
-                return cast(QIcon, create_app_icon(color="#D34A55"))
+                return cast(QIcon, create_app_icon(color=state_color("error")))
             if state in {AppStatus.PAUSED, AppStatus.PAUSED_TARGET_LOST}:
-                return cast(QIcon, create_app_icon(color="#D98B16"))
+                return cast(QIcon, create_app_icon(color=state_color("warning")))
             if state.active:
-                return cast(QIcon, create_app_icon(color="#1A9B67"))
+                return cast(QIcon, create_app_icon(color=state_color("success")))
             return cast(QIcon, create_app_icon())
 
         def show(self) -> bool:

@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.2.3
+
+- Unified the light-first interface around semantic colors, typography,
+  spacing, radii and explicit button roles while retaining the existing
+  indigo VoxType identity and native Windows behavior.
+- Polished hierarchy and long-text handling across Main, overlays, onboarding,
+  calibration, History, Settings and Diagnostics; added consistent focus,
+  hover, pressed, disabled, selection and empty states.
+- Added multi-resolution runtime and packaged Windows icons for crisp shell,
+  tray, taskbar and installer rendering from 16 through 256 px.
+- Verified key layouts at 100%, 125% and 150% scaling without changing
+  dictation behavior, audio, ASR, delivery or persistence.
+
 ## 0.2.2
 
 - Moved session preparation, model loading, microphone startup and shutdown

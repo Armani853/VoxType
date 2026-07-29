@@ -18,7 +18,7 @@ from .models import (
 
 if PYSIDE6_AVAILABLE:
     from PySide6.QtCore import QPoint, QSettings, Qt, Signal
-    from PySide6.QtGui import QCloseEvent, QKeyEvent, QMouseEvent, QShowEvent
+    from PySide6.QtGui import QCloseEvent, QColor, QKeyEvent, QMouseEvent, QShowEvent
     from PySide6.QtWidgets import (
         QApplication,
         QFrame,
@@ -32,23 +32,23 @@ if PYSIDE6_AVAILABLE:
         QWidget,
     )
 
-    from .theme import create_app_icon
-    from .widgets import AudioLevelMeter, StatusDot, rms_to_meter
+    from .theme import OVERLAY_PALETTE, create_app_icon, overlay_stylesheet
+    from .widgets import AudioLevelMeter, ElidedLabel, StatusDot, rms_to_meter
 
     _OVERLAY_STATES: dict[AppStatus, tuple[str, str]] = {
-        AppStatus.STARTING: ("Запуск", "#657089"),
-        AppStatus.MODEL_LOADING: ("Модель", "#7B7FF6"),
-        AppStatus.IDLE: ("Готово", "#1A9B67"),
-        AppStatus.LISTENING: ("Слушаю", "#5B5FEF"),
-        AppStatus.SPEECH_DETECTED: ("Речь", "#1A9B67"),
-        AppStatus.TRANSCRIBING: ("Обработка", "#7A55C5"),
-        AppStatus.PAUSED_TARGET_LOST: ("Цель неактивна", "#D98B16"),
-        AppStatus.FINISHING: ("Завершаю", "#7A55C5"),
-        AppStatus.COMPLETED: ("Готово", "#1A9B67"),
-        AppStatus.ERROR_RECOVERABLE: ("Внимание", "#D98B16"),
-        AppStatus.ERROR_FATAL: ("Ошибка", "#D34A55"),
-        AppStatus.SHUTTING_DOWN: ("Завершение", "#657089"),
-        AppStatus.PAUSED: ("Пауза", "#D98B16"),
+        AppStatus.STARTING: ("Запуск", "text_tertiary"),
+        AppStatus.MODEL_LOADING: ("Модель", "primary"),
+        AppStatus.IDLE: ("Готово", "success"),
+        AppStatus.LISTENING: ("Слушаю", "primary"),
+        AppStatus.SPEECH_DETECTED: ("Речь", "success"),
+        AppStatus.TRANSCRIBING: ("Обработка", "primary"),
+        AppStatus.PAUSED_TARGET_LOST: ("Цель неактивна", "warning"),
+        AppStatus.FINISHING: ("Завершаю", "primary"),
+        AppStatus.COMPLETED: ("Готово", "success"),
+        AppStatus.ERROR_RECOVERABLE: ("Внимание", "warning"),
+        AppStatus.ERROR_FATAL: ("Ошибка", "error"),
+        AppStatus.SHUTTING_DOWN: ("Завершение", "text_tertiary"),
+        AppStatus.PAUSED: ("Пауза", "warning"),
     }
 
     class DictationOverlay(QWidget):
@@ -97,20 +97,11 @@ if PYSIDE6_AVAILABLE:
             outer.setContentsMargins(12, 12, 12, 12)
             self.panel = QFrame(self)
             self.panel.setObjectName("overlayPanel")
-            self.panel.setStyleSheet(
-                "QFrame#overlayPanel { background: rgba(24, 29, 40, 247); "
-                "border: 1px solid rgba(255,255,255,34); border-radius: 16px; } "
-                "QLabel { color: #F7F8FB; font-family: 'Segoe UI Variable', 'Segoe UI'; } "
-                "QLabel[muted='true'] { color: #AEB6C8; } "
-                "QPushButton { color: #F7F8FB; background: #30384A; border: none; "
-                "border-radius: 8px; padding: 5px 10px; min-height: 25px; } "
-                "QPushButton:hover { background: #414C62; } "
-                "QPushButton[danger='true'] { background: #C94652; }"
-            )
+            self.panel.setStyleSheet(overlay_stylesheet())
             shadow = QGraphicsDropShadowEffect(self.panel)
-            shadow.setBlurRadius(30)
-            shadow.setOffset(0, 6)
-            shadow.setColor(Qt.GlobalColor.black)
+            shadow.setBlurRadius(18)
+            shadow.setOffset(0, 4)
+            shadow.setColor(QColor(0, 0, 0, 90))
             self.panel.setGraphicsEffect(shadow)
             panel_layout = QVBoxLayout(self.panel)
             panel_layout.setContentsMargins(14, 10, 12, 11)
@@ -128,25 +119,18 @@ if PYSIDE6_AVAILABLE:
             status_column.setSpacing(0)
             self.status_label = QLabel("Готово", self.panel)
             self.status_label.setObjectName("overlayStatusLabel")
-            self.status_label.setStyleSheet("font-weight: 650;")
+            self.status_label.setProperty("overlayStatus", True)
             self.processing_label = QLabel("Локально", self.panel)
-            self.processing_label.setProperty("muted", True)
-            self.processing_label.setStyleSheet("font-size: 8pt;")
+            self.processing_label.setProperty("overlayCaption", True)
             status_column.addWidget(self.status_label)
             status_column.addWidget(self.processing_label)
             compact_row.addLayout(status_column)
             self.language_label = QLabel("RU", self.panel)
             self.language_label.setObjectName("overlayLanguageLabel")
-            self.language_label.setStyleSheet(
-                "color: #AEB0FF; background: #30335C; border-radius: 6px; "
-                "font-weight: 700; padding: 3px 6px;"
-            )
+            self.language_label.setProperty("overlayLanguage", True)
             compact_row.addWidget(self.language_label)
             self.timer_label = QLabel("00:00:00", self.panel)
             self.timer_label.setObjectName("overlayTimerLabel")
-            self.timer_label.setStyleSheet(
-                "font-family: 'Cascadia Mono', Consolas; font-weight: 600;"
-            )
             compact_row.addWidget(self.timer_label)
             self.audio_meter = AudioLevelMeter(self.panel)
             self.audio_meter.setObjectName("overlayAudioMeter")
@@ -177,14 +161,15 @@ if PYSIDE6_AVAILABLE:
             self.result_text = QPlainTextEdit(self.expanded_panel)
             self.result_text.setObjectName("overlayResultText")
             self.result_text.setReadOnly(True)
-            self.result_text.setMaximumHeight(130)
+            self.result_text.setMinimumHeight(110)
+            self.result_text.setMaximumHeight(150)
             self.result_text.hide()
             expanded_layout.addWidget(self.result_text)
             metadata = QHBoxLayout()
             self.queue_label = QLabel("Очередь: 0.0 с", self.expanded_panel)
             self.queue_label.setObjectName("overlayQueueLabel")
             self.queue_label.setProperty("muted", True)
-            self.target_label = QLabel("Цель: —", self.expanded_panel)
+            self.target_label = ElidedLabel("Цель: —", self.expanded_panel)
             self.target_label.setObjectName("overlayTargetLabel")
             self.target_label.setProperty("muted", True)
             self.target_label.setSizePolicy(
@@ -212,6 +197,7 @@ if PYSIDE6_AVAILABLE:
             self.copy_all_button = QPushButton("Копировать всё", self.result_buttons)
             self.insert_button = QPushButton("Вставить / повторить", self.result_buttons)
             self.close_result_button = QPushButton("Закрыть", self.result_buttons)
+            self.close_result_button.setProperty("flat", True)
             result_layout.addWidget(self.copy_all_button)
             result_layout.addWidget(self.insert_button)
             result_layout.addWidget(self.close_result_button)
@@ -250,13 +236,19 @@ if PYSIDE6_AVAILABLE:
         def update_snapshot(self, snapshot: UIState | object) -> None:
             state = snapshot_from(snapshot)
             self._state = state
-            text, color = _OVERLAY_STATES[state.state]
+            text, color_role = _OVERLAY_STATES[state.state]
             self.status_label.setText(text)
-            self.status_dot.set_color(color)
+            self.status_dot.set_color(OVERLAY_PALETTE[color_role])
             self.language_label.setText(state.language.value.upper())
             self.timer_label.setText(format_duration(state.session_elapsed_s))
             self.audio_meter.set_level(rms_to_meter(state.input_rms), state.clipping_percentage)
             self.processing_label.setText(self._processing_text(state))
+            self.processing_label.setToolTip(
+                "Автоматическая вставка не выполнена; полный текст сохранён."
+                if state.state is AppStatus.COMPLETED
+                and state.delivery_status in {"failed", "queued_target_inactive", "unknown"}
+                else ""
+            )
             transcript = (
                 state.full_transcript
                 if state.state is AppStatus.COMPLETED
@@ -270,6 +262,7 @@ if PYSIDE6_AVAILABLE:
             else:
                 self.provisional_label.setText(text_preview(transcript, 420) or "Ожидаю речь…")
             self.queue_label.setText(f"Очередь: {format_backlog(state.queued_audio_seconds)}")
+            self.queue_label.setVisible(not completed)
             target = state.target_title or "не выбрана"
             self.target_label.setText(f"Цель: {target}")
             self.target_label.setToolTip(target)
@@ -282,6 +275,13 @@ if PYSIDE6_AVAILABLE:
             self.insert_button.setEnabled(
                 state.delivery_status in {"pending", "failed", "queued_target_inactive"}
             )
+            insertion_failed = state.delivery_status in {
+                "failed",
+                "queued_target_inactive",
+                "unknown",
+            }
+            self.copy_all_button.setProperty("primary", completed and insertion_failed)
+            self._refresh_dynamic_style(self.copy_all_button)
             if completed and self._compact:
                 self.set_compact(False, persist=False)
 
@@ -289,6 +289,12 @@ if PYSIDE6_AVAILABLE:
         def _processing_text(state: UIState) -> str:
             if state.error_message:
                 return state.error_message
+            if state.state is AppStatus.COMPLETED:
+                if state.delivery_status == "delivered":
+                    return "Текст вставлен"
+                if state.delivery_status in {"failed", "queued_target_inactive", "unknown"}:
+                    return "Текст сохранён"
+                return "Полный текст сохранён"
             if state.queued_audio_seconds >= 10:
                 return "Обработка отстаёт"
             if state.clipping_percentage > 0.1 or state.input_rms >= 0.98:
@@ -296,6 +302,13 @@ if PYSIDE6_AVAILABLE:
             if state.state is AppStatus.PAUSED_TARGET_LOST:
                 return "Текст сохранён в очереди"
             return "LOCAL"
+
+        @staticmethod
+        def _refresh_dynamic_style(widget: QWidget) -> None:
+            style = widget.style()
+            style.unpolish(widget)
+            style.polish(widget)
+            widget.update()
 
         def toggle_compact(self) -> None:
             self.set_compact(not self._compact)
