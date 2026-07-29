@@ -38,8 +38,8 @@ foreach ($Target in @($BuildRoot, $AssetRoot, $PortableRoot)) {
 }
 New-Item -ItemType Directory -Path $BuildRoot, $DistRoot, $ReleaseRoot -Force | Out-Null
 $CurrentReleaseFiles = @(
-    (Join-Path $ReleaseRoot 'VoxType-0.2.3-win64-portable.zip')
-    (Join-Path $ReleaseRoot 'VoxType-0.2.3-win64-portable.zip.sha256')
+    (Join-Path $ReleaseRoot 'VoxType-0.2.4-win64-portable.zip')
+    (Join-Path $ReleaseRoot 'VoxType-0.2.4-win64-portable.zip.sha256')
 )
 foreach ($CurrentReleaseFile in $CurrentReleaseFiles) {
     if (Test-Path -LiteralPath $CurrentReleaseFile) {
@@ -82,8 +82,8 @@ $NuitkaArguments = @(
     '--windows-company-name=VoxType',
     '--windows-product-name=VoxType',
     '--windows-file-description=Local continuous dictation',
-    '--windows-file-version=0.2.3.0',
-    '--windows-product-version=0.2.3.0',
+    '--windows-file-version=0.2.4.0',
+    '--windows-product-version=0.2.4.0',
     '--output-filename=VoxType.exe',
     "--output-dir=$BuildRoot",
     $EntryPoint
@@ -120,10 +120,10 @@ finally {
 }
 
 Write-Host '[6/6] Creating ZIP and SHA-256 checksum'
-$Archive = Join-Path $ReleaseRoot 'VoxType-0.2.3-win64-portable.zip'
+$Archive = Join-Path $ReleaseRoot 'VoxType-0.2.4-win64-portable.zip'
 Compress-Archive -LiteralPath $PortableRoot -DestinationPath $Archive -CompressionLevel Optimal
 $Hash = Get-FileHash -Algorithm SHA256 -LiteralPath $Archive
-$Checksum = Join-Path $ReleaseRoot 'VoxType-0.2.3-win64-portable.zip.sha256'
+$Checksum = Join-Path $ReleaseRoot 'VoxType-0.2.4-win64-portable.zip.sha256'
 Set-Content -LiteralPath $Checksum -Encoding ascii -Value "$($Hash.Hash.ToLowerInvariant())  $($Hash.Path | Split-Path -Leaf)"
 Write-Host "Portable: $PortableRoot"
 Write-Host "Archive:  $Archive"

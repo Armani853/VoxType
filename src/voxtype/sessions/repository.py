@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import threading
 import time
@@ -40,8 +41,21 @@ class SessionRepository:
         self.path = path or user_data_path(APP_NAME, APP_AUTHOR) / "sessions.sqlite3"
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
+        self.last_recovery_backup: Path | None = None
         self._connection = sqlite3.connect(self.path, timeout=5.0, check_same_thread=False)
         self._connection.row_factory = sqlite3.Row
+        try:
+            self._initialize_schema()
+        except sqlite3.DatabaseError as exc:
+            self._connection.close()
+            if not _is_database_corruption(exc):
+                raise
+            self.last_recovery_backup = self._quarantine_corrupt_database()
+            self._connection = sqlite3.connect(self.path, timeout=5.0, check_same_thread=False)
+            self._connection.row_factory = sqlite3.Row
+            self._initialize_schema()
+
+    def _initialize_schema(self) -> None:
         with self._connection:
             self._connection.execute("PRAGMA journal_mode=WAL")
             self._connection.execute("PRAGMA synchronous=FULL")
@@ -76,6 +90,23 @@ class SessionRepository:
                     ON sessions(finished_at, status);
                 """
             )
+
+    def _quarantine_corrupt_database(self) -> Path:
+        stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime())
+        backup = self.path.with_name(f"{self.path.stem}.corrupt-{stamp}{self.path.suffix}")
+        counter = 0
+        while backup.exists():
+            counter += 1
+            backup = self.path.with_name(
+                f"{self.path.stem}.corrupt-{stamp}-{counter}{self.path.suffix}"
+            )
+        if self.path.exists():
+            os.replace(self.path, backup)
+        for suffix in ("-wal", "-shm"):
+            companion = self.path.with_name(self.path.name + suffix)
+            if companion.exists():
+                os.replace(companion, backup.with_name(backup.name + suffix))
+        return backup
 
     def create(
         self,
@@ -330,3 +361,16 @@ class SessionRepository:
             dropped_frames=int(row["dropped_frames"]),
             status=row["status"],
         )
+
+
+def _is_database_corruption(error: sqlite3.DatabaseError) -> bool:
+    message = str(error).casefold()
+    return any(
+        marker in message
+        for marker in (
+            "database disk image is malformed",
+            "file is not a database",
+            "file is encrypted",
+            "malformed database schema",
+        )
+    )

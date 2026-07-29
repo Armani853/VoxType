@@ -4,6 +4,8 @@ import json
 import time
 from pathlib import Path
 
+import pytest
+
 from voxtype.asr.model_manager import DEFAULT_MODEL_SPECS
 from voxtype.asr.profiles import ASRProfile, get_profile
 from voxtype.core.models import InjectionMode, Language, ModelProfile, PreprocessingProfile
@@ -106,6 +108,27 @@ def test_session_journal_is_ordered_idempotent_and_recoverable(tmp_path: Path) -
         assert recoverable_sessions(repository)[0].session_id == session_id
         mark_recovered(repository, session_id)
         assert recoverable_sessions(repository) == ()
+
+
+def test_session_journal_append_sequence_is_contiguous(tmp_path: Path) -> None:
+    with SessionRepository(tmp_path / "sessions.sqlite3") as repository:
+        session_id = repository.create(Language.EN, "small", ModelProfile.FAST, "notepad.exe")
+        journal = SessionJournal(repository, session_id)
+        assert journal.append("first", {"value": 1}) == 0
+        assert journal.append("second", {"value": 2}) == 1
+
+
+def test_session_journal_rejects_empty_and_duplicate_commits(tmp_path: Path) -> None:
+    with SessionRepository(tmp_path / "sessions.sqlite3") as repository:
+        session_id = repository.create(Language.RU, "small", ModelProfile.FAST, "notepad.exe")
+        journal = SessionJournal(repository, session_id)
+        with pytest.raises(ValueError):
+            journal.commit_text("")
+        assert repository.commit_text(session_id, 0, "already committed")
+        with pytest.raises(RuntimeError, match="Duplicate journal sequence 0"):
+            journal.commit_text("must not overwrite")
+        record = repository.get(session_id)
+        assert record is not None and record.committed_text == "already committed"
 
 
 def test_retention_removes_completed_old_data(tmp_path: Path) -> None:

@@ -2,10 +2,16 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from voxtype.core.models import Language, TranscriptFragment, WordStamp
 from voxtype.transcript.commands import VoiceCommandProcessor
 from voxtype.transcript.formatter import format_fragment_boundary
-from voxtype.transcript.merger import TranscriptMerger, deduplicate_text_boundary
+from voxtype.transcript.merger import (
+    TranscriptMerger,
+    deduplicate_text_boundary,
+    normalize_token,
+)
 from voxtype.transcript.vocabulary import Vocabulary
 
 
@@ -104,10 +110,13 @@ def test_merger_text_fallback_preserves_repeat_after_non_overlapping_pause() -> 
 
 def test_merger_rejects_replayed_sequence() -> None:
     merger = TranscriptMerger()
-    merger.merge(fragment(5, "first", ["first"], 0.0, 0.4))
-    duplicate = merger.merge(fragment(5, "first", ["first"], 0.0, 0.4))
+    first = merger.merge(fragment(5, "first", ["first"], 0.0, 0.4))
+    duplicate = merger.merge(fragment(5, "different", ["different"], 1.0, 1.4))
+    assert not first.duplicate_detected
     assert duplicate.duplicate_detected
     assert duplicate.insertion_text == ""
+    assert duplicate.committed_text == "First"
+    assert [word.text for word in merger.committed_words] == ["first"]
 
 
 def test_merger_keeps_real_adjacent_short_repeat_and_removes_only_overlap() -> None:
@@ -161,6 +170,19 @@ def test_formatter_spacing() -> None:
     assert format_fragment_boundary("Hello ", "world") == "world"
     assert format_fragment_boundary("Done. ", "next") == "Next"
     assert format_fragment_boundary("Line", "\nNext") == "\nNext"
+
+
+def test_text_boundary_recovery_validates_limit_and_handles_full_duplicate() -> None:
+    with pytest.raises(ValueError):
+        deduplicate_text_boundary("one", "one", max_words=0)
+    assert deduplicate_text_boundary("one two", "one two") == ""
+    assert deduplicate_text_boundary("one two", "different") == "different"
+
+
+def test_merger_validates_overlap_limit_and_normalizes_symbol_only_token() -> None:
+    with pytest.raises(ValueError):
+        TranscriptMerger(max_overlap_words=0)
+    assert normalize_token("...") == ""
 
 
 def test_voice_commands_are_disabled_by_default() -> None:

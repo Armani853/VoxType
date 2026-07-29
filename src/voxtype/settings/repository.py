@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import tempfile
+import threading
 import time
 from dataclasses import fields, is_dataclass
 from enum import Enum
@@ -42,59 +43,63 @@ class SettingsRepository:
         base = user_config_path(APP_NAME, APP_AUTHOR, roaming=True)
         self.path = path or base / "settings.json"
         self.last_recovery_backup: Path | None = None
+        self._lock = threading.RLock()
 
     def load(self) -> AppSettings:
-        if not self.path.exists():
-            return create_default_settings()
-        try:
-            raw = json.loads(self.path.read_text(encoding="utf-8"))
-            if not isinstance(raw, dict):
-                raise ValueError("Settings root must be an object")
-            return _convert_dataclass(AppSettings, migrate_settings(raw))
-        except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError):
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            suffix = time.strftime("%Y%m%d-%H%M%S", time.localtime())
-            backup = self.path.with_name(f"settings.corrupt-{suffix}.json")
-            if self.path.exists():
-                shutil.copy2(self.path, backup)
-                self.last_recovery_backup = backup
-            defaults = create_default_settings()
-            self.save(defaults)
-            return defaults
+        with self._lock:
+            if not self.path.exists():
+                return create_default_settings()
+            try:
+                raw = json.loads(self.path.read_text(encoding="utf-8"))
+                if not isinstance(raw, dict):
+                    raise ValueError("Settings root must be an object")
+                return _convert_dataclass(AppSettings, migrate_settings(raw))
+            except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError):
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                suffix = time.strftime("%Y%m%d-%H%M%S", time.localtime())
+                backup = self.path.with_name(f"settings.corrupt-{suffix}.json")
+                if self.path.exists():
+                    shutil.copy2(self.path, backup)
+                    self.last_recovery_backup = backup
+                defaults = create_default_settings()
+                self.save(defaults)
+                return defaults
 
     def save(self, settings: AppSettings) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        payload = json.dumps(
-            settings.to_dict(), ensure_ascii=False, indent=2, sort_keys=True, default=str
-        )
-        descriptor, temporary_name = tempfile.mkstemp(
-            prefix=f".{self.path.name}.", suffix=".tmp", dir=self.path.parent
-        )
-        temporary = Path(temporary_name)
-        try:
-            with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
-                stream.write(payload)
-                stream.write("\n")
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temporary, self.path)
-        finally:
-            if temporary.exists():
-                temporary.unlink()
+        with self._lock:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            payload = json.dumps(
+                settings.to_dict(), ensure_ascii=False, indent=2, sort_keys=True, default=str
+            )
+            descriptor, temporary_name = tempfile.mkstemp(
+                prefix=f".{self.path.name}.", suffix=".tmp", dir=self.path.parent
+            )
+            temporary = Path(temporary_name)
+            try:
+                with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
+                    stream.write(payload)
+                    stream.write("\n")
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(temporary, self.path)
+            finally:
+                if temporary.exists():
+                    temporary.unlink()
 
     def update(self, changes: dict[str, Any]) -> AppSettings:
         """Deep-merge validated UI changes and persist one complete snapshot."""
-        merged = self.load().to_dict()
+        with self._lock:
+            merged = self.load().to_dict()
 
-        def merge(target: dict[str, Any], source: dict[str, Any]) -> None:
-            for key, value in source.items():
-                current = target.get(key)
-                if isinstance(current, dict) and isinstance(value, dict):
-                    merge(current, value)
-                else:
-                    target[key] = value
+            def merge(target: dict[str, Any], source: dict[str, Any]) -> None:
+                for key, value in source.items():
+                    current = target.get(key)
+                    if isinstance(current, dict) and isinstance(value, dict):
+                        merge(current, value)
+                    else:
+                        target[key] = value
 
-        merge(merged, changes)
-        settings = _convert_dataclass(AppSettings, migrate_settings(merged))
-        self.save(settings)
-        return settings
+            merge(merged, changes)
+            settings = _convert_dataclass(AppSettings, migrate_settings(merged))
+            self.save(settings)
+            return settings

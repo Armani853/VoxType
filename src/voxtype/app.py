@@ -55,6 +55,7 @@ from voxtype.ui import (
     apply_theme,
     create_app_icon,
 )
+from voxtype.ui.messages import failure_message
 from voxtype.vad.segmenter import SegmentationSettings, StreamingSegmenter
 from voxtype.vad.silero import SileroVAD
 from voxtype.version import __version__
@@ -175,6 +176,18 @@ class DesktopApplication:
         self.main.set_toggle_hotkey(runtime.settings.hotkeys.toggle)
         self.controller.target_manager.register_own_window(int(self.main.winId()))
         self.tray.show()
+        if runtime.settings_repository.last_recovery_backup is not None:
+            self.tray.show_message(
+                "Настройки восстановлены",
+                "Повреждённые настройки сохранены для диагностики. "
+                "VoxType применил безопасные значения по умолчанию.",
+            )
+        if runtime.session_repository.last_recovery_backup is not None:
+            self.tray.show_message(
+                "История восстановлена",
+                "Повреждённая база истории сохранена для диагностики. "
+                "VoxType создал новую рабочую историю.",
+            )
         self.timer.timeout.connect(self._poll)
         self.timer.start()
         self._heartbeat_timer.start()
@@ -642,7 +655,7 @@ class DesktopApplication:
             except Exception as exc:
                 _LOGGER.exception("session_recovery_failed type=%s", type(exc).__name__)
                 self.signals.recovery_ready.emit(
-                    session_id, False, f"Восстановление не завершено: {type(exc).__name__}"
+                    session_id, False, failure_message("session_recovery")
                 )
 
         threading.Thread(target=worker, name="voxtype-session-recovery", daemon=True).start()
@@ -716,8 +729,9 @@ class DesktopApplication:
                     "log_excerpt": _tail(self.runtime.log_path, 80),
                 }
             except Exception as exc:
+                _LOGGER.exception("diagnostics_failed type=%s", type(exc).__name__)
                 report = {
-                    "summary": f"Диагностика не завершена: {type(exc).__name__}",
+                    "summary": failure_message("diagnostics"),
                     "checks": (),
                 }
             self.signals.diagnostics_ready.emit(report)
@@ -820,7 +834,10 @@ class DesktopApplication:
                     sample_rate=capture_rate,
                 )
             except Exception as exc:
-                result = device_error_result(type(exc).__name__, sample_rate=capture_rate)
+                _LOGGER.exception("calibration_capture_failed type=%s", type(exc).__name__)
+                result = device_error_result(
+                    "не удалось открыть выбранный микрофон", sample_rate=capture_rate
+                )
             self.signals.calibration_ready.emit(result)
 
         threading.Thread(target=worker, name="voxtype-calibration", daemon=True).start()
@@ -868,7 +885,7 @@ class DesktopApplication:
             except Exception as exc:
                 _LOGGER.exception("model_install_failed type=%s", type(exc).__name__)
                 self.signals.model_ready.emit(
-                    False, f"Установка не завершена: {type(exc).__name__}", spec.model_id
+                    False, failure_message("model_install"), spec.model_id
                 )
 
         threading.Thread(target=worker, name="voxtype-model-install", daemon=True).start()
@@ -941,7 +958,8 @@ class DesktopApplication:
                 quality = "есть запас" if rtf <= 0.7 else "рекомендуется профиль «Быстро»"
                 message = f"RTF={rtf:.3f}; {quality}"
             except Exception as exc:
-                ok, message = False, f"Benchmark не завершён: {type(exc).__name__}"
+                _LOGGER.exception("model_benchmark_failed type=%s", type(exc).__name__)
+                ok, message = False, failure_message("benchmark")
             self.signals.settings_status.emit(message, ok)
 
         threading.Thread(target=worker, name="voxtype-model-benchmark", daemon=True).start()
@@ -968,9 +986,8 @@ class DesktopApplication:
                 clipping = float(np.mean(np.abs(audio) >= 0.98) * 100.0)
                 self.signals.audio_level.emit(rms, clipping, "Говорите обычным голосом")
             except Exception as exc:
-                self.signals.audio_level.emit(
-                    0.0, 0.0, f"Тест микрофона не завершён: {type(exc).__name__}"
-                )
+                _LOGGER.exception("microphone_test_failed type=%s", type(exc).__name__)
+                self.signals.audio_level.emit(0.0, 0.0, failure_message("microphone_test"))
 
         threading.Thread(target=worker, name="voxtype-audio-test", daemon=True).start()
 
@@ -1111,7 +1128,8 @@ class DesktopApplication:
                     f"Фраза {language.upper()}: RTF={rtf:.3f}", rtf < 1.0
                 )
             except Exception as exc:
-                text, ok = f"{type(exc).__name__}", False
+                _LOGGER.exception("phrase_test_failed type=%s", type(exc).__name__)
+                text, ok = failure_message("phrase_test"), False
             self.signals.phrase_ready.emit(language, text, ok)
 
         threading.Thread(target=worker, name="voxtype-phrase-test", daemon=True).start()

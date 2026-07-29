@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "voxtype"
-version = "0.2.3"
+version = "0.2.4"
 description = "Local-first continuous dictation for Windows 11"
 readme = "README_RU.md"
 requires-python = ">=3.12,<3.13"
@@ -23,6 +23,8 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+  "coverage==7.15.2",
+  "hypothesis==6.163.0",
   "mypy==1.20.2",
   "Nuitka==4.1.3",
   "pytest==9.1.0",
@@ -66,8 +68,18 @@ addopts = "-ra --strict-markers --strict-config -m 'not soak'"
 testpaths = ["tests"]
 pythonpath = ["src"]
 markers = [
+  "unit: isolated deterministic unit tests",
   "integration: deterministic multi-component integration tests",
+  "property: property-based invariant tests",
+  "stateful: deterministic model-based state sequence tests",
+  "fault: deterministic fault-injection tests",
+  "pairwise: pairwise settings and configuration tests",
+  "performance: bounded performance and resource benchmarks",
+  "scenario: end-to-end user scenario tests",
   "windows: requires a Windows desktop session",
   "interactive: changes foreground windows or uses real input devices",
+  "asr: runs a real ASR model or corpus",
+  "slow: bounded tests excluded from the fast developer subset",
+  "manual: requires a human judgment or physical action",
   "soak: long-running resource stability tests",
 ]

@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.2.4
+
+- Added a native per-user single-instance guard before runtime construction so
+  duplicate launches cannot create a second tray, hotkey owner, database writer
+  or audio controller.
+- Made settings persistence safe under concurrent UI/background saves while
+  retaining atomic replace and corrupt-file recovery.
+- Preserved corrupt session databases for diagnosis and automatically started
+  with a clean usable history database instead of failing application startup.
+- Replaced technical exception type names in user-facing failures with concise
+  recovery guidance while keeping private-safe technical logging.
+- Added deterministic property, state-model, pairwise, concurrency, fault,
+  mutation and bounded performance quality gates without changing the frozen
+  audio, VAD, segmentation or ASR configuration.
+
 ## 0.2.3
 
 - Unified the light-first interface around semantic colors, typography,

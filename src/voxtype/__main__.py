@@ -98,20 +98,36 @@ def main(argv: list[str] | None = None) -> int:
         from PySide6.QtCore import QTimer
 
         from voxtype.app import run_desktop
+        from voxtype.windows.single_instance import SingleInstanceGuard
 
-        runtime = build_runtime(verbose=arguments.verbose)
-        from PySide6.QtWidgets import QApplication
+        guard = SingleInstanceGuard()
+        if not guard.acquire():
+            guard.activate_existing()
+            return 0
+        try:
+            runtime = build_runtime(verbose=arguments.verbose)
+            from PySide6.QtWidgets import QApplication
 
-        application = QApplication.instance() or QApplication([])
-        QTimer.singleShot(750, application.quit)
-        return run_desktop(runtime)
+            application = QApplication.instance() or QApplication([])
+            QTimer.singleShot(750, application.quit)
+            return run_desktop(runtime)
+        finally:
+            guard.close()
     if arguments.self_test or arguments.diagnostics or arguments.no_ui:
         report = _diagnostics()
         sys.stdout.write(json.dumps(report, ensure_ascii=False, indent=2, default=str) + "\n")
         return 0 if report["ok"] else 1
     from voxtype.app import run_desktop
+    from voxtype.windows.single_instance import SingleInstanceGuard
 
-    return run_desktop(build_runtime(verbose=arguments.verbose))
+    guard = SingleInstanceGuard()
+    if not guard.acquire():
+        guard.activate_existing()
+        return 0
+    try:
+        return run_desktop(build_runtime(verbose=arguments.verbose))
+    finally:
+        guard.close()
 
 
 if __name__ == "__main__":

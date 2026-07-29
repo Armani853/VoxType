@@ -49,7 +49,7 @@ def test_main_window_renders_snapshot_and_routes_commands(qtbot) -> None:  # typ
     assert window.backlog_tile.value_label.text() == "2.2 с"
     assert window.target_tile.value_label.text() == "Блокнот"
     assert window.fragment_label.text() == "Последний распознанный фрагмент"
-    assert window.microphone_label.text() == "USB Microphone"
+    assert window.microphone_label.full_text() == "USB Microphone"
     assert window.model_title.text() == "Режим"
     assert window.model_label.text() == "Быстро"
     assert window.profile_label.text() == "Локальная модель: small"
