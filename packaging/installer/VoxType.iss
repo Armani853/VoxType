@@ -24,6 +24,9 @@ ArchitecturesInstallIn64BitMode=x64compatible
 UninstallDisplayIcon={app}\VoxType.exe
 WizardStyle=modern
 
+[Languages]
+Name: "russian"; MessagesFile: "compiler:Languages\Russian.isl"
+
 [Files]
 Source: "{#RepoRoot}\dist\VoxType\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
