@@ -34,3 +34,16 @@ The replacement isolated setup SHA-256 was `5238250873a28ccdcd51b2fbee0f6ce4511b
 | R-G01 | New candidate uninstall | Not run | PENDING | — |
 
 After this Computer Use run, the error-message source was changed for FA-007 and a regression test added. Lint and 260 selected tests passed, with the same open Windows diagnostic. **The current source is newer than the installed `b598039` EXE, so final acceptance must restart on another build.**
+
+## Later installed candidates, 2026-11-05 to 2026-11-06 MSK
+
+| ID | Version / artifact | Computer Use action and independent observation | Status | Evidence / defect |
+|---|---|---|---|---|
+| N-B01 | Installed `7d9762b`, version 0.2.4 | Closed main window to tray, relaunched the exact EXE from Explorer. The same PID exposed a white main window for over five seconds and could not be used | FAIL | FA-009; Computer Use screen, exact PID and process response check |
+| N-B02 | Installed `9104e3a`, EXE SHA-256 `824eae37ac91905c4cb193bd5a4e7439fae839d385bc8a7edd547db6a90e16a9` | Installed through the Russian wizard; first GUI painted. Closed to tray and requested exact-path duplicate activation twice. Computer Use showed a painted main window both times and Settings opened after the second. The duplicate activation command was `Start-Process`, because Computer Use app resolution was ambiguous | PASS for two window-restoration repeats; 100 full cycles BLOCKED | FA-009 partially verified; same installed PID 27708 |
+| N-E01 | Installed `9104e3a` | Switched main-window language RU → EN → RU and observed the visible selection change. ASR result and persistence were not checked | PASS for visible control only; functional test BLOCKED | Computer Use screenshots; FA-004 |
+| N-G01 | Installed `9104e3a`, original installer SHA-256 `1030dfbac3dde51f427c037cc098b3aaf3e21717d240b373db2c3250e8abb944` | While app PID 27708 ran, confirmed uninstall through Computer Use. Inno said some elements could not be removed; EXE and DLLs remained | FAIL | FA-010; UI completion message and exact-path file/process checks |
+| N-G02 | Same installed EXE, repaired isolated installer SHA-256 `4961243f8cc4f757eb07680114c00749777b9770fe14adbf93f72b599766c059` | Reinstalled in the same test folder through Computer Use, launched app, confirmed uninstall. Inno presented a Russian stop-app warning and held removal. After targeted stop of the exact test PID, clicked OK; Inno reported complete removal | PASS for tested stop-app gate; production installer still untested | FA-010; UI dialog and post-removal exact-path check: EXE and uninstaller absent, 12 empty directories remain |
+| N-G03 | Old isolated `7d9762b` test copy | Launched its UI uninstaller while app was stopped, confirmed removal and dismissed completion dialog | PASS for isolated uninstall | Inno complete-removal dialog; exact install folder absent |
+
+No controlled RU/EN speech, external-app insertion matrix, 100 complete launch/exit cycles, 60-minute soak, or full GUI control inventory was performed on the latest package. These are **BLOCKED**, not PASS.

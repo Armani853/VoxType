@@ -17,3 +17,5 @@ Disabling “Свернуть в системный трей” and saving cause
 ## Experience verdict
 
 NOT READY. The full customer journey and critical reliability volume have not passed.
+
+On the later installed `7d9762b` build, relaunch while hidden to tray exposed an unusable all-white window (FA-009). The `9104e3a` rebuild showed a painted window on two repeated activations of the same installed process, but 100 complete launch/exit cycles are still required. Its original uninstaller continued while the app ran and left program files behind (FA-010). A repaired isolated installer now explains how to exit from the tray and waits before removal; Computer Use verified the message and subsequent complete file removal after the test process stopped. These fixes improve the customer path but do not justify approval without the remaining real dictation, daily-work, stress, and installer tests.

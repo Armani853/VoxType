@@ -1,5 +1,17 @@
 # Final release verdict
 
+## Latest assessment, 2026-11-06
+
+**NOT READY.** Latest application source commit `9104e3a5ac9bc965bd896ed2ff42bc654aa87cf2`, version 0.2.4. Installed EXE SHA-256 `824eae37ac91905c4cb193bd5a4e7439fae839d385bc8a7edd547db6a90e16a9`. Its original isolated installer SHA-256 was `1030dfbac3dde51f427c037cc098b3aaf3e21717d240b373db2c3250e8abb944`. A later isolated installer built with the running-app uninstall guard has SHA-256 `4961243f8cc4f757eb07680114c00749777b9770fe14adbf93f72b599766c059`; it uses the same application EXE but a packaging change not yet committed at the time of this assessment.
+
+Computer Use verified that the white-window restoration defect (FA-009) did not recur in two repeated activations of the installed `9104e3a` process. It also found that the original uninstaller left files when the app was running (FA-010). A rebuilt isolated package blocked removal with a clear Russian instruction, then removed installed files after the exact test process was stopped; twelve empty folders remain. The production-AppId path, normal user exit through tray during uninstall, 100 full start/exit cycles, controlled RU/EN dictation and accuracy, target-app insertion, failure recovery, full interactive UI inventory, performance soak, and the 24.738-second ASR outlier (FA-008) remain unverified or open. The Windows `0x8001010d` diagnostic still appears in the automated test run. No commercial readiness claim is supported.
+
+The valuation report is deferred because the user explicitly made it the final stage after successful technical and customer acceptance. The Inno compiler reports “Non-commercial use only”; commercial licensing also requires resolution before sale.
+
+After the packaging guard change, `scripts/lint.ps1` passed Ruff formatting/checks and mypy (97 source files); `scripts/test.ps1` reported 261 passed and 5 deselected in 55.04 s. The `0x8001010d` Windows fatal diagnostic recurred during the Qt performance test despite pytest exit code 0. The older `7d9762b` isolated copy was then removed through its UI uninstaller; exact directory absent.
+
+## Earlier candidates (superseded)
+
 **NOT READY — acceptance incomplete.** Candidate source commit `401beb14e4c5068d4f213087978ddf4402ce82b1`; version 0.2.4; standalone EXE SHA-256 `0489d45f940469850a77bb11f80b2cb09c91865c8367537b017be836ea251e61`. Isolated acceptance installer SHA-256 `47fd08797a850241ed670018b30c4367df203e9b554f518c5e40655d01322162`.
 
 The isolated installer and installed EXE from `401beb1` were exercised through Computer Use. The first run painted; the microphone and local model were detected; Settings tabs opened; one real capture traversed Listening → Processing → Ready; and two exact-path installed launch/X-exit cycles ended without a lingering process. That isolated copy was subsequently removed through its UI uninstaller after separate user confirmation. The first-run wizard's RU/EN phrase checks could not be completed without controlled voice input. Only 2/100 required cycles were run. The target-app insertion matrix, failure recovery, quantified performance, full UI inventory, production-AppId upgrade, and **new-candidate** install/uninstall remain unverified. A stale queue display was found in the installed candidate and fixed in source (FA-005), so the tested EXE no longer represents the latest source.

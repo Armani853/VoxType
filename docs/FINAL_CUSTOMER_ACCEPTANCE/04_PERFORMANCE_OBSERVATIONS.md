@@ -27,3 +27,7 @@ The first live capture failed with PortAudio input overflow at 19:12:38 MSK, abo
 | 19:14:40 | 1.850 s | 5.495 s | 2.970 | 1.830 s |
 
 The UI showed 16.1 s backlog after Stop and returned to Ready with 0.0 s at 19:14:41, verifying FA-005. A single process sample after completion showed 572,452,864 working-set bytes, 860,045,312 private bytes, 36 threads, 1,809 handles, and cumulative CPU time 282.5 s. These are one-point observations, not peak/idle comparisons. The 24.738 s inference outlier is FA-008 and remains unexplained; CPU and event-loop traces synchronized to it were not collected.
+
+## Later window restoration measurement
+
+The installed `7d9762b` process exposed an all-white window for more than five seconds after duplicate activation while hidden to tray; `Responding=True` did not indicate usable paint. After source commit `9104e3a`, two repeated activations of the installed EXE showed a painted main window, and Settings opened after the second. The packaged UI smoke test of this commit reported first paint at 1,033.5 ms when launched visibly; an earlier `-WindowStyle Hidden` run produced an invalid one-color capture and is excluded from performance evidence. This is a smoke result, not a distribution of startup latency. No synchronized CPU/RAM/thread/handle series or 60-minute soak has been captured for `9104e3a`.

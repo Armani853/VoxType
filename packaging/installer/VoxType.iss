@@ -10,6 +10,7 @@ AppId={{5A4A7C70-50ED-4F41-90A6-48C69682B1A7}
 AppName=VoxType
 AppVersion=0.2.4
 AppPublisher=VoxType
+AppMutex=Local\VoxType.Desktop.Singleton.v1
 DefaultDirName={localappdata}\Programs\VoxType
 DefaultGroupName=VoxType
 DisableProgramGroupPage=yes
@@ -26,6 +27,10 @@ WizardStyle=modern
 
 [Languages]
 Name: "russian"; MessagesFile: "compiler:Languages\Russian.isl"
+
+[Messages]
+SetupAppRunningError=VoxType сейчас работает.%n%nЩёлкните правой кнопкой мыши по значку VoxType в системном трее и выберите «Выход». Затем нажмите «ОК» для продолжения или «Отмена» для выхода.
+UninstallAppRunningError=VoxType сейчас работает.%n%nЩёлкните правой кнопкой мыши по значку VoxType в системном трее и выберите «Выход». Затем нажмите «ОК» для продолжения или «Отмена» для выхода.
 
 [Files]
 Source: "{#RepoRoot}\dist\VoxType\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs

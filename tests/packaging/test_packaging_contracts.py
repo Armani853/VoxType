@@ -61,6 +61,8 @@ def test_inno_manifest_is_per_user_unsigned_and_not_admin() -> None:
 
     assert "DefaultDirName={localappdata}" in installer
     assert "PrivilegesRequired=lowest" in installer
+    assert "AppMutex=Local\\VoxType.Desktop.Singleton.v1" in installer
+    assert "UninstallAppRunningError=" in installer
     assert "signeduninstaller" not in installer.casefold()
     assert re.search(r'requestedExecutionLevel level="asInvoker"', manifest)
     assert 'uiAccess="false"' in manifest
