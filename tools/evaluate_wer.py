@@ -16,6 +16,7 @@ import psutil
 from faster_whisper import WhisperModel
 from platformdirs import user_data_path
 
+from voxtype.asr.profiles import ASRProfile, ASRProfileConfig, get_profile
 from voxtype.constants import APP_AUTHOR, APP_NAME
 
 _PUNCTUATION = re.compile(r"[^\w\s-]", re.UNICODE)
@@ -98,6 +99,12 @@ def wav_duration(path: Path) -> float:
         return stream.getnframes() / stream.getframerate()
 
 
+def resolve_profile(profile: str) -> ASRProfileConfig:
+    """Resolve the CLI profile through the production ASR profile registry."""
+
+    return get_profile(ASRProfile(profile))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("audio", type=Path)
@@ -111,12 +118,8 @@ def main() -> int:
     parser.add_argument("--normalize-numbers", action="store_true")
     parser.add_argument("--output", type=Path, default=None)
     arguments = parser.parse_args()
-    defaults = {
-        "fast": "small",
-        "balanced": "large-v3-turbo",
-        "maximum_accuracy": "large-v3",
-    }
-    model_id = defaults[arguments.profile]
+    profile = resolve_profile(arguments.profile)
+    model_id = profile.model_name
     model_name = arguments.model or str(user_data_path(APP_NAME, APP_AUTHOR) / "models" / model_id)
     reference_text = arguments.reference.read_text(encoding="utf-8").strip()
     process = psutil.Process()
@@ -133,8 +136,8 @@ def main() -> int:
     model = WhisperModel(
         model_name,
         device="cpu",
-        compute_type="int8",
-        cpu_threads=0,
+        compute_type=profile.compute_type,
+        cpu_threads=profile.cpu_threads,
         local_files_only=True,
     )
     started = time.perf_counter()
@@ -143,10 +146,14 @@ def main() -> int:
         language=arguments.language,
         task="transcribe",
         temperature=0.0,
-        beam_size=1 if arguments.profile == "fast" else 5,
-        word_timestamps=True,
-        condition_on_previous_text=False,
+        beam_size=profile.beam_size,
+        best_of=profile.best_of,
+        word_timestamps=profile.word_timestamps,
+        condition_on_previous_text=profile.condition_on_previous_text,
         vad_filter=False,
+        no_speech_threshold=profile.no_speech_threshold,
+        log_prob_threshold=profile.log_probability_threshold,
+        compression_ratio_threshold=profile.compression_ratio_threshold,
     )
     hypothesis = " ".join(segment.text.strip() for segment in segments).strip()
     processing_s = time.perf_counter() - started

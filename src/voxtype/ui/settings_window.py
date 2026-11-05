@@ -31,6 +31,7 @@ if PYSIDE6_AVAILABLE:
         QProgressBar,
         QPushButton,
         QScrollArea,
+        QSizePolicy,
         QSlider,
         QSpinBox,
         QStackedWidget,
@@ -243,6 +244,13 @@ if PYSIDE6_AVAILABLE:
             page, form = self._page("Аудио", "Микрофон и осторожная обработка сигнала.")
             self.audio_device_combo = QComboBox(page)
             self.audio_device_combo.setObjectName("audioDeviceCombo")
+            self.audio_device_combo.setSizeAdjustPolicy(
+                QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+            )
+            self.audio_device_combo.setMinimumContentsLength(0)
+            self.audio_device_combo.setSizePolicy(
+                QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed
+            )
             self.vad_slider = QSlider(Qt.Orientation.Horizontal, page)
             self.vad_slider.setRange(0, 100)
             self.vad_slider.setValue(50)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from dataclasses import asdict
 
@@ -95,22 +96,17 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
     if arguments.ui_smoke_test:
-        from PySide6.QtCore import QTimer
-
         from voxtype.app import run_desktop
         from voxtype.windows.single_instance import SingleInstanceGuard
 
         guard = SingleInstanceGuard()
-        if not guard.acquire():
+        isolated_smoke = bool(os.environ.get("VOXTYPE_DATA_DIRECTORY", "").strip())
+        if not isolated_smoke and not guard.acquire():
             guard.activate_existing()
             return 0
         try:
             runtime = build_runtime(verbose=arguments.verbose)
-            from PySide6.QtWidgets import QApplication
-
-            application = QApplication.instance() or QApplication([])
-            QTimer.singleShot(750, application.quit)
-            return run_desktop(runtime)
+            return run_desktop(runtime, smoke_after_ms=750)
         finally:
             guard.close()
     if arguments.self_test or arguments.diagnostics or arguments.no_ui:

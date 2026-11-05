@@ -14,7 +14,7 @@ if (-not $SkipPortableBuild -or -not (Test-Path -LiteralPath $PortableExe)) {
 
 $Candidates = @(
     (Get-Command iscc.exe -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -ErrorAction SilentlyContinue),
-    "$env:ProgramFiles(x86)\Inno Setup 6\ISCC.exe",
+    "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
     "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe"
 ) | Where-Object { $_ -and (Test-Path -LiteralPath $_) }
 $Iscc = $Candidates | Select-Object -First 1

@@ -13,6 +13,7 @@ import platform
 import shutil
 import sys
 import tempfile
+import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 from urllib.request import Request, urlopen
@@ -181,6 +182,7 @@ class RuntimeBundle:
     startup: StartupManager
     data_directory: Path
     log_path: Path
+    selected_model_installed: bool
 
     def backend_for(self, profile: ASRProfile | str) -> FasterWhisperBackend:
         selected = asr_profile(domain_profile(profile))
@@ -219,6 +221,20 @@ class RuntimeBundle:
 def build_runtime(*, verbose: bool = False) -> RuntimeBundle:
     """Create one production runtime without starting capture or model download."""
 
+    startup_started = time.perf_counter()
+    previous_stage = startup_started
+
+    def stage(name: str) -> None:
+        nonlocal previous_stage
+        now = time.perf_counter()
+        logging.getLogger("voxtype.startup").info(
+            "startup_stage name=%s duration_ms=%.1f total_ms=%.1f",
+            name,
+            (now - previous_stage) * 1_000.0,
+            (now - startup_started) * 1_000.0,
+        )
+        previous_stage = now
+
     data_directory = data_directory_path()
     cache_directory = cache_directory_path()
     isolated_profile = bool(os.environ.get("VOXTYPE_DATA_DIRECTORY", "").strip())
@@ -234,26 +250,31 @@ def build_runtime(*, verbose: bool = False) -> RuntimeBundle:
         platform.python_version(),
         platform.platform(),
     )
+    stage("logging_ready")
     settings_repository = (
         SettingsRepository(data_directory / "settings.json")
         if isolated_profile
         else SettingsRepository()
     )
     settings = settings_repository.load()
+    stage("settings_loaded")
     session_repository = (
         SessionRepository(data_directory / "sessions.sqlite3")
         if isolated_profile
         else SessionRepository()
     )
+    stage("session_repository_open")
     cleanup_retention(
         session_repository,
         data_directory / "audio",
         settings.privacy.retention_days,
         spool_root=cache_directory / "audio-spool",
     )
+    stage("retention_checked")
     model_manager = ModelManager(data_directory / "models")
     devices = list_input_devices()
     device = select_input_device(devices, settings.audio.device_id)
+    stage("audio_devices_enumerated")
 
     profile = configured_profile(settings)
     if settings.model.installed_model != profile.model_name:
@@ -319,6 +340,7 @@ def build_runtime(*, verbose: bool = False) -> RuntimeBundle:
         microphone_name=f"{device.name} ({device.host_api})",
     )
     controller.initialize(preload_model=False)
+    stage("controller_initialized")
     return RuntimeBundle(
         settings_repository,
         session_repository,
@@ -330,6 +352,7 @@ def build_runtime(*, verbose: bool = False) -> RuntimeBundle:
         StartupManager(),
         data_directory,
         log_path,
+        model_manager.is_installed(profile.model_name),
     )
 
 

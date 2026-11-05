@@ -97,7 +97,7 @@ def _submit_many(hwnd: int, name: str, attempts: int) -> tuple[ReliabilityResult
         and after.skipped_formats == before.skipped_formats
     )
     expected = "".join(fragments)
-    result = ReliabilityResult(
+    report = ReliabilityResult(
         attempts=attempts,
         success=success,
         failures=failures,
@@ -108,7 +108,7 @@ def _submit_many(hwnd: int, name: str, attempts: int) -> tuple[ReliabilityResult
         latency_p50_ms=_percentile(latencies, 0.50),
         latency_p95_ms=_percentile(latencies, 0.95),
     )
-    return result, expected
+    return report, expected
 
 
 def _run_notepad(root: Path, attempts: int) -> ReliabilityResult:

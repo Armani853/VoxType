@@ -59,6 +59,18 @@ def test_onboarding_emits_external_work_requests(qtbot) -> None:  # type: ignore
     assert signal.args == ["fast"]
 
 
+def test_first_portaudio_device_index_zero_is_selectable(qtbot) -> None:  # type: ignore[no-untyped-def]
+    wizard = OnboardingWizard()
+    qtbot.addWidget(wizard)
+    wizard.set_microphones([("Built-in microphone", 0)], 0)
+    assert wizard.microphone_page.isComplete()
+    assert wizard.microphone_status.text() == "Говорите обычным голосом"
+    with qtbot.waitSignal(wizard.calibration_requested, timeout=1000) as signal:
+        wizard.calibration_button.click()
+    assert signal.args == ["0"]
+    assert wizard.setup_values()["audio_device_id"] == 0
+
+
 def test_completed_bad_calibration_stays_at_100_percent_with_separate_warning(
     qtbot,
 ) -> None:  # type: ignore[no-untyped-def]

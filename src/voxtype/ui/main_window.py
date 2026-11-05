@@ -6,6 +6,8 @@ remain owned by the application controller.
 
 from __future__ import annotations
 
+import logging
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -23,7 +25,7 @@ from .models import (
 )
 
 if PYSIDE6_AVAILABLE:
-    from PySide6.QtCore import Qt, Signal
+    from PySide6.QtCore import QEvent, QObject, Qt, Signal
     from PySide6.QtGui import QCloseEvent, QGuiApplication
     from PySide6.QtWidgets import (
         QFrame,
@@ -65,6 +67,7 @@ if PYSIDE6_AVAILABLE:
         AppStatus.SHUTTING_DOWN: ("shutting_down", "neutral"),
         AppStatus.PAUSED: ("paused", "warning"),
     }
+    _LOGGER = logging.getLogger("voxtype.ui.main_window")
 
     class MainWindow(QMainWindow):
         dictation_toggle_requested = Signal()
@@ -76,6 +79,7 @@ if PYSIDE6_AVAILABLE:
         onboarding_requested = Signal()
         retry_requested = Signal()
         hidden_to_tray = Signal()
+        exit_requested = Signal()
 
         def __init__(
             self,
@@ -91,8 +95,11 @@ if PYSIDE6_AVAILABLE:
             self._minimize_to_tray = bool(minimize_to_tray)
             self._allow_close = False
             self._toggle_hotkey = "Ctrl+Alt+Space"
+            self._model_available = True
             self._controller: object | None = None
             self._controller_connections: list[tuple[Any, Callable[..., Any]]] = []
+            self._constructed_at = time.perf_counter()
+            self._first_content_paint_seen = False
             self.setObjectName("mainWindow")
             self.setWindowTitle("VoxType — локальная диктовка")
             self.setWindowIcon(create_app_icon())
@@ -112,6 +119,7 @@ if PYSIDE6_AVAILABLE:
             self.setCentralWidget(scroll)
             canvas = QWidget(scroll)
             scroll.setWidget(canvas)
+            scroll.viewport().installEventFilter(self)
             outer = QVBoxLayout(canvas)
             outer.setContentsMargins(
                 SPACING.space_6,
@@ -265,6 +273,27 @@ if PYSIDE6_AVAILABLE:
                 QSpacerItem(0, 0, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding)
             )
 
+        def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+            central = self.centralWidget()
+            if (
+                not self._first_content_paint_seen
+                and isinstance(central, QScrollArea)
+                and watched is central.viewport()
+                and event.type() is QEvent.Type.Paint
+            ):
+                self._first_content_paint_seen = True
+                canvas = central.widget()
+                _LOGGER.info(
+                    "first_content_paint elapsed_ms=%.1f viewport=%dx%d canvas=%dx%d visible=%s",
+                    (time.perf_counter() - self._constructed_at) * 1_000.0,
+                    central.viewport().width(),
+                    central.viewport().height(),
+                    canvas.width() if canvas is not None else 0,
+                    canvas.height() if canvas is not None else 0,
+                    self.isVisible(),
+                )
+            return super().eventFilter(watched, event)
+
         def _header_button(self, text: str, name: str) -> QPushButton:
             button = QPushButton(text, self)
             button.setObjectName(name)
@@ -272,7 +301,7 @@ if PYSIDE6_AVAILABLE:
             return button
 
         def _connect_ui(self) -> None:
-            self.dictation_button.clicked.connect(self.dictation_toggle_requested)
+            self.dictation_button.clicked.connect(self._on_dictation_button_clicked)
             self.language_control.language_changed.connect(self._on_language_selected)
             self.settings_button.clicked.connect(self.settings_requested)
             self.history_button.clicked.connect(self.history_requested)
@@ -280,6 +309,20 @@ if PYSIDE6_AVAILABLE:
             self.error_diagnostics_button.clicked.connect(self.diagnostics_requested)
             self.retry_button.clicked.connect(self.retry_requested)
             self.copy_text_button.clicked.connect(self._copy_accumulated_text)
+
+        def _on_dictation_button_clicked(self) -> None:
+            if not self._model_available and self._state.state in {
+                AppStatus.IDLE,
+                AppStatus.COMPLETED,
+                AppStatus.ERROR_RECOVERABLE,
+            }:
+                self.onboarding_requested.emit()
+            else:
+                self.dictation_toggle_requested.emit()
+
+        def set_model_available(self, available: bool) -> None:
+            self._model_available = bool(available)
+            self.update_snapshot(self._state)
 
         def bind_controller(self, controller: object) -> None:
             """Bind the four stable controller commands without importing core."""
@@ -317,8 +360,16 @@ if PYSIDE6_AVAILABLE:
             state = snapshot_from(snapshot)
             self._state = state
             key, color_role = _STATUS_PRESENTATION[state.state]
-            self.status_dot.set_color(state_color(color_role))
-            self.status_label.setText(ui_text(key, self._interface_language))
+            needs_model = not self._model_available and state.state in {
+                AppStatus.IDLE,
+                AppStatus.COMPLETED,
+            }
+            self.status_dot.set_color(state_color("warning" if needs_model else color_role))
+            self.status_label.setText(
+                ("Требуется модель" if self._interface_language == "ru" else "Model required")
+                if needs_model
+                else ui_text(key, self._interface_language)
+            )
             detail = state.error_message or state.status_message
             if not detail:
                 detail = self._default_status_detail(state)
@@ -329,7 +380,12 @@ if PYSIDE6_AVAILABLE:
             self.audio_meter.set_level(rms_to_meter(state.input_rms), state.clipping_percentage)
             self.audio_hint.setText(self._audio_hint(state))
             self.model_label.setText(self._profile_text(state.model_profile))
-            self.profile_label.setText(f"Локальная модель: {state.model_name or 'не загружена'}")
+            model_label = state.model_name or "не загружена"
+            if not self._model_available:
+                model_label += (
+                    " — не установлена" if self._interface_language == "ru" else " — not installed"
+                )
+            self.profile_label.setText(f"Локальная модель: {model_label}")
             self.duration_tile.set_value(format_duration(state.session_elapsed_s))
             self.backlog_tile.set_value(format_backlog(state.queued_audio_seconds))
             self.target_tile.set_value(
@@ -337,16 +393,19 @@ if PYSIDE6_AVAILABLE:
                 state.target_title,
             )
             self.fragment_label.setText(self._fragment_text(state))
-            self.fragment_label.setProperty(
-                "tertiary",
-                not bool(state.last_committed_text or state.full_transcript),
-            )
-            self._refresh_dynamic_style(self.fragment_label)
+            tertiary = not bool(state.last_committed_text or state.full_transcript)
+            if self.fragment_label.property("tertiary") != tertiary:
+                self.fragment_label.setProperty("tertiary", tertiary)
+                self._refresh_dynamic_style(self.fragment_label)
             active = state.state.active
             self.dictation_button.setText(
-                ui_text("stop" if active else "start", self._interface_language)
+                ("Настроить модель" if self._interface_language == "ru" else "Set up model")
+                if needs_model
+                else ui_text("stop" if active else "start", self._interface_language)
             )
-            self.dictation_button.setProperty("danger", active)
+            if self.dictation_button.property("danger") != active:
+                self.dictation_button.setProperty("danger", active)
+                self._refresh_dynamic_style(self.dictation_button)
             self.dictation_button.setEnabled(
                 state.state
                 not in {
@@ -355,7 +414,6 @@ if PYSIDE6_AVAILABLE:
                     AppStatus.ERROR_FATAL,
                 }
             )
-            self._refresh_dynamic_style(self.dictation_button)
             has_error = state.state in {
                 AppStatus.ERROR_RECOVERABLE,
                 AppStatus.ERROR_FATAL,
@@ -373,6 +431,12 @@ if PYSIDE6_AVAILABLE:
                 self.copy_text_button.setEnabled(bool(state.last_committed_text))
 
         def _default_status_detail(self, state: UIState) -> str:
+            if not self._model_available and state.state in {AppStatus.IDLE, AppStatus.COMPLETED}:
+                return (
+                    "Сначала установите локальную модель в мастере настройки"
+                    if self._interface_language == "ru"
+                    else "Install a local model in the setup wizard first"
+                )
             if state.state is AppStatus.IDLE:
                 return f"Нажмите кнопку или {self._toggle_hotkey}, чтобы начать"
             if state.state in {AppStatus.LISTENING, AppStatus.SPEECH_DETECTED}:
@@ -473,13 +537,19 @@ if PYSIDE6_AVAILABLE:
             self.close()
 
         def closeEvent(self, event: QCloseEvent) -> None:
+            if self._allow_close:
+                self.unbind_controller()
+                event.accept()
+                return
             if self._minimize_to_tray and not self._allow_close:
                 event.ignore()
                 self.hide()
                 self.hidden_to_tray.emit()
                 return
-            self.unbind_controller()
-            event.accept()
+            # The application owns asynchronous shutdown; closing just the top-level
+            # widget would leave a hidden process because quitOnLastWindowClosed is off.
+            event.ignore()
+            self.exit_requested.emit()
 
 else:
 

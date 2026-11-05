@@ -13,7 +13,7 @@ from queue import Empty, Full, Queue
 
 import numpy as np
 
-from voxtype.asr.base import ASRBackend, TranscriptionRequest, bounded_prompt
+from voxtype.asr.base import ASRBackend, ASRModelUnavailable, TranscriptionRequest, bounded_prompt
 from voxtype.asr.hallucination_guard import GuardedTranscription, HallucinationGuard
 from voxtype.audio.capture import AudioCaptureService
 from voxtype.audio.models import AudioQueueStats
@@ -108,6 +108,8 @@ class ApplicationController:
         self._delivery_status = "pending"
         self._capture_started_monotonic: float | None = None
         self._pipeline_thread: threading.Thread | None = None
+        self._start_thread: threading.Thread | None = None
+        self._preload_thread: threading.Thread | None = None
         self._stop_thread: threading.Thread | None = None
         self._pause_thread: threading.Thread | None = None
         self._finish_thread: threading.Thread | None = None
@@ -158,6 +160,7 @@ class ApplicationController:
             thread = threading.Thread(
                 target=self._preload_model, name="voxtype-model-loader", daemon=True
             )
+            self._preload_thread = thread
             thread.start()
         else:
             self.state_machine.transition(AppState.IDLE, "application initialized")
@@ -225,6 +228,8 @@ class ApplicationController:
             name="voxtype-session-starter",
             daemon=True,
         )
+        with self._lock:
+            self._start_thread = starter
         starter.start()
         return True
 
@@ -328,15 +333,24 @@ class ApplicationController:
                     daemon=True,
                 )
                 self._pipeline_thread.start()
-                capture.start()
-                self._capture_started_monotonic = time.monotonic()
-                self._status_message = "Слушаю"
-            self.state_machine.transition_if(
-                {AppState.MODEL_LOADING}, AppState.IDLE, "model ready for session"
-            )
-            self.state_machine.transition_if(
-                {AppState.IDLE}, AppState.LISTENING, "microphone capture started"
-            )
+            # PortAudio can block inside a driver. Never hold the controller lock
+            # while opening the stream: the GUI needs that lock for snapshot().
+            capture.start()
+            with self._lock:
+                cancelled = (
+                    self._start_cancelled.is_set()
+                    or self._shutdown_requested.is_set()
+                    or self.state is not AppState.MODEL_LOADING
+                )
+                if not cancelled:
+                    self._capture_started_monotonic = time.monotonic()
+                    self._status_message = "Слушаю"
+                    self.state_machine.transition(AppState.IDLE, "model ready for session")
+                    self.state_machine.transition(AppState.LISTENING, "microphone capture started")
+            if cancelled:
+                capture.stop(drain_timeout=2.0)
+                audio_queue.close()
+                self._finalize_session("cancelled")
         except Exception as exc:
             self._handle_runtime_error("Не удалось начать диктовку", exc)
 
@@ -983,7 +997,9 @@ class ApplicationController:
                 target_ready = decision.status.value == "ready"
                 target_state = AppState.LISTENING if target_ready else AppState.PAUSED_TARGET_LOST
                 self._status_message = (
-                    "Слушаю" if target_ready else self._target_warning(decision.status)
+                    "Возобновляю микрофон"
+                    if target_ready
+                    else self._target_warning(decision.status)
                 )
                 self.state_machine.transition_if(
                     {AppState.PAUSED}, target_state, "user resumed capture"
@@ -1026,20 +1042,48 @@ class ApplicationController:
     ) -> None:
         if previous_pause is not None and previous_pause is not threading.current_thread():
             previous_pause.join(timeout=6.0)
+            if previous_pause.is_alive():
+                self._handle_runtime_error(
+                    "Не удалось безопасно возобновить микрофон",
+                    TimeoutError("previous audio capture did not stop before resume"),
+                )
+                return
         capture = self.capture_factory(audio_queue)
         with self._lock:
-            if self._user_paused or self.state not in {
-                AppState.LISTENING,
-                AppState.SPEECH_DETECTED,
-                AppState.TRANSCRIBING,
-                AppState.PAUSED_TARGET_LOST,
-            }:
+            if (
+                self._shutdown_requested.is_set()
+                or self._user_paused
+                or self.state
+                not in {
+                    AppState.LISTENING,
+                    AppState.SPEECH_DETECTED,
+                    AppState.TRANSCRIBING,
+                    AppState.PAUSED_TARGET_LOST,
+                }
+            ):
                 return
             self._capture = capture
-            try:
-                capture.start()
-            except Exception as exc:
-                self._handle_runtime_error("Не удалось возобновить микрофон", exc)
+        try:
+            capture.start()
+        except Exception as exc:
+            self._handle_runtime_error("Не удалось возобновить микрофон", exc)
+            return
+        with self._lock:
+            cancelled = (
+                self._shutdown_requested.is_set()
+                or self._user_paused
+                or self.state
+                not in {
+                    AppState.LISTENING,
+                    AppState.SPEECH_DETECTED,
+                    AppState.TRANSCRIBING,
+                    AppState.PAUSED_TARGET_LOST,
+                }
+            )
+            if not cancelled and self.state is not AppState.PAUSED_TARGET_LOST:
+                self._status_message = "Слушаю"
+        if cancelled:
+            capture.stop(drain_timeout=2.0)
 
     def snapshot(self) -> ControllerSnapshot:
         with self._lock:
@@ -1105,6 +1149,10 @@ class ApplicationController:
 
     def _handle_runtime_error(self, user_message: str, error: BaseException) -> None:
         self.logger.exception("runtime_error kind=%s", type(error).__name__, exc_info=error)
+        if isinstance(error, ASRModelUnavailable):
+            user_message = (
+                "Локальная модель не установлена. Откройте настройки и установите модель."
+            )
         with self._lock:
             self._error_message = user_message
             self._status_message = "Накопленный текст сохранён в журнале"
@@ -1327,13 +1375,27 @@ class ApplicationController:
         }:
             self.stop_dictation()
         with self._lock:
+            starter = self._start_thread
+            preloader = self._preload_thread
             stopper = self._stop_thread
+        for worker in (starter, preloader):
+            if worker is not None and worker is not threading.current_thread():
+                worker.join(timeout=30.0)
+                if worker.is_alive():
+                    self.logger.error("shutdown_deferred worker_still_running=%s", worker.name)
+                    return False
         if stopper is not None and stopper is not threading.current_thread():
             stopper.join(timeout=12.0)
+            if stopper.is_alive():
+                self.logger.error("shutdown_deferred worker_still_running=%s", stopper.name)
+                return False
         with self._lock:
             finisher = self._finish_thread
         if finisher is not None and finisher is not threading.current_thread():
             finisher.join(timeout=30.0)
+            if finisher.is_alive():
+                self.logger.error("shutdown_deferred worker_still_running=%s", finisher.name)
+                return False
         pipeline_alive = False
         with self._lock:
             pipeline_alive = self._pipeline_thread is not None and self._pipeline_thread.is_alive()

@@ -105,6 +105,16 @@ def test_main_window_minimizes_to_tray_and_can_force_close(qtbot) -> None:  # ty
     window.force_close()
 
 
+def test_main_window_close_requests_application_exit_without_tray(qtbot) -> None:  # type: ignore[no-untyped-def]
+    window = MainWindow(minimize_to_tray=False)
+    qtbot.addWidget(window)
+    window.show()
+    with qtbot.waitSignal(window.exit_requested, timeout=1000):
+        window.close()
+    assert window.isVisible()
+    window.force_close()
+
+
 def test_main_window_error_keeps_copy_action_available(qtbot) -> None:  # type: ignore[no-untyped-def]
     window = MainWindow(minimize_to_tray=False)
     qtbot.addWidget(window)
@@ -135,3 +145,19 @@ def test_main_window_completed_state_shows_full_transcript_and_new_start(qtbot) 
     assert window.fragment_label.text() == "весь завершённый текст"
     assert window.dictation_button.text() == "Начать диктовку"
     assert window.dictation_button.isEnabled()
+
+
+def test_missing_model_is_not_presented_as_ready_and_opens_setup(qtbot) -> None:  # type: ignore[no-untyped-def]
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.set_model_available(False)
+    window.update_snapshot(UIState(state=AppStatus.IDLE, model_name="small"))
+    assert window.status_label.text() == "Требуется модель"
+    assert "не установлена" in window.profile_label.text()
+    assert window.dictation_button.text() == "Настроить модель"
+    with qtbot.waitSignal(window.onboarding_requested):
+        qtbot.mouseClick(window.dictation_button, Qt.MouseButton.LeftButton)
+
+    window.set_model_available(True)
+    assert window.status_label.text() == "Готово"
+    assert window.dictation_button.text() == "Начать диктовку"

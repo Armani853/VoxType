@@ -6,6 +6,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $RepoRoot = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
 $Python = Join-Path $RepoRoot '.venv\Scripts\python.exe'
+$env:PYTHONPATH = Join-Path $RepoRoot 'src'
 $BuildRoot = Join-Path $RepoRoot 'build\nuitka'
 $AssetRoot = Join-Path $RepoRoot 'build\packaging-assets'
 $DistRoot = Join-Path $RepoRoot 'dist'
@@ -109,19 +110,34 @@ $Smoke = Start-Process -FilePath $Executable -ArgumentList '--self-test', '--no-
 if ($Smoke.ExitCode -ne 0) { throw "Packaged self-test failed with exit code $($Smoke.ExitCode)" }
 $InferenceSmoke = Start-Process -FilePath $Executable -ArgumentList '--inference-smoke-test' -Wait -PassThru -WindowStyle Hidden
 if ($InferenceSmoke.ExitCode -ne 0) { throw "Packaged inference smoke-test failed with exit code $($InferenceSmoke.ExitCode)" }
-$PreviousQpaPlatform = $env:QT_QPA_PLATFORM
+$PreviousSmokeData = $env:VOXTYPE_DATA_DIRECTORY
+$PreviousSmokeCache = $env:VOXTYPE_CACHE_DIRECTORY
 try {
-    $env:QT_QPA_PLATFORM = 'offscreen'
-    $UiSmoke = Start-Process -FilePath $Executable -ArgumentList '--ui-smoke-test' -Wait -PassThru -WindowStyle Hidden
+    $env:VOXTYPE_DATA_DIRECTORY = Join-Path $BuildRoot 'ui-smoke-profile'
+    $env:VOXTYPE_CACHE_DIRECTORY = Join-Path $BuildRoot 'ui-smoke-cache'
+    $UiSmoke = Start-Process -FilePath $Executable -ArgumentList '--ui-smoke-test' -Wait -PassThru
     if ($UiSmoke.ExitCode -ne 0) { throw "Packaged Qt startup smoke-test failed with exit code $($UiSmoke.ExitCode)" }
 }
 finally {
-    $env:QT_QPA_PLATFORM = $PreviousQpaPlatform
+    $env:VOXTYPE_DATA_DIRECTORY = $PreviousSmokeData
+    $env:VOXTYPE_CACHE_DIRECTORY = $PreviousSmokeCache
 }
 
 Write-Host '[6/6] Creating ZIP and SHA-256 checksum'
 $Archive = Join-Path $ReleaseRoot 'VoxType-0.2.4-win64-portable.zip'
-Compress-Archive -LiteralPath $PortableRoot -DestinationPath $Archive -CompressionLevel Optimal
+for ($Attempt = 1; $Attempt -le 5; $Attempt++) {
+    try {
+        Compress-Archive -LiteralPath $PortableRoot -DestinationPath $Archive -CompressionLevel Optimal -ErrorAction Stop
+        break
+    }
+    catch {
+        if (Test-Path -LiteralPath $Archive) {
+            Remove-Item -LiteralPath $Archive -Force
+        }
+        if ($Attempt -eq 5) { throw }
+        Start-Sleep -Seconds 2
+    }
+}
 $Hash = Get-FileHash -Algorithm SHA256 -LiteralPath $Archive
 $Checksum = Join-Path $ReleaseRoot 'VoxType-0.2.4-win64-portable.zip.sha256'
 Set-Content -LiteralPath $Checksum -Encoding ascii -Value "$($Hash.Hash.ToLowerInvariant())  $($Hash.Path | Split-Path -Leaf)"

@@ -10,6 +10,7 @@ import shutil
 import sys
 import threading
 import time
+import traceback
 from contextlib import suppress
 from dataclasses import replace
 from pathlib import Path
@@ -17,7 +18,14 @@ from types import TracebackType
 from typing import Any, Literal, cast
 
 import numpy as np
-from PySide6.QtCore import QAbstractNativeEventFilter, QByteArray, QObject, QTimer, Signal
+from PySide6.QtCore import (
+    QAbstractEventDispatcher,
+    QAbstractNativeEventFilter,
+    QByteArray,
+    QObject,
+    QTimer,
+    Signal,
+)
 from PySide6.QtWidgets import QApplication, QFileDialog
 
 from voxtype.asr.base import TranscriptionRequest
@@ -129,7 +137,22 @@ class DesktopApplication:
     """Own Qt views and adapt them to the Qt-independent controller."""
 
     def __init__(self, application: QApplication, runtime: RuntimeBundle) -> None:
+        startup_started = time.perf_counter()
+        previous_stage = startup_started
+
+        def stage(name: str) -> None:
+            nonlocal previous_stage
+            now = time.perf_counter()
+            _LOGGER.info(
+                "startup_stage name=%s duration_ms=%.1f total_ms=%.1f",
+                name,
+                (now - previous_stage) * 1_000.0,
+                (now - startup_started) * 1_000.0,
+            )
+            previous_stage = now
+
         self.application = application
+        self._gui_thread_ident = threading.get_ident()
         self.runtime = runtime
         self.controller = runtime.controller
         self.signals = _WorkerSignals()
@@ -138,11 +161,14 @@ class DesktopApplication:
             interface_language=runtime.settings.general.ui_language,
             minimize_to_tray=runtime.settings.general.minimize_to_tray,
         )
+        self.main.set_model_available(runtime.selected_model_installed)
+        stage("main_window_constructed")
         self.overlay = DictationOverlay(None)
         self.tray = TrayController(None)
         self.settings_window = SettingsWindow(self.main)
         self.history_window = HistoryWindow(self.main)
         self.diagnostics_window = DiagnosticsWindow(self.main)
+        stage("auxiliary_widgets_constructed")
         self.onboarding: OnboardingWizard | None = None
         self.hotkeys = GlobalHotkeyManager(hwnd=0)
         self._resume_after_suspend = False
@@ -152,7 +178,7 @@ class DesktopApplication:
         self.hotkey_filter = _HotkeyEventFilter(self.hotkeys, self.power_events, self.close)
         self.timer = QTimer(self.main)
         self.timer.setInterval(50)
-        self._last_state = ""
+        self._last_state = "STARTUP"
         self._result_dismissed = False
         self._last_pending_flush = 0.0
         self._last_resource_sample = 0.0
@@ -160,6 +186,11 @@ class DesktopApplication:
         self._closed = False
         self._closing = False
         self._heartbeat_last = time.monotonic()
+        self._dispatch_started: float | None = None
+        self._event_dispatcher = QAbstractEventDispatcher.instance(application.thread())
+        if self._event_dispatcher is not None:
+            self._event_dispatcher.awake.connect(self._dispatch_awake)
+            self._event_dispatcher.aboutToBlock.connect(self._dispatch_done)
         self._heartbeat_stop = threading.Event()
         self._heartbeat_timer = QTimer(self.main)
         self._heartbeat_timer.setInterval(100)
@@ -168,14 +199,24 @@ class DesktopApplication:
             runtime.startup.enable()
         self._connect()
         self._configure_hotkeys()
+        stage("signals_and_hotkeys_connected")
         self.application.installNativeEventFilter(self.hotkey_filter)
         apply_theme(application, ThemeMode(runtime.settings.general.theme))
+        stage("stylesheet_applied")
         self.application.setWindowIcon(create_app_icon())
         self.application.setQuitOnLastWindowClosed(False)
+        # A native show/tray call can stall before the Qt event loop starts.
+        # Start the watchdog before exposing the HWND so it can capture that stack.
+        self._heartbeat_last = time.monotonic()
+        threading.Thread(
+            target=self._heartbeat_monitor, name="voxtype-ui-watchdog", daemon=True
+        ).start()
         self.main.show()
+        stage("main_window_shown")
         self.main.set_toggle_hotkey(runtime.settings.hotkeys.toggle)
         self.controller.target_manager.register_own_window(int(self.main.winId()))
         self.tray.show()
+        stage("tray_shown")
         if runtime.settings_repository.last_recovery_backup is not None:
             self.tray.show_message(
                 "Настройки восстановлены",
@@ -190,10 +231,9 @@ class DesktopApplication:
             )
         self.timer.timeout.connect(self._poll)
         self.timer.start()
+        self._heartbeat_last = time.monotonic()
         self._heartbeat_timer.start()
-        threading.Thread(
-            target=self._heartbeat_monitor, name="voxtype-ui-watchdog", daemon=True
-        ).start()
+        stage("qt_timers_started")
         if not runtime.settings.general.onboarding_completed:
             QTimer.singleShot(100, self.show_onboarding)
         if runtime.session_repository.unfinished():
@@ -244,6 +284,7 @@ class DesktopApplication:
             )
         )
         self.main.settings_requested.connect(self.show_settings)
+        self.main.exit_requested.connect(self.quit)
         self.main.history_requested.connect(self.show_history)
         self.main.diagnostics_requested.connect(self.show_diagnostics)
         self.main.onboarding_requested.connect(self.show_onboarding)
@@ -317,19 +358,47 @@ class DesktopApplication:
     def _heartbeat(self) -> None:
         self._heartbeat_last = time.monotonic()
 
+    def _dispatch_awake(self) -> None:
+        self._dispatch_started = time.perf_counter()
+
+    def _dispatch_done(self) -> None:
+        started = self._dispatch_started
+        self._dispatch_started = None
+        if started is None:
+            return
+        duration_ms = (time.perf_counter() - started) * 1_000.0
+        if duration_ms >= 100.0:
+            _LOGGER.warning(
+                "UI_DISPATCH_SLOW state=%s duration_ms=%.1f",
+                self.controller.state.name,
+                duration_ms,
+            )
+
     def _heartbeat_monitor(self) -> None:
         reported = False
+        stack_reported = False
         while not self._heartbeat_stop.wait(0.1):
             elapsed = time.monotonic() - self._heartbeat_last
             if elapsed > 0.5 and not reported:
                 _LOGGER.warning(
                     "UI_STALL state=%s elapsed_ms=%.1f",
-                    self.controller.state.name,
+                    self._last_state,
                     elapsed * 1_000.0,
                 )
                 reported = True
+            if elapsed > 2.0 and not stack_reported:
+                frame = sys._current_frames().get(self._gui_thread_ident)
+                if frame is not None:
+                    _LOGGER.error(
+                        "UI_STALL_STACK state=%s elapsed_ms=%.1f\n%s",
+                        self._last_state,
+                        elapsed * 1_000.0,
+                        "".join(traceback.format_stack(frame, limit=40)),
+                    )
+                stack_reported = True
             elif elapsed <= 0.25:
                 reported = False
+                stack_reported = False
 
     def _show_main(self) -> None:
         self.main.showNormal()
@@ -341,13 +410,17 @@ class DesktopApplication:
         self.overlay.hide()
 
     def _poll(self) -> None:
+        poll_started = time.perf_counter()
         if self.controller.state.name == "IDLE":
             with suppress(OSError, RuntimeError):
                 self.controller.target_manager.remember_foreground_target()
+        target_done = time.perf_counter()
         snapshot = self.controller.snapshot()
+        snapshot_done = time.perf_counter()
         self.main.update_snapshot(snapshot)
         self.tray.update_snapshot(snapshot)
         self.overlay.update_snapshot(snapshot)
+        widgets_done = time.perf_counter()
         active = snapshot.state in {
             "STARTING",
             "MODEL_LOADING",
@@ -406,6 +479,17 @@ class DesktopApplication:
         if now - self._last_resource_sample >= 10.0:
             self._last_resource_sample = now
             self.controller.sample_resources()
+        poll_ms = (time.perf_counter() - poll_started) * 1_000.0
+        if poll_ms >= 50.0:
+            _LOGGER.warning(
+                "UI_POLL_SLOW state=%s duration_ms=%.1f target_ms=%.1f snapshot_ms=%.1f widgets_ms=%.1f other_ms=%.1f",
+                snapshot.state,
+                poll_ms,
+                (target_done - poll_started) * 1_000.0,
+                (snapshot_done - target_done) * 1_000.0,
+                (widgets_done - snapshot_done) * 1_000.0,
+                (time.perf_counter() - widgets_done) * 1_000.0,
+            )
 
     def _on_suspend(self) -> None:
         self.controller.target_manager.on_suspend()
@@ -495,6 +579,7 @@ class DesktopApplication:
     def _on_devices_ready(self, items: object) -> None:
         if not isinstance(items, (list, tuple)):
             return
+        self.runtime.devices = tuple(items)
         devices = [(f"{item.name} ({item.host_api})", item.index) for item in items]
         self.settings_window.set_audio_devices(devices, self.runtime.settings.audio.device_id)
         if self.onboarding is not None:
@@ -586,7 +671,9 @@ class DesktopApplication:
             )
 
     def _configure_capture_factory(self) -> None:
-        devices = list_input_devices()
+        # Discovery runs in the settings worker. Saving settings must never
+        # synchronously wait for PortAudio on the Qt thread.
+        devices = self.runtime.devices
         device = next(
             (item for item in devices if item.index == self.runtime.settings.audio.device_id),
             self.runtime.device,
@@ -899,6 +986,7 @@ class DesktopApplication:
         self.settings_window.set_diagnostics_status(message, ready)
         if ready:
             self.settings_window.set_models([(model_id, model_id)], model_id)
+            self.main.set_model_available(model_id == self.controller.backend.model_id)
         if self.onboarding is not None:
             self.onboarding.set_model_ready(ready, message)
 
@@ -1174,7 +1262,12 @@ class DesktopApplication:
         self.tray.show_message("VoxType", "Безопасно завершаю работу в фоне")
 
         def worker() -> None:
-            self.signals.shutdown_ready.emit(self.runtime.close())
+            try:
+                closed = self.runtime.close()
+            except Exception:
+                _LOGGER.exception("shutdown_worker_failed")
+                closed = False
+            self.signals.shutdown_ready.emit(closed)
 
         threading.Thread(target=worker, name="voxtype-shutdown", daemon=True).start()
         return False
@@ -1189,10 +1282,13 @@ class DesktopApplication:
                 target=self._heartbeat_monitor, name="voxtype-ui-watchdog", daemon=True
             ).start()
             self.tray.show_message(
-                "VoxType", "Завершение inference продолжается; повторите выход позже"
+                "VoxType", "Не удалось завершить работу; подробности в журнале. Повторите выход"
             )
             return
         self._closed = True
+        if self._event_dispatcher is not None:
+            self._event_dispatcher.awake.disconnect(self._dispatch_awake)
+            self._event_dispatcher.aboutToBlock.disconnect(self._dispatch_done)
         self.hotkeys.close()
         self.overlay.close()
         self.tray.close()
@@ -1234,13 +1330,55 @@ def _coerce_asr_profile(value: str) -> ASRProfile:
     return ASRProfile.FAST
 
 
-def run_desktop(runtime: RuntimeBundle | None = None) -> int:
+def run_desktop(runtime: RuntimeBundle | None = None, *, smoke_after_ms: int | None = None) -> int:
+    started = time.perf_counter()
     existing = QApplication.instance()
     application = cast(QApplication, existing) if existing is not None else QApplication([])
+    _LOGGER.info(
+        "startup_stage name=qapplication_ready duration_ms=%.1f",
+        (time.perf_counter() - started) * 1_000.0,
+    )
     application.setApplicationName("VoxType")
     application.setApplicationVersion(__version__)
     application.setOrganizationName("VoxType")
     shell = DesktopApplication(application, runtime or build_runtime())
+    smoke_result = smoke_after_ms is None
+    if smoke_after_ms is not None:
+
+        def finish_smoke() -> None:
+            nonlocal smoke_result
+            if application.platformName() != "offscreen":
+                central = shell.main.centralWidget()
+                pixmap = shell.main.screen().grabWindow(int(shell.main.winId()))
+                picture = pixmap.toImage()
+                colors = {
+                    picture.pixel(x, y) & 0xFFFFFF
+                    for y in range(0, picture.height(), max(1, picture.height() // 24))
+                    for x in range(0, picture.width(), max(1, picture.width() // 32))
+                }
+                smoke_result = bool(
+                    shell.main._first_content_paint_seen
+                    and central is not None
+                    and central.width() > 0
+                    and central.height() > 0
+                    and len(colors) >= 10
+                )
+                _LOGGER.info(
+                    "ui_smoke_render ok=%s colors=%s size=%sx%s first_paint=%s",
+                    smoke_result,
+                    len(colors),
+                    picture.width(),
+                    picture.height(),
+                    shell.main._first_content_paint_seen,
+                )
+            else:
+                _LOGGER.info("ui_smoke_render skipped=offscreen")
+            shell.quit()
+
+        QTimer.singleShot(smoke_after_ms, finish_smoke)
+    _LOGGER.info(
+        "startup_stage name=shell_ready total_ms=%.1f", (time.perf_counter() - started) * 1_000.0
+    )
     previous_excepthook = sys.excepthook
 
     def ui_excepthook(
@@ -1259,8 +1397,17 @@ def run_desktop(runtime: RuntimeBundle | None = None) -> int:
     # Keep a Python reference for the full Qt event loop lifetime.
     application.setProperty("voxtype_shell", shell)
     try:
-        return int(application.exec())
+        _LOGGER.info(
+            "startup_stage name=event_loop_enter total_ms=%.1f",
+            (time.perf_counter() - started) * 1_000.0,
+        )
+        exit_code = int(application.exec())
+        return exit_code if exit_code else (0 if smoke_result else 3)
     finally:
+        _LOGGER.info(
+            "startup_stage name=event_loop_exit total_ms=%.1f",
+            (time.perf_counter() - started) * 1_000.0,
+        )
         sys.excepthook = previous_excepthook
 
 

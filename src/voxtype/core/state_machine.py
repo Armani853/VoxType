@@ -54,6 +54,7 @@ _ALLOWED: dict[AppState, frozenset[AppState]] = {
             AppState.MODEL_LOADING,
             AppState.IDLE,
             AppState.FINISHING,
+            AppState.ERROR_RECOVERABLE,
             AppState.ERROR_FATAL,
             AppState.SHUTTING_DOWN,
         }

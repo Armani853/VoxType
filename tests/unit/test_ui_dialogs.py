@@ -7,7 +7,7 @@ pytest.importorskip("PySide6")
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QGuiApplication
-from PySide6.QtWidgets import QDialogButtonBox
+from PySide6.QtWidgets import QApplication, QDialogButtonBox, QScrollArea
 
 from voxtype.ui.diagnostics_window import DiagnosticsWindow
 from voxtype.ui.history_window import HistoryWindow
@@ -89,6 +89,20 @@ def test_settings_accepts_slots_based_application_schema(qtbot) -> None:  # type
     assert values["dictation"]["model_profile"] == "balanced"
     assert values["audio"]["device_id"] == 3
     assert values["model"]["installed_model"] == "small"
+
+
+def test_audio_settings_fit_dialog_without_horizontal_scroll(qtbot) -> None:  # type: ignore[no-untyped-def]
+    window = SettingsWindow()
+    qtbot.addWidget(window)
+    window.set_audio_devices([("Переназначение звуковых устройств - Input (MME)", 0)], 0)
+    window.navigation.setCurrentRow(2)
+    audio_page = window.pages.currentWidget()
+    assert isinstance(audio_page, QScrollArea)
+    window.show()
+    for width in (900, 760):
+        window.resize(width, 650)
+        QApplication.processEvents()
+        assert audio_page.horizontalScrollBar().maximum() == 0
 
 
 def test_history_filters_displays_and_copies(qtbot, monkeypatch) -> None:  # type: ignore[no-untyped-def]

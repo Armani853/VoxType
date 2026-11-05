@@ -19,7 +19,10 @@ def configure_logging(log_dir: Path | None = None, verbose: bool = False) -> Pat
         path, maxBytes=5 * 1024 * 1024, backupCount=4, encoding="utf-8", delay=True
     )
     handler.setFormatter(
-        logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s", "%Y-%m-%dT%H:%M:%S")
+        logging.Formatter(
+            "%(asctime)s.%(msecs)03d %(levelname)s %(name)s %(message)s",
+            "%Y-%m-%dT%H:%M:%S",
+        )
     )
     root = logging.getLogger("voxtype")
     root.setLevel(logging.DEBUG if verbose else logging.INFO)

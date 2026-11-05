@@ -30,8 +30,15 @@ def test_portable_build_is_checked_safe_standalone_and_smoke_tested() -> None:
     assert "$Icon.Substring($RepoRoot.Length)" in script
     assert "Push-Location -LiteralPath $RepoRoot" in script
     assert "--self-test" in script and "--no-ui" in script
+    assert "--ui-smoke-test" in script
+    assert "ui-smoke-profile" in script
+    assert "QT_QPA_PLATFORM = 'offscreen'" not in script
+    assert re.search(
+        r"Start-Process -FilePath \$Executable -ArgumentList '--ui-smoke-test' -Wait -PassThru\s*\n",
+        script,
+    )
     assert "Get-FileHash -Algorithm SHA256" in script
-    assert "Compress-Archive" in script
+    assert "Compress-Archive" in script and "-ErrorAction Stop" in script
 
 
 def test_installer_build_cleans_smokes_and_publishes_checksum() -> None:

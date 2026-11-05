@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -186,6 +187,24 @@ class EmptyCapture(FixtureCapture):
         self.running = True
 
 
+class BlockingStartCapture(EmptyCapture):
+    def __init__(
+        self,
+        output_queue: LosslessAudioQueue,
+        entered: threading.Event,
+        release: threading.Event,
+    ) -> None:
+        super().__init__(output_queue)
+        self.entered = entered
+        self.release = release
+
+    def start(self) -> None:
+        self.entered.set()
+        if not self.release.wait(2.0):
+            raise TimeoutError("test capture start was not released")
+        super().start()
+
+
 class NonStoppingCapture(FixtureCapture):
     def stop(self, *, drain_timeout: float = 5.0) -> bool:
         del drain_timeout
@@ -339,6 +358,72 @@ def test_model_loading_accepts_only_one_queued_start(tmp_path: Path) -> None:
     repository.close()
 
 
+def test_shutdown_waits_for_model_loader_before_disposing_resources(tmp_path: Path) -> None:
+    repository = SessionRepository(tmp_path / "sessions.sqlite3")
+    backend = DelayedLoadBackend()
+    controller = ApplicationController(
+        settings_repository=SettingsRepository(tmp_path / "settings.json"),
+        session_repository=repository,
+        backend=backend,
+        capture_factory=lambda queue: FixtureCapture(queue),  # type: ignore[arg-type,return-value]
+        segmenter_factory=lambda: StreamingSegmenter(AlwaysSpeech()),
+        target_manager=FixtureTargetManager(),  # type: ignore[arg-type]
+        injection_service=FixtureInjection(),  # type: ignore[arg-type]
+        spool_root=tmp_path / "spool",
+    )
+    controller.initialize()
+    assert controller.start_dictation()
+    wait_for_state(controller, AppState.MODEL_LOADING)
+    assert controller.shutdown()
+    assert backend.load_calls == 1
+    assert controller._start_thread is not None
+    assert not controller._start_thread.is_alive()
+    repository.close()
+
+
+def test_capture_creation_error_is_recoverable_from_starting(tmp_path: Path) -> None:
+    repository = SessionRepository(tmp_path / "sessions.sqlite3")
+
+    def disconnected_capture(_queue: LosslessAudioQueue) -> FixtureCapture:
+        raise OSError("audio device disconnected")
+
+    controller = ApplicationController(
+        settings_repository=SettingsRepository(tmp_path / "settings.json"),
+        session_repository=repository,
+        backend=DeterministicBackend(),
+        capture_factory=disconnected_capture,  # type: ignore[arg-type]
+        segmenter_factory=lambda: StreamingSegmenter(AlwaysSpeech()),
+        target_manager=FixtureTargetManager(),  # type: ignore[arg-type]
+        injection_service=FixtureInjection(),  # type: ignore[arg-type]
+        spool_root=tmp_path / "spool",
+    )
+    controller.initialize()
+    assert controller.start_dictation()
+    wait_for_state(controller, AppState.ERROR_RECOVERABLE)
+    assert controller.shutdown()
+    repository.close()
+
+
+def test_shutdown_waits_for_inflight_inference(tmp_path: Path) -> None:
+    repository = SessionRepository(tmp_path / "sessions.sqlite3")
+    controller = ApplicationController(
+        settings_repository=SettingsRepository(tmp_path / "settings.json"),
+        session_repository=repository,
+        backend=HangingBackend(),
+        capture_factory=lambda queue: FixtureCapture(queue),  # type: ignore[arg-type,return-value]
+        segmenter_factory=lambda: StreamingSegmenter(AlwaysSpeech()),
+        target_manager=FixtureTargetManager(),  # type: ignore[arg-type]
+        injection_service=FixtureInjection(),  # type: ignore[arg-type]
+        spool_root=tmp_path / "spool",
+    )
+    controller.initialize()
+    assert controller.start_dictation()
+    wait_for_state(controller, AppState.LISTENING)
+    assert controller.shutdown()
+    assert controller._pipeline_thread is None or not controller._pipeline_thread.is_alive()
+    repository.close()
+
+
 def test_start_command_returns_before_slow_runtime_preparation(tmp_path: Path) -> None:
     def slow_segmenter() -> StreamingSegmenter:
         time.sleep(0.2)
@@ -366,6 +451,113 @@ def test_start_command_returns_before_slow_runtime_preparation(tmp_path: Path) -
     assert len(repository.recent()) == 1
     controller.shutdown()
     repository.close()
+
+
+def test_snapshot_remains_responsive_while_audio_driver_start_blocks(tmp_path: Path) -> None:
+    entered = threading.Event()
+    release = threading.Event()
+    repository = SessionRepository(tmp_path / "sessions.sqlite3")
+    controller = ApplicationController(
+        settings_repository=SettingsRepository(tmp_path / "settings.json"),
+        session_repository=repository,
+        backend=DeterministicBackend(),
+        capture_factory=lambda queue: BlockingStartCapture(queue, entered, release),  # type: ignore[arg-type,return-value]
+        segmenter_factory=lambda: StreamingSegmenter(AlwaysSpeech()),
+        target_manager=FixtureTargetManager(),  # type: ignore[arg-type]
+        injection_service=FixtureInjection(),  # type: ignore[arg-type]
+        spool_root=tmp_path / "spool",
+    )
+    controller.initialize()
+    assert controller.start_dictation()
+    assert entered.wait(2.0)
+    timer = threading.Timer(0.35, release.set)
+    timer.start()
+    try:
+        started = time.monotonic()
+        controller.snapshot()
+        elapsed = time.monotonic() - started
+    finally:
+        release.set()
+        timer.join()
+        controller.shutdown()
+        repository.close()
+    assert elapsed < 0.15
+
+
+def test_stop_during_blocked_audio_start_closes_capture_without_listening(tmp_path: Path) -> None:
+    entered = threading.Event()
+    release = threading.Event()
+    captures: list[BlockingStartCapture] = []
+    repository = SessionRepository(tmp_path / "sessions.sqlite3")
+
+    def capture_factory(queue: LosslessAudioQueue) -> BlockingStartCapture:
+        capture = BlockingStartCapture(queue, entered, release)
+        captures.append(capture)
+        return capture
+
+    controller = ApplicationController(
+        settings_repository=SettingsRepository(tmp_path / "settings.json"),
+        session_repository=repository,
+        backend=DeterministicBackend(),
+        capture_factory=capture_factory,  # type: ignore[arg-type]
+        segmenter_factory=lambda: StreamingSegmenter(AlwaysSpeech()),
+        target_manager=FixtureTargetManager(),  # type: ignore[arg-type]
+        injection_service=FixtureInjection(),  # type: ignore[arg-type]
+        spool_root=tmp_path / "spool",
+    )
+    controller.initialize()
+    assert controller.start_dictation()
+    assert entered.wait(2.0)
+    assert controller.stop_dictation()
+    release.set()
+    wait_for_state(controller, AppState.COMPLETED)
+    assert captures and not captures[0].running
+    assert controller.shutdown()
+    repository.close()
+
+
+def test_snapshot_remains_responsive_while_audio_resume_blocks(tmp_path: Path) -> None:
+    entered = threading.Event()
+    release = threading.Event()
+    repository = SessionRepository(tmp_path / "sessions.sqlite3")
+    capture_count = 0
+
+    def capture_factory(queue: LosslessAudioQueue) -> FixtureCapture:
+        nonlocal capture_count
+        capture_count += 1
+        if capture_count == 1:
+            return EmptyCapture(queue)
+        return BlockingStartCapture(queue, entered, release)
+
+    controller = ApplicationController(
+        settings_repository=SettingsRepository(tmp_path / "settings.json"),
+        session_repository=repository,
+        backend=DeterministicBackend(),
+        capture_factory=capture_factory,  # type: ignore[arg-type]
+        segmenter_factory=lambda: StreamingSegmenter(AlwaysSpeech()),
+        target_manager=FixtureTargetManager(),  # type: ignore[arg-type]
+        injection_service=FixtureInjection(),  # type: ignore[arg-type]
+        spool_root=tmp_path / "spool",
+    )
+    controller.initialize()
+    assert controller.start_dictation()
+    wait_for_state(controller, AppState.LISTENING)
+    assert controller.toggle_pause()
+    wait_for_state(controller, AppState.PAUSED)
+    assert controller.toggle_pause()
+    assert entered.wait(2.0)
+    timer = threading.Timer(0.35, release.set)
+    timer.start()
+    try:
+        started = time.monotonic()
+        controller.snapshot()
+        elapsed = time.monotonic() - started
+    finally:
+        release.set()
+        timer.join()
+        controller.shutdown()
+        repository.close()
+    assert elapsed < 0.15
 
 
 def test_stop_during_model_loading_is_immediate_and_finishes_once(tmp_path: Path) -> None:

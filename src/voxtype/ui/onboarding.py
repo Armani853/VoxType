@@ -368,7 +368,7 @@ if PYSIDE6_AVAILABLE:
             return card, result, button
 
         def _microphone_changed(self, _index: int) -> None:
-            identifier = str(self.microphone_combo.currentData() or "")
+            identifier = self._selected_microphone_id()
             self.microphone_combo.setToolTip(self.microphone_combo.currentText())
             self.microphone_page.set_complete(bool(identifier))
             if identifier:
@@ -401,7 +401,7 @@ if PYSIDE6_AVAILABLE:
                 if selected_index >= 0:
                     self.microphone_combo.setCurrentIndex(selected_index)
             del blocker
-            identifier = str(self.microphone_combo.currentData() or "")
+            identifier = self._selected_microphone_id()
             self.microphone_combo.setToolTip(self.microphone_combo.currentText())
             self.microphone_page.set_complete(bool(identifier))
             self.microphone_status.setText(
@@ -425,7 +425,7 @@ if PYSIDE6_AVAILABLE:
             self.microphone_status.setText(text)
 
         def _request_calibration(self) -> None:
-            identifier = str(self.microphone_combo.currentData() or "")
+            identifier = self._selected_microphone_id()
             if not identifier:
                 self.calibration_status.setText("Сначала выберите микрофон")
                 return
@@ -442,6 +442,10 @@ if PYSIDE6_AVAILABLE:
             self.continue_anyway_button.hide()
             self.calibration_page.set_complete(False)
             self.calibration_requested.emit(identifier)
+
+        def _selected_microphone_id(self) -> str:
+            value = self.microphone_combo.currentData()
+            return "" if value is None else str(value)
 
         def set_calibration_progress(self, percent: int, message: str) -> None:
             self.calibration_progress.setRange(0, 100)
