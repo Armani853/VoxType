@@ -11,4 +11,15 @@ The compiler identified itself as **Inno Setup 6.7.3, “Non-commercial use only
 
 Computer Use completed the isolated installer on 2026-11-05. It selected the desktop shortcut and clicked Install and Finish. The installed EXE at `C:\Users\Алла\AppData\Local\Programs\VoxType-Acceptance-401beb1\VoxType.exe` was 49,165,824 bytes and SHA-256 `0489d45f940469850a77bb11f80b2cb09c91865c8367537b017be836ea251e61`, exactly matching the candidate. The desktop shortcut `VoxType Acceptance 401beb1.lnk` was present. Installer pages were mostly English with some Russian task labels (FA-003). Start menu shortcut, uninstall, and production AppId upgrade remain unverified.
 
-The installed test copy remains on this machine. Its removal through the Windows UI is pending; the Computer Use confirmation policy requires separate action-time approval before that uninstall. No uninstall has been claimed. Any replacement installer must be rebuilt from the source fix and retested before certification.
+After action-time user confirmation, Computer Use launched `unins000.exe` from the isolated installation, observed the Inno uninstall confirmation, and chose Yes. The old acceptance install directory, its desktop shortcut, and its HKCU Uninstall AppId entry were absent afterward; the previous stability-audit EXE still existed. The UI state refresh raced with the uninstall window closing, so completion was verified through the exact file and registry paths. This uninstall applies only to the `401beb1` isolated test copy.
+
+## Replacement candidate `b598039`
+
+Source/packaging commit `b598039f10c32f00fa1e1c86c86fe91c1e12798e` contains FA-005 and the Russian installer language. `scripts/lint.ps1` passed, `scripts/test.ps1` reported 259 passed/5 deselected with the open Windows `0x8001010d` diagnostic, and the new packaged EXE passed self-test, inference smoke, and UI smoke (all exit 0). The replacement candidate is in the ignored acceptance build directory:
+
+| Artifact | Bytes | SHA-256 |
+|---|---:|---|
+| `build/final-acceptance/nuitka3/__main__.dist/VoxType.exe` | 49,168,896 | `e6ec8c868bb006e3e0a1ac2eac9ec09c3c1573c51326a86dd80f578ff4644faf` |
+| `build/final-acceptance/VoxType-0.2.4-b598039-acceptance-setup.exe` | 81,011,269 | `5238250873a28ccdcd51b2fbee0f6ce4511b0786560a17f81ece2bf28510f849` |
+
+The replacement script uses AppId `{F46B56BA-7CFD-4E4B-91C8-B59803900024}` and an isolated install directory. After separate action-time user confirmation, Computer Use traversed the Russian destination, tasks, summary, progress, and finish screens and installed it at `C:\Users\Алла\AppData\Local\Programs\VoxType-Acceptance-b598039`. The installed EXE SHA-256 matched `e6ec8c868bb006e3e0a1ac2eac9ec09c3c1573c51326a86dd80f578ff4644faf`. The first-run GUI painted. This test copy has **not** been uninstalled. The installed binary predates the subsequent FA-007 source change; it is not the latest release candidate.

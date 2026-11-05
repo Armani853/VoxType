@@ -15,7 +15,7 @@ import numpy as np
 
 from voxtype.asr.base import ASRBackend, ASRModelUnavailable, TranscriptionRequest, bounded_prompt
 from voxtype.asr.hallucination_guard import GuardedTranscription, HallucinationGuard
-from voxtype.audio.capture import AudioCaptureService
+from voxtype.audio.capture import AudioCaptureService, AudioIngressOverflowError
 from voxtype.audio.models import AudioQueueStats
 from voxtype.audio.spool import AudioQueueLease, DiskSpool, LosslessAudioQueue, SpoolError
 from voxtype.core.models import (
@@ -474,14 +474,12 @@ class ApplicationController:
                         capture = self._capture
                     fatal_error = None if capture is None else getattr(capture, "fatal_error", None)
                     if fatal_error is not None:
-                        raise RuntimeError("microphone capture dispatcher failed") from (
-                            fatal_error
-                        )
+                        raise fatal_error
                     if audio_queue.closed:
                         break
                     continue
                 if lease.chunk.input_overflow:
-                    raise RuntimeError("PortAudio input overflow detected")
+                    raise AudioIngressOverflowError("PortAudio input overflow detected")
                 if self._captured_during_pause(lease.chunk.captured_at):
                     audio_queue.ack(lease)
                     continue
@@ -1161,6 +1159,10 @@ class ApplicationController:
         if isinstance(error, ASRModelUnavailable):
             user_message = (
                 "Локальная модель не установлена. Откройте настройки и установите модель."
+            )
+        elif isinstance(error, AudioIngressOverflowError):
+            user_message = (
+                "Микрофон потерял часть аудио. Проверьте устройство записи и повторите диктовку."
             )
         with self._lock:
             self._error_message = user_message

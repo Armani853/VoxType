@@ -15,8 +15,22 @@ Statuses are `PASS`, `FAIL`, `BLOCKED`, or `PENDING`. `PASS` requires an action 
 | D01 | Daily use, pause/resume/language/window switching | Started and stopped one real capture on installed EXE; observed processing and return to Ready | Reliable state and saved text | State sequence worked. Ambient, uncontrolled speech reached ASR; its content and accuracy are excluded. Target was VoxType itself, so insertion was intentionally withheld. Pause/resume and target switching remain untested | BLOCKED for full scenario | 2026-11-05 ~18:44–18:46 | Computer Use status/overlay sequence | FA-004, FA-005 |
 | E01 | Every interactive GUI element | Opened Settings and each of seven tabs; changed tray-close option and saved | Visible and functional | Tabs painted and reacted; tray-close setting affected subsequent X behavior. All controls twice, backend effects, and restore remain untested | BLOCKED for full inventory | 2026-11-05 ~18:44–18:50 | Computer Use settings screens and second exit | — |
 | F01 | Adversarial customer actions | Rapid clicks, device/focus/model faults, recovery | No hang or silent loss | Not run | PENDING | — | — | — |
-| G01 | Installer removal | Uninstall isolated acceptance install through UI | Program and registration removed | Not run | PENDING | — | — | — |
+| G01 | Installer removal | Opened old isolated install's `unins000.exe` through Explorer UI; confirmed Yes after separate user approval; checked exact paths | Program and shortcuts removed | Old `401beb1` acceptance directory and desktop shortcut absent; previous test installation still present. New candidate uninstall not run | PASS for old isolated installer only | 2026-11-05 ~19:07 | Computer Use uninstall prompt and exact-path checks | — |
 
 Automated prerequisite: `scripts/lint.ps1` passed; `scripts/test.ps1` reported 259 passed, 5 deselected, but emitted Windows `0x8001010d` during the GUI benchmark despite exit code 0. This remains an investigation item and is not a GUI acceptance PASS.
 
 After this installed-candidate test, source was changed to refresh audio-backlog statistics after pipeline drain (FA-005). Lint and 259 tests again passed, with the same Windows diagnostic. **The installed candidate above predates this fix. Its acceptance is invalid for the modified source until a new release candidate is built and retested.**
+
+## Replacement candidate `b598039` (2026-11-05 ~19:10–19:15 MSK)
+
+The replacement isolated setup SHA-256 was `5238250873a28ccdcd51b2fbee0f6ce4511b0786560a17f81ece2bf28510f849`; its installed EXE matched standalone SHA-256 `e6ec8c868bb006e3e0a1ac2eac9ec09c3c1573c51326a86dd80f578ff4644faf`.
+
+| ID | Scenario and Computer Use actions | Actual evidence | Status | Related defect |
+|---|---|---|---|---|
+| R-A01 | Opened installer, reviewed destination/tasks/summary, chose shortcut, installed, clicked Finish | All wizard pages displayed in Russian; installed EXE hash matched compiled candidate; first-run window painted | PASS for isolated installation | FA-003 VERIFIED |
+| R-B01 | Cancelled incomplete onboarding and started dictation on installed EXE | UI soon entered recoverable error. Technical log identified PortAudio input overflow, while UI incorrectly named local recognition | FAIL | FA-007 |
+| R-B02 | Clicked Retry, observed Listening, then Stop, Finishing, Ready | Recovery worked; queue showed 16.1 s during processing and 0.0 s at Ready. Exact recognized content intentionally excluded | PASS for recovery and FA-005 display; overall live dictation BLOCKED | FA-005 VERIFIED; FA-008 OPEN |
+| R-C01 | RU/EN controlled speech and insertion into external apps | No controlled speech supplied; only ambient audio captured with self-window target | BLOCKED | FA-004 |
+| R-G01 | New candidate uninstall | Not run | PENDING | — |
+
+After this Computer Use run, the error-message source was changed for FA-007 and a regression test added. Lint and 260 selected tests passed, with the same open Windows diagnostic. **The current source is newer than the installed `b598039` EXE, so final acceptance must restart on another build.**

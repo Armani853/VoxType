@@ -405,6 +405,39 @@ def test_capture_creation_error_is_recoverable_from_starting(tmp_path: Path) -> 
     repository.close()
 
 
+def test_input_overflow_reports_microphone_failure_and_allows_retry(tmp_path: Path) -> None:
+    repository = SessionRepository(tmp_path / "sessions.sqlite3")
+    captures: list[FixtureCapture] = []
+
+    def make_capture(queue: LosslessAudioQueue) -> FixtureCapture:
+        capture = FixtureCapture(queue)
+        captures.append(capture)
+        return capture
+
+    controller = ApplicationController(
+        settings_repository=SettingsRepository(tmp_path / "settings.json"),
+        session_repository=repository,
+        backend=DeterministicBackend(),
+        capture_factory=make_capture,  # type: ignore[arg-type]
+        segmenter_factory=lambda: StreamingSegmenter(AlwaysSpeech()),
+        target_manager=FixtureTargetManager(),  # type: ignore[arg-type]
+        injection_service=FixtureInjection(),  # type: ignore[arg-type]
+        spool_root=tmp_path / "spool",
+    )
+    controller.initialize()
+    assert controller.start_dictation()
+    wait_for_state(controller, AppState.LISTENING)
+    captures[0].output_queue.put(
+        AudioChunk(1, np.zeros(480, dtype=np.float32), 16_000, time.time(), True)
+    )
+    wait_for_state(controller, AppState.ERROR_RECOVERABLE)
+    assert "Микрофон потерял часть аудио" in controller.snapshot().error_message
+    assert controller.start_dictation()
+    wait_for_state(controller, AppState.LISTENING)
+    assert controller.shutdown()
+    repository.close()
+
+
 def test_shutdown_waits_for_inflight_inference(tmp_path: Path) -> None:
     repository = SessionRepository(tmp_path / "sessions.sqlite3")
     controller = ApplicationController(
