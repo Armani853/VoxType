@@ -70,6 +70,7 @@ from voxtype.version import __version__
 from voxtype.windows.hotkeys import GlobalHotkeyManager, parse_hotkey
 from voxtype.windows.power_events import PowerEventCoordinator
 from voxtype.windows.send_input import SendInputController
+from voxtype.windows.single_instance import WM_VOXTYPE_RESTORE
 from voxtype.windows.target_window import TargetPolicy
 
 _LOGGER = logging.getLogger("voxtype.app")
@@ -98,11 +99,13 @@ class _HotkeyEventFilter(QAbstractNativeEventFilter):
         manager: GlobalHotkeyManager,
         power_events: PowerEventCoordinator,
         shutdown_query: Any,
+        restore_request: Any,
     ) -> None:
         super().__init__()
         self.manager = manager
         self.power_events = power_events
         self.shutdown_query = shutdown_query
+        self.restore_request = restore_request
 
     def nativeEventFilter(
         self,
@@ -116,6 +119,9 @@ class _HotkeyEventFilter(QAbstractNativeEventFilter):
             from ctypes import wintypes
 
             native = wintypes.MSG.from_address(int(message))
+            if int(native.message) == WM_VOXTYPE_RESTORE:
+                self.restore_request()
+                return True, 0
             if int(native.message) == 0x0011:  # WM_QUERYENDSESSION
                 accepted = bool(self.shutdown_query())
                 return True, 1 if accepted else 0
@@ -175,7 +181,12 @@ class DesktopApplication:
         self.power_events = PowerEventCoordinator(
             on_suspend=self._on_suspend, on_resume=self._on_resume
         )
-        self.hotkey_filter = _HotkeyEventFilter(self.hotkeys, self.power_events, self.close)
+        self.hotkey_filter = _HotkeyEventFilter(
+            self.hotkeys,
+            self.power_events,
+            self.close,
+            lambda: QTimer.singleShot(0, self._show_main),
+        )
         self.timer = QTimer(self.main)
         self.timer.setInterval(50)
         self._last_state = "STARTUP"

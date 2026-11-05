@@ -9,7 +9,10 @@ from typing import Any, Protocol
 from ._win32 import Win32CallError, clear_last_error, last_error, load_library
 
 ERROR_ALREADY_EXISTS = 183
-SW_RESTORE = 9
+# Ask the owning Qt event loop to restore its window. Calling ShowWindow on a
+# QWidget hidden to the tray bypasses Qt's visibility state and can expose an
+# unpainted white native window.
+WM_VOXTYPE_RESTORE = 0x8000 + 0x321
 
 
 class SingleInstanceBackend(Protocol):
@@ -46,19 +49,14 @@ class Win32SingleInstanceBackend:
         find_window = user32.FindWindowW
         find_window.argtypes = (ctypes.c_wchar_p, ctypes.c_wchar_p)
         find_window.restype = ctypes.c_void_p
-        show_window = user32.ShowWindow
-        show_window.argtypes = (ctypes.c_void_p, ctypes.c_int)
-        show_window.restype = ctypes.c_int
-        foreground = user32.SetForegroundWindow
-        foreground.argtypes = (ctypes.c_void_p,)
-        foreground.restype = ctypes.c_int
+        post_message = user32.PostMessageW
+        post_message.argtypes = (ctypes.c_void_p, ctypes.c_uint, ctypes.c_size_t, ctypes.c_ssize_t)
+        post_message.restype = ctypes.c_int
         deadline = time.monotonic() + max(0.0, timeout_s)
         while True:
             hwnd = find_window(None, title)
             if hwnd:
-                show_window(hwnd, SW_RESTORE)
-                foreground(hwnd)
-                return True
+                return bool(post_message(hwnd, WM_VOXTYPE_RESTORE, 0, 0))
             if time.monotonic() >= deadline:
                 return False
             time.sleep(0.05)

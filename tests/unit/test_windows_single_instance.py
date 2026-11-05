@@ -1,8 +1,14 @@
 from __future__ import annotations
 
 import uuid
+from types import SimpleNamespace
 
-from voxtype.windows.single_instance import SingleInstanceGuard, Win32SingleInstanceBackend
+from voxtype.windows import single_instance
+from voxtype.windows.single_instance import (
+    WM_VOXTYPE_RESTORE,
+    SingleInstanceGuard,
+    Win32SingleInstanceBackend,
+)
 
 
 class MemorySingleInstanceBackend:
@@ -69,6 +75,30 @@ def test_invalid_mutex_name_is_rejected_before_native_call() -> None:
         else:
             raise AssertionError("invalid mutex name was accepted")
     assert not backend.handles
+
+
+def test_existing_activation_asks_qt_to_restore_hidden_window(monkeypatch) -> None:
+    calls: list[tuple[object, ...]] = []
+
+    class FakeFunction:
+        def __init__(self, callback) -> None:
+            self.callback = callback
+
+        def __call__(self, *args):
+            calls.append(args)
+            return self.callback(*args)
+
+    user32 = SimpleNamespace(
+        FindWindowW=FakeFunction(lambda _class, _title: 4321),
+        PostMessageW=FakeFunction(lambda _hwnd, _message, _wparam, _lparam: 1),
+    )
+    monkeypatch.setattr(single_instance, "load_library", lambda _name: user32)
+
+    assert Win32SingleInstanceBackend().activate_window("VoxType — локальная диктовка", 0)
+    assert calls == [
+        (None, "VoxType — локальная диктовка"),
+        (4321, WM_VOXTYPE_RESTORE, 0, 0),
+    ]
 
 
 def test_real_win32_mutex_has_exactly_one_owner() -> None:
