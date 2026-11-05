@@ -428,6 +428,15 @@ class ApplicationController:
                 if self._shutdown_requested.is_set() and pipeline.is_alive():
                     self._status_message = "Ожидаю завершения локального inference"
         self._delivery_queue.join()
+        # The capture-stop snapshot may still include audio awaiting the pipeline.
+        # Refresh it only after all leases have been acknowledged so a completed
+        # session does not keep showing a stale audio backlog.
+        with self._lock:
+            capture = self._capture
+        if capture is not None:
+            final_stats = capture.stats()
+            with self._lock:
+                self._last_stats = final_stats
         self._complete_session("completed" if not self._error_message else "error")
 
     def _pipeline_loop(self) -> None:

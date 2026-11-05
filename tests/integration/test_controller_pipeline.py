@@ -319,6 +319,7 @@ def test_controller_journals_before_ordered_injection_and_drains(tmp_path: Path)
     wait_for_state(controller, AppState.LISTENING)
     assert controller.stop_dictation()
     wait_for_state(controller, AppState.COMPLETED)
+    assert controller.snapshot().queued_audio_seconds == 0.0
 
     records = session_repository.recent()
     assert len(records) == 1
