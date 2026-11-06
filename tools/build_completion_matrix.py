@@ -203,9 +203,9 @@ groups: dict[int, list[tuple[str, str, str, str, str]]] = {
         (
             "Complete disk inventory and top-50 files",
             "P3",
-            "IMPLEMENTED_UNVERIFIED",
-            "docs/OPTIMIZATION/01_DISK_USAGE_AUDIT.md",
-            "Refresh after builds",
+            "VERIFIED",
+            "2026-11-06 hidden-inclusive scan: 7,649,181,109 bytes, 32,106 files, top 50 and SHA-256 groups; zero errors",
+            "Repeat after future build or cleanup",
         ),
         (
             "Dry-run cleanup plan classifies unknown files",
@@ -515,6 +515,14 @@ for prompt in range(1, 11):
 score += [
     "",
     "The low score for PROMPT-01 reflects strict remapping of historical claims to current-version evidence, not proof that 421 features are absent. P0/P1 blockers override any aggregate percentage. The next iteration must add the missing detailed prompt clauses and link each applicable TZ entry to a specific current test or GUI result.",
+    "",
+    "## Verified score change in this audit",
+    "",
+    "| Prompt | Before | Now | Remaining mapped rows | Evidence |",
+    "|---|---:|---:|---:|---|",
+    "| PROMPT-05 | 0.0% | 20.0% | 4 | Fresh hidden-inclusive disk scan with top 50 and SHA-256 groups, zero errors; no deletion or runtime gain claimed |",
+    "",
+    "All other prompt percentages are unchanged since the initial mapping. New measurements of clcache and isolated ASR did not fulfill their combined acceptance gates, so they do not raise the verified score.",
 ]
 (out / "02_COMPLETION_SCORECARD.md").write_text("\n".join(score) + "\n", encoding="utf-8")
 print(f"Wrote {len(requirements)} rows: {dict(Counter(r['prompt'] for r in requirements))}")

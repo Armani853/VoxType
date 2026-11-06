@@ -130,3 +130,18 @@ Snapshot: 2026-11-05, root `C:\Dev\Projects\AI\Voice-recognizer`. Command: `.ven
 - 81013414 bytes each, SHA-256 `6f1af70a99ca55c3bdbdf2bbab429241c5d18c7a7c58a51f8df7c9433166682e`: `dist/installer/VoxType-0.2.4-win64-setup.exe`; `release/VoxType-0.2.4-win64-setup.exe`.
 
 The same CTranslate2 DLL in the venv, test installations, and current portable is expected for independent runnable environments; it is not a reason to remove the runtime copy. The copied setup in `dist/installer` and `release` is byte-identical, but the versioned release archive is retained. No ASR model directories were found inside this repository; model storage under the user profile was outside this scan and was not modified.
+
+## Updated read-only snapshot, 2026-11-06
+
+Command: `.venv\Scripts\python.exe tools\audit_workspace.py . build\master_workspace_current.json`. Hidden-inclusive traversal reported **7,649,181,109 bytes, 32,106 files, 2,979 directories, zero read errors**. The ignored JSON contains the current top-50 files and two SHA-256-confirmed large duplicate groups. No cleanup was performed.
+
+| Directory | Bytes / approximate GiB | Files | Purpose | Needed now? | Action |
+|---|---:|---:|---|---|---|
+| `build` | about 4.579 GiB | 10,944 | Generated compilation, test and acceptance artifacts | Some retained for evidence; older copies need retention review | No deletion while automatic review blocks cleanup |
+| `build/final-acceptance` | about 3.484 GiB | 7,929 | Four isolated Nuitka builds, installers and test profiles | Latest `nuitka5` and hashes are evidence; earlier ones may be regenerable | Classify exact paths before any future cleanup |
+| `.venv` | about 1.172 GiB | 19,471 | Python development environment | Yes for current tests/build | Preserve |
+| `release` | about 0.949 GiB | 20 | Versioned release artifacts | Unique release retention not yet reviewed | Preserve |
+| `dist` | about 0.389 GiB | 175 | Portable and installer copies | Existing deliverables | Preserve until release inventory |
+| `src` | about 0.002 GiB | 163 | Production source | Yes | Preserve |
+
+The four `build/final-acceptance/nuitka2` through `nuitka5` directories each occupy about 775.4 MiB. SHA-256 confirms the same 59,294,720-byte `ctranslate2.dll` in the virtualenv and these build distributions; independent distributions require their own runtime DLL, so this is not automatically disposable. The 81,013,414-byte setup is identical in `dist/installer` and `release` by SHA-256, as documented above. The workspace increase from the 2026-11-05 baseline is **3,742,278,692 bytes**, primarily retained acceptance builds. This is growth from testing, not application runtime growth.

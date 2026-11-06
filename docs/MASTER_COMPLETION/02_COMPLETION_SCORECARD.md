@@ -8,7 +8,7 @@ Snapshot 2026-11-06. Formula: 100 × VERIFIED / applicable rows. This is a **low
 | PROMPT-02 | 0 | 6 | 0.0% | 3 | 1 | 2 | 0 | 0 | 0 | Onboarding, model state and UX |
 | PROMPT-03 | 1 | 6 | 16.7% | 3 | 1 | 1 | 0 | 0 | 0 | FA-001, FA-008, current soak |
 | PROMPT-04 | 2 | 5 | 40.0% | 2 | 0 | 1 | 0 | 0 | 0 | 100 current cycles |
-| PROMPT-05 | 0 | 5 | 0.0% | 3 | 1 | 1 | 0 | 0 | 0 | No measured cleanup or full runtime comparison |
+| PROMPT-05 | 1 | 5 | 20.0% | 2 | 1 | 1 | 0 | 0 | 0 | No measured cleanup or full runtime comparison |
 | PROMPT-06 | 0 | 7 | 0.0% | 1 | 2 | 2 | 1 | 1 | 0 | Startup/ASR targets and build report |
 | PROMPT-07 | 1 | 5 | 20.0% | 1 | 0 | 3 | 0 | 0 | 0 | Full controls and insertion |
 | PROMPT-08 | 0 | 12 | 0.0% | 0 | 0 | 12 | 0 | 0 | 0 | All ten capture-path speech tests |
@@ -16,3 +16,11 @@ Snapshot 2026-11-06. Formula: 100 × VERIFIED / applicable rows. This is a **low
 | PROMPT-10 | 0 | 3 | 0.0% | 0 | 0 | 0 | 3 | 0 | 0 | Deferred until acceptance |
 
 The low score for PROMPT-01 reflects strict remapping of historical claims to current-version evidence, not proof that 421 features are absent. P0/P1 blockers override any aggregate percentage. The next iteration must add the missing detailed prompt clauses and link each applicable TZ entry to a specific current test or GUI result.
+
+## Verified score change in this audit
+
+| Prompt | Before | Now | Remaining mapped rows | Evidence |
+|---|---:|---:|---:|---|
+| PROMPT-05 | 0.0% | 20.0% | 4 | Fresh hidden-inclusive disk scan with top 50 and SHA-256 groups, zero errors; no deletion or runtime gain claimed |
+
+All other prompt percentages are unchanged since the initial mapping. New measurements of clcache and isolated ASR did not fulfill their combined acceptance gates, so they do not raise the verified score.
