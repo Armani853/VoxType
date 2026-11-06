@@ -9,7 +9,7 @@ Snapshot 2026-11-06. Formula: 100 × VERIFIED / applicable rows. This is a **low
 | PROMPT-03 | 1 | 6 | 16.7% | 3 | 1 | 1 | 0 | 0 | 0 | FA-001, FA-008, current soak |
 | PROMPT-04 | 2 | 5 | 40.0% | 2 | 0 | 1 | 0 | 0 | 0 | 100 current cycles |
 | PROMPT-05 | 1 | 5 | 20.0% | 2 | 1 | 1 | 0 | 0 | 0 | No measured cleanup or full runtime comparison |
-| PROMPT-06 | 0 | 7 | 0.0% | 1 | 2 | 2 | 1 | 1 | 0 | Startup/ASR targets and build report |
+| PROMPT-06 | 1 | 7 | 14.3% | 1 | 2 | 2 | 1 | 0 | Startup/ASR targets and remaining build stages |
 | PROMPT-07 | 1 | 5 | 20.0% | 1 | 0 | 3 | 0 | 0 | 0 | Full controls and insertion |
 | PROMPT-08 | 0 | 12 | 0.0% | 0 | 0 | 12 | 0 | 0 | 0 | All ten capture-path speech tests |
 | PROMPT-09 | 3 | 8 | 37.5% | 0 | 1 | 4 | 0 | 0 | 0 | End-to-end buyer journey |
@@ -24,4 +24,4 @@ The low score for PROMPT-01 reflects strict remapping of historical claims to cu
 | PROMPT-01 | 0.0% | 1.7% | 414 | Seven narrow historical TZ outcomes remapped to current file, build, GUI or device-enumeration evidence; 414 rows still lack current proof |
 | PROMPT-05 | 0.0% | 20.0% | 4 | Fresh hidden-inclusive disk scan with top 50 and SHA-256 groups, zero errors; no deletion or runtime gain claimed |
 
-All other prompt percentages are unchanged since the initial mapping. New measurements of clcache and isolated ASR did not fulfill their combined acceptance gates, so they do not raise the verified score.
+The completed `6b8a02e` Nuitka XML report and 597/597 cache hits verify narrow gate P06-002, raising PROMPT-06 from 0.0% to 14.3%. Other prompt percentages are unchanged. This does not prove a total build speedup, release readiness, or the installed-runtime targets.
