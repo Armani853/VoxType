@@ -10,6 +10,8 @@ The valuation report is deferred because the user explicitly made it the final s
 
 After the packaging guard change, `scripts/lint.ps1` passed Ruff formatting/checks and mypy (97 source files); `scripts/test.ps1` reported 261 passed and 5 deselected in 55.04 s. The `0x8001010d` Windows fatal diagnostic recurred during the Qt performance test despite pytest exit code 0. The older `7d9762b` isolated copy was then removed through its UI uninstaller; exact directory absent.
 
+The production-AppId release candidate built after commit `4167c4eae5dd9c2e61841cac8ba4298573ec8ba6` has installer SHA-256 `c254540e176af815c4539f9ae20750bca3d4e753a5eb2119c58c23a64248ceef` and contains the unchanged `9104e3a` application EXE. It has **not** undergone production-AppId installation or customer acceptance. Its existence does not change the `NOT READY` verdict.
+
 ## Earlier candidates (superseded)
 
 **NOT READY — acceptance incomplete.** Candidate source commit `401beb14e4c5068d4f213087978ddf4402ce82b1`; version 0.2.4; standalone EXE SHA-256 `0489d45f940469850a77bb11f80b2cb09c91865c8367537b017be836ea251e61`. Isolated acceptance installer SHA-256 `47fd08797a850241ed670018b30c4367df203e9b554f518c5e40655d01322162`.
