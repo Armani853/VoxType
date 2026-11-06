@@ -247,9 +247,9 @@ groups: dict[int, list[tuple[str, str, str, str, str]]] = {
         (
             "Nuitka compilation report and cache rate measured",
             "P2",
-            "NOT_STARTED",
-            "No report found",
-            "Generate report on next build",
+            "IN_PROGRESS",
+            "Four retained clcache stats files show 99.66–99.83% C cache hits; compilation report still absent",
+            "Generate compilation report on next necessary build",
         ),
         (
             "DEV/QA/RELEASE commands distinct",
