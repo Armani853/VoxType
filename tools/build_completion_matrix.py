@@ -446,6 +446,54 @@ for prompt, items in groups.items():
             next_action=action,
         )
 
+# Narrow, directly observable portions of the historical TZ are remapped to
+# current evidence.  Most of the old checkboxes remain unverified on purpose.
+verified_tz = {
+    "P01-003": (
+        "PLAN.md; TASKS.md",
+        "File existence inspection",
+        "Both documents present on 2026-11-06",
+    ),
+    "P01-004": (
+        "src/voxtype",
+        "Source module inventory",
+        "78 Python modules inventoried in docs/OPTIMIZATION/03_CODEBASE_AUDIT.md",
+    ),
+    "P01-005": (
+        "src/voxtype/app.py",
+        "Computer Use installed 9104e3a",
+        "Installed GUI painted and controls responded on 2026-11-05",
+    ),
+    "P01-009": (
+        "scripts/build_portable.ps1",
+        "Packaged self-test and GUI smoke",
+        "nuitka5 standalone EXE SHA-256 824eae37ac91905c4cb193bd5a4e7439fae839d385bc8a7edd547db6a90e16a9",
+    ),
+    "P01-010": (
+        "packaging/installer/VoxType.iss",
+        "Inno compile",
+        "Production-AppId installer SHA-256 c254540e176af815c4539f9ae20750bca3d4e753a5eb2119c58c23a64248ceef; build only",
+    ),
+    "P01-011": (
+        "docs/USER_GUIDE_RU.md",
+        "File existence inspection",
+        "Russian user guide present on 2026-11-06",
+    ),
+    "P01-041": (
+        "src/voxtype/audio/devices.py",
+        "sounddevice device query",
+        "26 PortAudio devices enumerated on 2026-11-06, including supported 48 kHz Realtek Stereo Mixer",
+    ),
+}
+for requirement in requirements:
+    proof = verified_tz.get(requirement["id"])
+    if proof:
+        requirement["status"] = "VERIFIED"
+        requirement["code"], requirement["test"], requirement["evidence"] = proof
+        requirement["version"] = "2026-11-06 workspace / 9104e3a EXE where relevant"
+        requirement["criterion"] = "The narrow stated outcome was directly observed"
+        requirement["next_action"] = "Recheck only after relevant source/package change"
+
 
 def esc(value: str) -> str:
     return value.replace("|", "\\|").replace("\n", " ").strip()
@@ -520,6 +568,7 @@ score += [
     "",
     "| Prompt | Before | Now | Remaining mapped rows | Evidence |",
     "|---|---:|---:|---:|---|",
+    "| PROMPT-01 | 0.0% | 1.7% | 414 | Seven narrow historical TZ outcomes remapped to current file, build, GUI or device-enumeration evidence; 414 rows still lack current proof |",
     "| PROMPT-05 | 0.0% | 20.0% | 4 | Fresh hidden-inclusive disk scan with top 50 and SHA-256 groups, zero errors; no deletion or runtime gain claimed |",
     "",
     "All other prompt percentages are unchanged since the initial mapping. New measurements of clcache and isolated ASR did not fulfill their combined acceptance gates, so they do not raise the verified score.",

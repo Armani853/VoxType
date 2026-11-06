@@ -4,7 +4,7 @@ Snapshot 2026-11-06. Formula: 100 × VERIFIED / applicable rows. This is a **low
 
 | Prompt | Verified | Applicable | Completion | Implemented unverified | Failed | Blocked | Not started | In progress | Not applicable | Blocking issue |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
-| PROMPT-01 | 0 | 421 | 0.0% | 419 | 0 | 2 | 0 | 0 | 0 | Current installed GUI and original TZ source not fully mapped |
+| PROMPT-01 | 7 | 421 | 1.7% | 412 | 0 | 2 | 0 | 0 | 0 | Current installed GUI and original TZ source not fully mapped |
 | PROMPT-02 | 0 | 6 | 0.0% | 3 | 1 | 2 | 0 | 0 | 0 | Onboarding, model state and UX |
 | PROMPT-03 | 1 | 6 | 16.7% | 3 | 1 | 1 | 0 | 0 | 0 | FA-001, FA-008, current soak |
 | PROMPT-04 | 2 | 5 | 40.0% | 2 | 0 | 1 | 0 | 0 | 0 | 100 current cycles |
@@ -21,6 +21,7 @@ The low score for PROMPT-01 reflects strict remapping of historical claims to cu
 
 | Prompt | Before | Now | Remaining mapped rows | Evidence |
 |---|---:|---:|---:|---|
+| PROMPT-01 | 0.0% | 1.7% | 414 | Seven narrow historical TZ outcomes remapped to current file, build, GUI or device-enumeration evidence; 414 rows still lack current proof |
 | PROMPT-05 | 0.0% | 20.0% | 4 | Fresh hidden-inclusive disk scan with top 50 and SHA-256 groups, zero errors; no deletion or runtime gain claimed |
 
 All other prompt percentages are unchanged since the initial mapping. New measurements of clcache and isolated ASR did not fulfill their combined acceptance gates, so they do not raise the verified score.
