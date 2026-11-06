@@ -25,7 +25,7 @@ Snapshot 2026-11-06 MSK. Current source/package commit `4167c4e`; application EX
 
 ## P3: build and repository efficiency
 
-1. Instrument next necessary Nuitka build with a compilation report and stage timings; measure cache hit/miss and warm build. The previous isolated Inno rebuild took 103.063 s and production-AppId Inno rebuild 101.782 s; these are installer timings, not Nuitka timings.
+1. The next necessary Nuitka build now requests an XML compilation report and prints total wall time. Use it for stage and clcache hit/miss analysis, then measure a repeat. The previous isolated Inno rebuild took 103.063 s and production-AppId Inno rebuild 101.782 s; these are installer timings, not Nuitka timings.
 2. Establish documented DEV, QA, RELEASE commands without using a full Nuitka build for every source edit. Preserve hidden imports, models and DLLs.
 3. Refresh disk/module/dependency audit and compare workspace, source, portable and installer separately. Existing report explicitly says zero bytes freed; no broad deletion of unknown files.
 

@@ -8,6 +8,7 @@ $RepoRoot = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
 $Python = Join-Path $RepoRoot '.venv\Scripts\python.exe'
 $env:PYTHONPATH = Join-Path $RepoRoot 'src'
 $BuildRoot = Join-Path $RepoRoot 'build\nuitka'
+$CompilationReport = Join-Path $BuildRoot 'nuitka-compilation-report.xml'
 $AssetRoot = Join-Path $RepoRoot 'build\packaging-assets'
 $DistRoot = Join-Path $RepoRoot 'dist'
 $PortableRoot = Join-Path $DistRoot 'VoxType'
@@ -67,6 +68,7 @@ $NuitkaArguments = @(
     '--assume-yes-for-downloads',
     '--jobs=6',
     '--lto=no',
+    "--report=$CompilationReport",
     '--enable-plugin=pyside6',
     '--include-package=voxtype',
     '--include-package=faster_whisper',
@@ -90,11 +92,14 @@ $NuitkaArguments = @(
     $EntryPoint
 )
 Push-Location -LiteralPath $RepoRoot
+$NuitkaStopwatch = [Diagnostics.Stopwatch]::StartNew()
 try {
     & $Python @NuitkaArguments
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }
 finally {
+    $NuitkaStopwatch.Stop()
+    Write-Host ("[build] Nuitka wall time: {0:N3} s; report: {1}" -f $NuitkaStopwatch.Elapsed.TotalSeconds, $CompilationReport)
     Pop-Location
 }
 
