@@ -18,6 +18,7 @@ Date 2026-11-06 MSK; Ryzen 5 5500U, 24 GB RAM, NVMe SSD, Windows 11 build 26200.
 | Time to ASR ready | — | No controlled installed measurements | Unmeasured |
 | UI p50/p95/p99; shutdown | — | No current installed series | Unmeasured |
 | ASR latency | 24.738 s for 2.236 s audio (RTF 11.064) | `b598039` live ambient capture, one outlier | FA-008; root cause unknown |
+| Source ASR on known signal | Default threads 2.839/2.804/2.843 s; 6 threads 2.816/2.846/2.751 s | Local `small` model, same 2.2 s SAPI RU snippet, n=3 each | 24.738 s outlier not reproduced; changing thread count has no proven benefit |
 | Post-capture memory | 572,452,864 B working set; 860,045,312 B private | `b598039` process, one point | Not peak/idle comparison |
 | Installer size | 81,017,015 B | `4167c4e` production-AppId candidate | No size optimization claim |
 

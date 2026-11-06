@@ -10,6 +10,7 @@ Hardware: Acer Aspire A515-45, Ryzen 5 5500U, 24 GB RAM, Windows 11 build 26200;
 | Idle shutdown ≤1 s | — | Earlier candidate exited twice; no measured current latency | BLOCKED |
 | No unexplained GUI stall >200 ms | — | FA-009 white window >5 s on earlier binary; current only two restores | BLOCKED |
 | ASR | 24.738 s for 2.236 s audio, RTF 11.064 | Installed `b598039`, one outlier | FAIL / FA-008 |
+| Idle source ASR probe | 2.804–2.843 s default vs 2.751–2.846 s with 6 CPU threads, each n=3 | Same local `small` model and 2.2 s SAPI RU snippet; `build/fa008_asr_probe.json` | Outlier not reproduced; no defensible CPU-thread optimization |
 | Post-capture process sample | Working set 572,452,864 B; private 860,045,312 B; 36 threads; 1,809 handles | `b598039`, one sample | No before/after conclusion |
 | Isolated Inno rebuild | 103.063 s | `9104e3a` repair package, one run | Measured installer stage only |
 | Production-AppId Inno rebuild | 101.782 s | `4167c4e`, one run | Measured installer stage only |
