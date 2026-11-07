@@ -39,6 +39,8 @@ def test_portable_build_is_checked_safe_standalone_and_smoke_tested() -> None:
     )
     assert "Get-FileHash -Algorithm SHA256" in script
     assert "Compress-Archive" in script and "-ErrorAction Stop" in script
+    assert '"VoxType-0.2.4-$BuildCommit-win64-portable.zip"' in script
+    assert "Release artifact for commit" in script
 
 
 def test_installer_build_cleans_smokes_and_publishes_checksum() -> None:
@@ -53,6 +55,8 @@ def test_installer_build_cleans_smokes_and_publishes_checksum() -> None:
     assert "unins000.exe" in script
     assert "Get-FileHash -Algorithm SHA256" in script
     assert "Join-Path $RepoRoot 'release'" in script
+    assert '"VoxType-0.2.4-$BuildCommit-win64-setup.exe"' in script
+    assert '"/DBuildCommit=$BuildCommit"' in script
 
 
 def test_inno_manifest_is_per_user_unsigned_and_not_admin() -> None:
@@ -63,6 +67,7 @@ def test_inno_manifest_is_per_user_unsigned_and_not_admin() -> None:
     assert "PrivilegesRequired=lowest" in installer
     assert "AppMutex=Local\\VoxType.Desktop.Singleton.v1" in installer
     assert "UninstallAppRunningError=" in installer
+    assert "OutputBaseFilename=VoxType-0.2.4-{#BuildCommit}-win64-setup" in installer
     assert "signeduninstaller" not in installer.casefold()
     assert re.search(r'requestedExecutionLevel level="asInvoker"', manifest)
     assert 'uiAccess="false"' in manifest

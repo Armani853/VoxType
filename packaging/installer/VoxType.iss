@@ -4,6 +4,9 @@
 #ifndef InstallerOutput
   #error InstallerOutput must be passed by build_installer.ps1
 #endif
+#ifndef BuildCommit
+  #error BuildCommit must be passed by build_installer.ps1
+#endif
 
 [Setup]
 AppId={{5A4A7C70-50ED-4F41-90A6-48C69682B1A7}
@@ -15,7 +18,7 @@ DefaultDirName={localappdata}\Programs\VoxType
 DefaultGroupName=VoxType
 DisableProgramGroupPage=yes
 OutputDir={#InstallerOutput}
-OutputBaseFilename=VoxType-0.2.4-win64-setup
+OutputBaseFilename=VoxType-0.2.4-{#BuildCommit}-win64-setup
 Compression=lzma2
 SolidCompression=yes
 PrivilegesRequired=lowest

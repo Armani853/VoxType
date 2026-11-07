@@ -7,6 +7,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 $Python = Join-Path $RepoRoot '.venv\Scripts\python.exe'
+$env:PYTHONPATH = Join-Path $RepoRoot 'src'
 if (-not (Test-Path -LiteralPath $Python)) {
     & (Join-Path $PSScriptRoot 'bootstrap.ps1')
 }

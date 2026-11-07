@@ -28,6 +28,16 @@ if (-not $SkipChecks) {
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }
 
+$BuildCommit = (& git rev-parse --short HEAD).Trim()
+if ($LASTEXITCODE -ne 0 -or $BuildCommit -notmatch '^[0-9a-f]+$') {
+    throw 'Cannot determine build commit for release artifact identity'
+}
+$ArchiveName = "VoxType-0.2.4-$BuildCommit-win64-portable.zip"
+$Archive = Join-Path $ReleaseRoot $ArchiveName
+$Checksum = "$Archive.sha256"
+if ((Test-Path -LiteralPath $Archive) -or (Test-Path -LiteralPath $Checksum)) {
+    throw "Release artifact for commit $BuildCommit already exists: $Archive"
+}
 Write-Host '[3/6] Cleaning old packaging output'
 foreach ($Target in @($BuildRoot, $AssetRoot, $PortableRoot)) {
     $FullTarget = [IO.Path]::GetFullPath($Target)
@@ -39,15 +49,6 @@ foreach ($Target in @($BuildRoot, $AssetRoot, $PortableRoot)) {
     }
 }
 New-Item -ItemType Directory -Path $BuildRoot, $DistRoot, $ReleaseRoot -Force | Out-Null
-$CurrentReleaseFiles = @(
-    (Join-Path $ReleaseRoot 'VoxType-0.2.4-win64-portable.zip')
-    (Join-Path $ReleaseRoot 'VoxType-0.2.4-win64-portable.zip.sha256')
-)
-foreach ($CurrentReleaseFile in $CurrentReleaseFiles) {
-    if (Test-Path -LiteralPath $CurrentReleaseFile) {
-        Remove-Item -LiteralPath $CurrentReleaseFile -Force
-    }
-}
 
 Write-Host '[3/6] Preparing pinned VAD and native icon assets'
 & $Python (Join-Path $RepoRoot 'tools\prepare_packaging_assets.py') --output $AssetRoot --icon-svg $IconSvg
@@ -129,7 +130,6 @@ finally {
 }
 
 Write-Host '[6/6] Creating ZIP and SHA-256 checksum'
-$Archive = Join-Path $ReleaseRoot 'VoxType-0.2.4-win64-portable.zip'
 for ($Attempt = 1; $Attempt -le 5; $Attempt++) {
     try {
         Compress-Archive -LiteralPath $PortableRoot -DestinationPath $Archive -CompressionLevel Optimal -ErrorAction Stop
@@ -144,7 +144,6 @@ for ($Attempt = 1; $Attempt -le 5; $Attempt++) {
     }
 }
 $Hash = Get-FileHash -Algorithm SHA256 -LiteralPath $Archive
-$Checksum = Join-Path $ReleaseRoot 'VoxType-0.2.4-win64-portable.zip.sha256'
 Set-Content -LiteralPath $Checksum -Encoding ascii -Value "$($Hash.Hash.ToLowerInvariant())  $($Hash.Path | Split-Path -Leaf)"
 Write-Host "Portable: $PortableRoot"
 Write-Host "Archive:  $Archive"

@@ -171,11 +171,6 @@ def state_color(state: str, mode: ThemeMode | str = ThemeMode.LIGHT) -> str:
 def stylesheet(mode: ThemeMode | str = ThemeMode.LIGHT) -> str:
     colors = palette(mode)
     return f"""
-    QWidget {{
-        color: {colors.text_primary};
-        font-family: "Segoe UI Variable", "Segoe UI";
-        font-size: {TYPOGRAPHY.body_pt}pt;
-    }}
     QMainWindow, QDialog, QWizard, QWizardPage {{ background: {colors.background}; }}
     QLabel[muted="true"] {{ color: {colors.text_secondary}; }}
     QLabel[tertiary="true"] {{ color: {colors.text_tertiary}; }}
@@ -497,7 +492,7 @@ def overlay_stylesheet() -> str:
 
 if PYSIDE6_AVAILABLE:
     from PySide6.QtCore import Qt
-    from PySide6.QtGui import QColor, QIcon, QPainter, QPalette, QPen, QPixmap
+    from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPalette, QPen, QPixmap
 
     _APP_ICON_CACHE: dict[tuple[int, str], QIcon] = {}
 
@@ -512,6 +507,20 @@ if PYSIDE6_AVAILABLE:
 
     def apply_theme(app: Any, mode: ThemeMode | str = ThemeMode.SYSTEM) -> ThemeMode:
         resolved = resolved_theme(app, mode)
+        colors = palette(resolved)
+        font = QFont()
+        font.setFamilies(["Segoe UI Variable", "Segoe UI"])
+        font.setPointSize(TYPOGRAPHY.body_pt)
+        app.setFont(font)
+        native_palette = app.palette()
+        for group in (QPalette.ColorGroup.Active, QPalette.ColorGroup.Inactive):
+            for role in (
+                QPalette.ColorRole.WindowText,
+                QPalette.ColorRole.Text,
+                QPalette.ColorRole.ButtonText,
+            ):
+                native_palette.setColor(group, role, QColor(colors.text_primary))
+        app.setPalette(native_palette)
         app.setProperty("voxtypeTheme", resolved.value)
         app.setStyleSheet(stylesheet(resolved))
         return resolved

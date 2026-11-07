@@ -71,6 +71,20 @@ def test_first_portaudio_device_index_zero_is_selectable(qtbot) -> None:  # type
     assert wizard.setup_values()["audio_device_id"] == 0
 
 
+def test_device_refresh_does_not_start_microphone_test(qtbot) -> None:  # type: ignore[no-untyped-def]
+    wizard = OnboardingWizard()
+    qtbot.addWidget(wizard)
+    selected: list[str] = []
+    wizard.microphone_selected.connect(selected.append)
+
+    wizard.set_microphones([("Built-in", 0), ("USB", 1)], 0)
+    wizard.set_microphones([("Built-in", 0), ("USB", 1)], 0)
+    assert selected == []
+
+    wizard.microphone_combo.setCurrentIndex(1)
+    assert selected == ["1"]
+
+
 def test_completed_bad_calibration_stays_at_100_percent_with_separate_warning(
     qtbot,
 ) -> None:  # type: ignore[no-untyped-def]

@@ -169,11 +169,11 @@ class DesktopApplication:
         )
         self.main.set_model_available(runtime.selected_model_installed)
         stage("main_window_constructed")
-        self.overlay = DictationOverlay(None)
+        self._overlay: DictationOverlay | None = None
         self.tray = TrayController(None)
-        self.settings_window = SettingsWindow(self.main)
-        self.history_window = HistoryWindow(self.main)
-        self.diagnostics_window = DiagnosticsWindow(self.main)
+        self._settings_window: SettingsWindow | None = None
+        self._history_window: HistoryWindow | None = None
+        self._diagnostics_window: DiagnosticsWindow | None = None
         stage("auxiliary_widgets_constructed")
         self.onboarding: OnboardingWizard | None = None
         self.hotkeys = GlobalHotkeyManager(hwnd=0)
@@ -190,6 +190,7 @@ class DesktopApplication:
         self.timer = QTimer(self.main)
         self.timer.setInterval(50)
         self._last_state = "STARTUP"
+        self._last_rendered_snapshot: object | None = None
         self._result_dismissed = False
         self._last_pending_flush = 0.0
         self._last_resource_sample = 0.0
@@ -266,23 +267,6 @@ class DesktopApplication:
                 "main.switch_language", self.controller.switch_language
             )
         )
-        self.overlay.pause_requested.connect(
-            lambda: self._invoke_ui("overlay.toggle_pause", self.controller.toggle_pause)
-        )
-        self.overlay.stop_requested.connect(
-            lambda: self._invoke_ui("overlay.stop", self.controller.toggle_dictation)
-        )
-        self.overlay.copy_all_requested.connect(
-            lambda: self._run_background(
-                "voxtype-copy-result", self.controller.copy_full_transcript
-            )
-        )
-        self.overlay.insert_requested.connect(
-            lambda: self._run_background(
-                "voxtype-retry-insertion", self.controller.retry_completed_insertion
-            )
-        )
-        self.overlay.close_result_requested.connect(self._dismiss_result)
         self.tray.dictation_toggle_requested.connect(
             lambda: self._invoke_ui("tray.toggle_dictation", self.controller.toggle_dictation)
         )
@@ -310,34 +294,12 @@ class DesktopApplication:
         self.tray.open_window_requested.connect(self._show_main)
         self.tray.settings_requested.connect(self.show_settings)
         self.tray.quit_requested.connect(self.quit)
-        self.settings_window.settings_submitted.connect(self._save_settings)
-        self.settings_window.onboarding_requested.connect(self.show_onboarding)
-        self.settings_window.open_data_folder_requested.connect(self._open_data_folder)
-        self.settings_window.model_download_requested.connect(self._download_model)
-        self.settings_window.model_delete_requested.connect(self._delete_model)
-        self.settings_window.model_benchmark_requested.connect(self._benchmark_model)
-        self.settings_window.audio_test_requested.connect(self._audio_test)
-        self.settings_window.delete_local_data_requested.connect(self._delete_local_data)
-        self.settings_window.open_log_requested.connect(self._open_log)
-        self.settings_window.export_diagnostics_requested.connect(self._export_diagnostics)
-        self.settings_window.show_versions_requested.connect(self.show_diagnostics)
-        self.settings_window.self_test_requested.connect(self.show_diagnostics)
-        self.history_window.refresh_requested.connect(self._refresh_history)
-        self.history_window.delete_requested.connect(self._delete_history_session)
-        self.history_window.recover_requested.connect(self._recover_history_session)
-        self.history_window.export_requested.connect(self._export_history_session)
-        self.diagnostics_window.refresh_requested.connect(self._refresh_diagnostics)
-        self.diagnostics_window.self_test_requested.connect(self._refresh_diagnostics)
-        self.diagnostics_window.open_log_requested.connect(self._open_log)
-        self.diagnostics_window.export_requested.connect(self._export_diagnostics)
         self.signals.model_progress.connect(self._on_model_progress)
         self.signals.model_ready.connect(self._on_model_ready)
         self.signals.calibration_progress.connect(self._on_calibration_progress)
         self.signals.calibration_ready.connect(self._on_calibration_ready)
         self.signals.phrase_ready.connect(self._on_phrase_ready)
         self.signals.diagnostics_ready.connect(self._on_diagnostics_ready)
-        self.signals.settings_status.connect(self.settings_window.set_diagnostics_status)
-        self.signals.audio_level.connect(self.settings_window.update_microphone_level)
         self.signals.audio_level.connect(self._on_audio_level)
         self.signals.recovery_ready.connect(self._on_recovery_ready)
         self.signals.pending_flush_ready.connect(self._on_pending_flush_ready)
@@ -346,6 +308,77 @@ class DesktopApplication:
         self.signals.models_ready.connect(self._on_models_ready)
         self.signals.shutdown_ready.connect(self._on_shutdown_ready)
         self.application.aboutToQuit.connect(self.close)
+
+    @property
+    def overlay(self) -> DictationOverlay:
+        overlay = self._overlay
+        if overlay is None:
+            overlay = DictationOverlay(None)
+            self._overlay = overlay
+            overlay.pause_requested.connect(
+                lambda: self._invoke_ui("overlay.toggle_pause", self.controller.toggle_pause)
+            )
+            overlay.stop_requested.connect(
+                lambda: self._invoke_ui("overlay.stop", self.controller.toggle_dictation)
+            )
+            overlay.copy_all_requested.connect(
+                lambda: self._run_background(
+                    "voxtype-copy-result", self.controller.copy_full_transcript
+                )
+            )
+            overlay.insert_requested.connect(
+                lambda: self._run_background(
+                    "voxtype-retry-insertion", self.controller.retry_completed_insertion
+                )
+            )
+            overlay.close_result_requested.connect(self._dismiss_result)
+        return overlay
+
+    @property
+    def settings_window(self) -> SettingsWindow:
+        window = self._settings_window
+        if window is None:
+            window = SettingsWindow(self.main)
+            self._settings_window = window
+            window.settings_submitted.connect(self._save_settings)
+            window.onboarding_requested.connect(self.show_onboarding)
+            window.open_data_folder_requested.connect(self._open_data_folder)
+            window.model_download_requested.connect(self._download_model)
+            window.model_delete_requested.connect(self._delete_model)
+            window.model_benchmark_requested.connect(self._benchmark_model)
+            window.audio_test_requested.connect(self._audio_test)
+            window.delete_local_data_requested.connect(self._delete_local_data)
+            window.open_log_requested.connect(self._open_log)
+            window.export_diagnostics_requested.connect(self._export_diagnostics)
+            window.show_versions_requested.connect(self.show_diagnostics)
+            window.self_test_requested.connect(self.show_diagnostics)
+            self.signals.settings_status.connect(window.set_diagnostics_status)
+            self.signals.audio_level.connect(window.update_microphone_level)
+        return window
+
+    @property
+    def history_window(self) -> HistoryWindow:
+        window = self._history_window
+        if window is None:
+            window = HistoryWindow(self.main)
+            self._history_window = window
+            window.refresh_requested.connect(self._refresh_history)
+            window.delete_requested.connect(self._delete_history_session)
+            window.recover_requested.connect(self._recover_history_session)
+            window.export_requested.connect(self._export_history_session)
+        return window
+
+    @property
+    def diagnostics_window(self) -> DiagnosticsWindow:
+        window = self._diagnostics_window
+        if window is None:
+            window = DiagnosticsWindow(self.main)
+            self._diagnostics_window = window
+            window.refresh_requested.connect(self._refresh_diagnostics)
+            window.self_test_requested.connect(self._refresh_diagnostics)
+            window.open_log_requested.connect(self._open_log)
+            window.export_requested.connect(self._export_diagnostics)
+        return window
 
     def _invoke_ui(self, handler: str, callback: Any) -> None:
         started = time.monotonic()
@@ -418,7 +451,19 @@ class DesktopApplication:
 
     def _dismiss_result(self) -> None:
         self._result_dismissed = True
-        self.overlay.hide()
+        if self._overlay is not None:
+            self._overlay.hide()
+
+    def _update_views_if_changed(self, snapshot: object) -> None:
+        # Idle and completed snapshots are often identical for many polls.
+        # Rewriting every Qt property also repaints the overlay and tray.
+        if snapshot == self._last_rendered_snapshot:
+            return
+        self.main.update_snapshot(snapshot)
+        self.tray.update_snapshot(snapshot)
+        if self._overlay is not None:
+            self._overlay.update_snapshot(snapshot)
+        self._last_rendered_snapshot = snapshot
 
     def _poll(self) -> None:
         poll_started = time.perf_counter()
@@ -428,9 +473,7 @@ class DesktopApplication:
         target_done = time.perf_counter()
         snapshot = self.controller.snapshot()
         snapshot_done = time.perf_counter()
-        self.main.update_snapshot(snapshot)
-        self.tray.update_snapshot(snapshot)
-        self.overlay.update_snapshot(snapshot)
+        self._update_views_if_changed(snapshot)
         widgets_done = time.perf_counter()
         active = snapshot.state in {
             "STARTING",
@@ -456,9 +499,14 @@ class DesktopApplication:
             and self.runtime.settings.general.show_overlay
             and not (snapshot.state == "COMPLETED" and self._result_dismissed)
         ):
-            self.overlay.show_without_activating()
+            overlay = self._overlay
+            if overlay is None:
+                overlay = self.overlay
+                overlay.update_snapshot(snapshot)
+            overlay.show_without_activating()
         else:
-            self.overlay.hide()
+            if self._overlay is not None:
+                self._overlay.hide()
         if snapshot.state != self._last_state and snapshot.state == "ERROR_RECOVERABLE":
             self.tray.show_message(
                 "VoxType", snapshot.error_message or snapshot.status_message, critical=True
@@ -592,7 +640,8 @@ class DesktopApplication:
             return
         self.runtime.devices = tuple(items)
         devices = [(f"{item.name} ({item.host_api})", item.index) for item in items]
-        self.settings_window.set_audio_devices(devices, self.runtime.settings.audio.device_id)
+        if self._settings_window is not None:
+            self._settings_window.set_audio_devices(devices, self.runtime.settings.audio.device_id)
         if self.onboarding is not None:
             self.onboarding.set_microphones(devices, self.runtime.settings.audio.device_id)
 
@@ -619,6 +668,12 @@ class DesktopApplication:
                 _coerce_asr_profile(updated.model.installed_model)
             )
             self.runtime.settings_repository.save(updated)
+        theme_changed = updated.general.theme != previous.general.theme
+        language_changed = updated.general.ui_language != previous.general.ui_language
+        toggle_hotkey_changed = updated.hotkeys.toggle != previous.hotkeys.toggle
+        hotkeys_changed = updated.hotkeys != previous.hotkeys
+        audio_changed = updated.audio != previous.audio
+        vad_changed = updated.audio.vad_sensitivity != previous.audio.vad_sensitivity
         self.runtime.settings = updated
         self.controller.settings = updated
         self.controller.vocabulary = vocabulary
@@ -628,14 +683,19 @@ class DesktopApplication:
             max(350, updated.dictation.insertion_delay_ms) / 1_000.0
         )
         self.main.set_minimize_to_tray(updated.general.minimize_to_tray)
-        self.main.set_interface_language(updated.general.ui_language)
-        self.main.set_toggle_hotkey(updated.hotkeys.toggle)
-        apply_theme(self.application, ThemeMode(updated.general.theme))
+        if language_changed:
+            self.main.set_interface_language(updated.general.ui_language)
+        if toggle_hotkey_changed:
+            self.main.set_toggle_hotkey(updated.hotkeys.toggle)
+        if theme_changed:
+            apply_theme(self.application, ThemeMode(updated.general.theme))
         if updated.general.start_with_windows != previous_autostart:
             self.runtime.startup.set_enabled(updated.general.start_with_windows)
-        self._configure_capture_factory()
-        self._configure_segmenter_factory()
-        if not self._configure_hotkeys():
+        if audio_changed:
+            self._configure_capture_factory()
+        if vad_changed:
+            self._configure_segmenter_factory()
+        if hotkeys_changed and not self._configure_hotkeys():
             self.runtime.settings_repository.save(previous)
             self.runtime.settings = previous
             self.controller.settings = previous
@@ -647,13 +707,19 @@ class DesktopApplication:
             self.controller.injection_service.paste_delay = (
                 max(350, previous.dictation.insertion_delay_ms) / 1_000.0
             )
-            self.runtime.startup.set_enabled(previous.general.start_with_windows)
+            if updated.general.start_with_windows != previous_autostart:
+                self.runtime.startup.set_enabled(previous.general.start_with_windows)
             self.main.set_minimize_to_tray(previous.general.minimize_to_tray)
-            self.main.set_interface_language(previous.general.ui_language)
-            self.main.set_toggle_hotkey(previous.hotkeys.toggle)
-            apply_theme(self.application, ThemeMode(previous.general.theme))
-            self._configure_capture_factory()
-            self._configure_segmenter_factory()
+            if language_changed:
+                self.main.set_interface_language(previous.general.ui_language)
+            if toggle_hotkey_changed:
+                self.main.set_toggle_hotkey(previous.hotkeys.toggle)
+            if theme_changed:
+                apply_theme(self.application, ThemeMode(previous.general.theme))
+            if audio_changed:
+                self._configure_capture_factory()
+            if vad_changed:
+                self._configure_segmenter_factory()
             self._configure_hotkeys()
             self.settings_window.set_diagnostics_status(
                 "Настройки не сохранены: одна из горячих клавиш занята", False
@@ -844,7 +910,11 @@ class DesktopApplication:
         if self.onboarding is not None and self.onboarding.isVisible():
             self.onboarding.raise_()
             return
+        started = time.perf_counter()
         wizard = OnboardingWizard(self.main)
+        _LOGGER.info(
+            "onboarding_constructed duration_ms=%.1f", (time.perf_counter() - started) * 1_000.0
+        )
         self.onboarding = wizard
         devices = [(f"{item.name} ({item.host_api})", item.index) for item in self.runtime.devices]
         wizard.set_microphones(devices, self.runtime.device.index)
@@ -857,6 +927,7 @@ class DesktopApplication:
         wizard.insertion_test_requested.connect(self._test_insertion)
         wizard.setup_completed.connect(self._complete_onboarding)
         wizard.show()
+        _LOGGER.info("onboarding_shown total_ms=%.1f", (time.perf_counter() - started) * 1_000.0)
         self._run_background("voxtype-onboarding-devices", self._scan_settings_devices)
 
     def _refresh_onboarding_microphones(self) -> None:
@@ -989,14 +1060,17 @@ class DesktopApplication:
         threading.Thread(target=worker, name="voxtype-model-install", daemon=True).start()
 
     def _on_model_progress(self, percent: int, message: str) -> None:
-        self.settings_window.set_model_download_progress(percent, message)
+        if self._settings_window is not None:
+            self._settings_window.set_model_download_progress(percent, message)
         if self.onboarding is not None:
             self.onboarding.set_model_progress(percent, message)
 
     def _on_model_ready(self, ready: bool, message: str, model_id: str) -> None:
-        self.settings_window.set_diagnostics_status(message, ready)
+        if self._settings_window is not None:
+            self._settings_window.set_diagnostics_status(message, ready)
         if ready:
-            self.settings_window.set_models([(model_id, model_id)], model_id)
+            if self._settings_window is not None:
+                self._settings_window.set_models([(model_id, model_id)], model_id)
             self.main.set_model_available(model_id == self.controller.backend.model_id)
         if self.onboarding is not None:
             self.onboarding.set_model_ready(ready, message)
@@ -1301,7 +1375,8 @@ class DesktopApplication:
             self._event_dispatcher.awake.disconnect(self._dispatch_awake)
             self._event_dispatcher.aboutToBlock.disconnect(self._dispatch_done)
         self.hotkeys.close()
-        self.overlay.close()
+        if self._overlay is not None:
+            self._overlay.close()
         self.tray.close()
         self.main.force_close()
         self.application.quit()

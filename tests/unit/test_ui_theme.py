@@ -1,3 +1,4 @@
+import re
 from dataclasses import asdict
 
 import pytest
@@ -5,10 +6,14 @@ import pytest
 pytest.importorskip("pytestqt")
 pytest.importorskip("PySide6")
 
+from PySide6.QtGui import QPalette
+from PySide6.QtWidgets import QApplication
+
 from voxtype.ui.theme import (
     LIGHT_PALETTE,
     RADII,
     SPACING,
+    apply_theme,
     create_app_icon,
     overlay_stylesheet,
     stylesheet,
@@ -77,3 +82,22 @@ def test_application_icon_exposes_native_shell_sizes() -> None:
     available = {size.width() for size in create_app_icon().availableSizes()}
     assert {16, 20, 24, 32, 48, 64, 256} <= available
     assert create_app_icon().pixmap(20, 20).deviceIndependentSize().toSize().width() == 20
+
+
+def test_base_font_and_text_color_use_qt_palette_without_global_qwidget_selector() -> None:
+    app = QApplication.instance()
+    assert app is not None
+    original_font = app.font()
+    original_palette = app.palette()
+    original_style = app.styleSheet()
+    try:
+        apply_theme(app, "light")
+        assert app.font().pointSize() == 10
+        assert app.palette().color(QPalette.ColorRole.WindowText).name() == (
+            LIGHT_PALETTE.text_primary.lower()
+        )
+        assert re.search(r"^\s*QWidget\s*\{", app.styleSheet(), re.MULTILINE) is None
+    finally:
+        app.setStyleSheet(original_style)
+        app.setPalette(original_palette)
+        app.setFont(original_font)

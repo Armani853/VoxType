@@ -324,7 +324,10 @@ if PYSIDE6_AVAILABLE:
             self.setFixedWidth(410 if self._compact else 480)
             self.setMinimumHeight(70 if self._compact else 180)
             self.setMaximumHeight(96 if self._compact else 380)
-            self.adjustSize()
+            # A hidden overlay is laid out when first shown. Forcing a full
+            # Qt style/layout pass during startup took ~0.7 s on this laptop.
+            if self.isVisible():
+                self.adjustSize()
             if persist:
                 self._settings.setValue("ui/overlayCompact", self._compact)
                 self._settings.sync()

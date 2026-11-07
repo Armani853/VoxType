@@ -1,14 +1,24 @@
 [CmdletBinding()]
 param(
     [switch]$SkipPortableBuild,
-    [switch]$SkipInstallerSmoke
+    [switch]$SkipInstallerSmoke,
+    [switch]$SkipChecks
 )
 
 $ErrorActionPreference = 'Stop'
 $RepoRoot = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
+$ReleaseRoot = Join-Path $RepoRoot 'release'
+$BuildCommit = (& git rev-parse --short HEAD).Trim()
+if ($LASTEXITCODE -ne 0 -or $BuildCommit -notmatch '^[0-9a-f]+$') {
+    throw 'Cannot determine build commit for installer identity'
+}
+$ExpectedInstaller = Join-Path $ReleaseRoot "VoxType-0.2.4-$BuildCommit-win64-setup.exe"
+if ((Test-Path -LiteralPath $ExpectedInstaller) -or (Test-Path -LiteralPath "$ExpectedInstaller.sha256")) {
+    throw "Release installer for commit $BuildCommit already exists: $ExpectedInstaller"
+}
 $PortableExe = Join-Path $RepoRoot 'dist\VoxType\VoxType.exe'
 if (-not $SkipPortableBuild -or -not (Test-Path -LiteralPath $PortableExe)) {
-    & (Join-Path $PSScriptRoot 'build_portable.ps1')
+    & (Join-Path $PSScriptRoot 'build_portable.ps1') -SkipChecks:$SkipChecks
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }
 
@@ -23,7 +33,6 @@ if (-not $Iscc) {
 }
 
 $Output = Join-Path $RepoRoot 'dist\installer'
-$ReleaseRoot = Join-Path $RepoRoot 'release'
 $SmokeRoot = Join-Path $RepoRoot 'build\installer-smoke'
 foreach ($Target in @($Output, $SmokeRoot)) {
     $FullTarget = [IO.Path]::GetFullPath($Target)
@@ -37,7 +46,7 @@ foreach ($Target in @($Output, $SmokeRoot)) {
 New-Item -ItemType Directory -Path $Output -Force | Out-Null
 $Script = Join-Path $RepoRoot 'packaging\installer\VoxType.iss'
 Write-Host '[installer 1/4] Compiling per-user Inno Setup package'
-& $Iscc "/DRepoRoot=$RepoRoot" "/DInstallerOutput=$Output" $Script
+& $Iscc "/DRepoRoot=$RepoRoot" "/DInstallerOutput=$Output" "/DBuildCommit=$BuildCommit" $Script
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 $Installer = Get-ChildItem -LiteralPath $Output -Filter '*.exe' | Select-Object -First 1
 if ($null -eq $Installer) { throw 'Installer executable was not produced' }

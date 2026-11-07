@@ -65,7 +65,10 @@ if PYSIDE6_AVAILABLE:
             self.setObjectName("onboardingWizard")
             self.setWindowTitle("Первый запуск VoxType")
             self.setWindowIcon(create_app_icon())
-            self.setWizardStyle(QWizard.WizardStyle.ModernStyle)
+            # Qt on Windows already defaults to ModernStyle. Setting the same
+            # style again triggers a costly full native repolish.
+            if self.wizardStyle() != QWizard.WizardStyle.ModernStyle:
+                self.setWizardStyle(QWizard.WizardStyle.ModernStyle)
             self.setOption(QWizard.WizardOption.NoBackButtonOnStartPage, True)
             self.setOption(QWizard.WizardOption.NoCancelButtonOnLastPage, True)
             self.resize(740, 540)
@@ -407,8 +410,6 @@ if PYSIDE6_AVAILABLE:
             self.microphone_status.setText(
                 "Говорите обычным голосом" if identifier else "Устройства записи не найдены"
             )
-            if identifier:
-                self.microphone_selected.emit(identifier)
 
         def update_microphone_level(
             self, level: float, clipping_percentage: float = 0.0, message: str = ""
