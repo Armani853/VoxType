@@ -234,6 +234,31 @@ def test_capture_dispatcher_resamples_and_spools_without_callback_dsp(tmp_path: 
     assert all(chunk.sample_rate == 16_000 for chunk in chunks)
 
 
+def test_stereo_callback_downmixes_off_thread_and_preserves_fifo(tmp_path: Path) -> None:
+    output = LosslessAudioQueue(max_ram_chunks=4, spool=DiskSpool(tmp_path / "stereo"))
+    service = AudioCaptureService(
+        output,
+        AudioCaptureConfig(input_sample_rate=16_000, input_channels=2),
+        preprocessing=PreprocessorSettings.for_profile(PreprocessingProfile.RAW),
+    )
+    service.start_dispatcher_for_tests()
+    status = type("Status", (), {"input_overflow": False})()
+    for sequence in range(3):
+        samples = np.full((480, 2), (sequence + 1) * 0.1, dtype=np.float32)
+        service.audio_callback(samples, 480, None, status)
+    assert service.stop(drain_timeout=5.0)
+    assert service.fatal_error is None
+    assert service.stats().captured_frames == 1440
+    chunks = []
+    while (lease := output.acquire(0.01)) is not None:
+        chunks.append(lease.chunk)
+        output.ack(lease)
+    assert [chunk.sequence for chunk in chunks] == [0, 1, 2]
+    assert [chunk.frames for chunk in chunks] == [480, 480, 480]
+    assert all(chunk.samples.ndim == 1 for chunk in chunks)
+    assert service.stats().dropped_frames == 0
+
+
 def test_spool_binary_header_is_fixed_width_and_not_pickle(tmp_path: Path) -> None:
     spool = DiskSpool(tmp_path)
     spool.append(AudioChunk(42, np.zeros(10, dtype=np.float32)))

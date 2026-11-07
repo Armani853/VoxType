@@ -46,7 +46,10 @@ foreach ($Target in @($Output, $SmokeRoot)) {
 New-Item -ItemType Directory -Path $Output -Force | Out-Null
 $Script = Join-Path $RepoRoot 'packaging\installer\VoxType.iss'
 Write-Host '[installer 1/4] Compiling per-user Inno Setup package'
+$InnoStopwatch = [Diagnostics.Stopwatch]::StartNew()
 & $Iscc "/DRepoRoot=$RepoRoot" "/DInstallerOutput=$Output" "/DBuildCommit=$BuildCommit" $Script
+$InnoStopwatch.Stop()
+Write-Host ("[build] Inno Setup compile: {0:N3} s" -f $InnoStopwatch.Elapsed.TotalSeconds)
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 $Installer = Get-ChildItem -LiteralPath $Output -Filter '*.exe' | Select-Object -First 1
 if ($null -eq $Installer) { throw 'Installer executable was not produced' }
@@ -59,6 +62,7 @@ Copy-Item -LiteralPath $Installer.FullName -Destination $ReleaseInstaller -Force
 
 if (-not $SkipInstallerSmoke) {
     Write-Host '[installer 3/4] Smoke-installing without administrator privileges'
+    $InstallSmokeStopwatch = [Diagnostics.Stopwatch]::StartNew()
     New-Item -ItemType Directory -Path $SmokeRoot -Force | Out-Null
     try {
         $Install = Start-Process -FilePath $ReleaseInstaller -ArgumentList @(
@@ -79,6 +83,8 @@ if (-not $SkipInstallerSmoke) {
             Remove-Item -LiteralPath $SmokeRoot -Recurse -Force
         }
     }
+    $InstallSmokeStopwatch.Stop()
+    Write-Host ("[build] Installer install/self-test/uninstall smoke: {0:N3} s" -f $InstallSmokeStopwatch.Elapsed.TotalSeconds)
 }
 else {
     Write-Host '[installer 3/4] Installer smoke-test explicitly skipped'

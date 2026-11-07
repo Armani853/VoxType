@@ -29,6 +29,7 @@ from .spool import (
 class AudioCaptureConfig:
     device: int | str | None = None
     input_sample_rate: int = 48_000
+    input_channels: int = 1
     target_sample_rate: int = 16_000
     block_duration_ms: int = 30
     callback_queue_chunks: int = 128
@@ -41,6 +42,8 @@ class AudioCaptureConfig:
     def __post_init__(self) -> None:
         if self.input_sample_rate <= 0 or self.target_sample_rate <= 0:
             raise ValueError("sample rates must be positive")
+        if self.input_channels not in (1, 2):
+            raise ValueError("input_channels must be one or two")
         if not 10 <= self.block_duration_ms <= 200:
             raise ValueError("block_duration_ms must be between 10 and 200")
         if self.callback_queue_chunks < 4:
@@ -137,7 +140,7 @@ class AudioCaptureService:
                 self._stream = factory(
                     device=self.config.device,
                     samplerate=self.config.input_sample_rate,
-                    channels=1,
+                    channels=self.config.input_channels,
                     dtype="float32",
                     blocksize=self.config.block_frames,
                     callback=self.audio_callback,
@@ -180,9 +183,11 @@ class AudioCaptureService:
                 self._fatal_error = AudioIngressOverflowError(
                     "PortAudio reported an input overflow"
                 )
-        copied = np.array(indata, dtype=np.float32, copy=True, order="C").reshape(-1)
+        copied = np.array(indata, dtype=np.float32, copy=True, order="C")
+        if self.config.input_channels == 1:
+            copied = copied.reshape(-1)
         if not self._enqueue_callback_block(_CallbackBlock(copied, time(), overflow)):
-            self._dropped_frames += copied.size
+            self._dropped_frames += max(int(frames), 0)
             if self._fatal_error is None:
                 self._fatal_error = AudioIngressOverflowError(
                     "The bounded callback hand-off queue was exhausted"
@@ -267,7 +272,12 @@ class AudioCaptureService:
                     continue
                 block, source_queue = queued
                 try:
-                    resampled = self.resampler.process(block.samples)
+                    mono = (
+                        block.samples.mean(axis=1, dtype=np.float32)
+                        if block.samples.ndim == 2
+                        else block.samples
+                    )
+                    resampled = self.resampler.process(mono)
                     if resampled.size:
                         processed = self.preprocessor.process(resampled)
                         self.output_queue.update_levels(
@@ -285,7 +295,7 @@ class AudioCaptureService:
                             self._next_sequence += 1
                     self._publish_callback_metrics()
                 except Exception:
-                    self._dropped_frames += int(block.samples.size)
+                    self._dropped_frames += int(block.samples.shape[0])
                     raise
                 finally:
                     source_queue.task_done()
@@ -350,7 +360,7 @@ class AudioCaptureService:
                     block = callback_queue.get_nowait()
                 except Empty:
                     break
-                self._dropped_frames += int(block.samples.size)
+                self._dropped_frames += int(block.samples.shape[0])
                 callback_queue.task_done()
 
     def _publish_callback_metrics(self) -> None:

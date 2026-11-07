@@ -38,11 +38,12 @@ from voxtype.audio.calibration import (
     device_error_result,
 )
 from voxtype.audio.capture import AudioCaptureConfig, AudioCaptureService
-from voxtype.audio.devices import choose_capture_rate, list_input_devices
+from voxtype.audio.devices import choose_capture_channels, choose_capture_rate, list_input_devices
 from voxtype.audio.preprocessing import (
     PreprocessingProfile as AudioPreprocessingProfile,
 )
 from voxtype.audio.preprocessing import PreprocessorSettings
+from voxtype.audio.recording import record_input
 from voxtype.audio.resampler import resample_audio
 from voxtype.audio.spool import LosslessAudioQueue
 from voxtype.monitoring.hardware import probe_hardware
@@ -774,6 +775,7 @@ class DesktopApplication:
                         device.index if self.runtime.settings.audio.device_id is not None else None
                     ),
                     input_sample_rate=rate,
+                    input_channels=choose_capture_channels(device),
                     callback_queue_chunks=2048,
                 ),
                 preprocessing=processing,
@@ -961,45 +963,33 @@ class DesktopApplication:
         def worker() -> None:
             capture_rate = 48_000
             try:
-                import sounddevice as sd
-
                 selected = next(
                     (candidate for candidate in self.runtime.devices if candidate.index == device),
                     self.runtime.device,
                 )
                 capture_rate = choose_capture_rate(selected)
-                silence_blocks: list[np.ndarray[Any, np.dtype[np.float32]]] = []
-                speech_blocks: list[np.ndarray[Any, np.dtype[np.float32]]] = []
-                phase_seconds = ((2.5, silence_blocks), (5.0, speech_blocks))
-                block_frames = max(1, round(capture_rate * 0.1))
-                with sd.InputStream(
-                    device=device,
-                    samplerate=capture_rate,
-                    channels=1,
-                    dtype="float32",
-                    blocksize=block_frames,
-                ) as stream:
-                    elapsed_total = 0.0
-                    for phase_index, (duration, destination) in enumerate(phase_seconds):
-                        phase_frames = round(capture_rate * duration)
-                        captured = 0
-                        while captured < phase_frames:
-                            frames = min(block_frames, phase_frames - captured)
-                            block, _overflowed = stream.read(frames)
-                            destination.append(np.asarray(block, dtype=np.float32).copy())
-                            captured += frames
-                            elapsed_total += frames / capture_rate
-                            percent = min(89, round(elapsed_total / 7.5 * 90))
-                            instruction = (
-                                "Пожалуйста, помолчите 2–3 секунды."
-                                if phase_index == 0
-                                else "Теперь произнесите обычным голосом несколько предложений."
-                            )
-                            self.signals.calibration_progress.emit(percent, instruction)
+                silence = record_input(
+                    selected,
+                    2.5,
+                    capture_rate,
+                    progress=lambda elapsed: self.signals.calibration_progress.emit(
+                        min(89, round(elapsed / 7.5 * 90)),
+                        "Пожалуйста, помолчите 2–3 секунды.",
+                    ),
+                )
+                speech = record_input(
+                    selected,
+                    5.0,
+                    capture_rate,
+                    progress=lambda elapsed: self.signals.calibration_progress.emit(
+                        min(89, round((2.5 + elapsed) / 7.5 * 90)),
+                        "Теперь произнесите обычным голосом несколько предложений.",
+                    ),
+                )
                 self.signals.calibration_progress.emit(90, "Анализирую измеренный сигнал…")
                 result = analyze_calibration(
-                    np.concatenate(silence_blocks),
-                    np.concatenate(speech_blocks),
+                    silence,
+                    speech,
                     sample_rate=capture_rate,
                 )
             except Exception as exc:
@@ -1089,22 +1079,10 @@ class DesktopApplication:
 
         def worker() -> None:
             try:
-                import sounddevice as sd
-
                 seconds = 6
                 sample_rate = 16_000
                 capture_rate = choose_capture_rate(self.runtime.device)
-                recorded = sd.rec(
-                    seconds * capture_rate,
-                    samplerate=capture_rate,
-                    channels=1,
-                    dtype="float32",
-                    device=self.runtime.device.index,
-                )
-                sd.wait()
-                audio: np.ndarray[Any, np.dtype[np.float32]] = np.asarray(
-                    recorded, dtype=np.float32
-                ).reshape(-1)
+                audio = record_input(self.runtime.device, seconds, capture_rate)
                 if capture_rate != sample_rate:
                     audio = resample_audio(audio, capture_rate, sample_rate)
                 selected = _coerce_asr_profile(model_id)
@@ -1145,16 +1123,11 @@ class DesktopApplication:
 
         def worker() -> None:
             try:
-                import sounddevice as sd
-
-                audio = sd.rec(
-                    48_000 * 2,
-                    samplerate=48_000,
-                    channels=1,
-                    dtype="float32",
-                    device=device,
+                selected = next(
+                    (candidate for candidate in self.runtime.devices if candidate.index == device),
+                    self.runtime.device,
                 )
-                sd.wait()
+                audio = record_input(selected, 2.0, choose_capture_rate(selected))
                 rms = float(np.sqrt(np.mean(np.square(audio, dtype=np.float64))))
                 clipping = float(np.mean(np.abs(audio) >= 0.98) * 100.0)
                 self.signals.audio_level.emit(rms, clipping, "Говорите обычным голосом")
@@ -1244,20 +1217,8 @@ class DesktopApplication:
     def _test_phrase(self, language: str) -> None:
         def worker() -> None:
             try:
-                import sounddevice as sd
-
                 rate = choose_capture_rate(self.runtime.device)
-                recorded = sd.rec(
-                    rate * 6,
-                    samplerate=rate,
-                    channels=1,
-                    dtype="float32",
-                    device=self.runtime.device.index,
-                )
-                sd.wait()
-                mono: np.ndarray[Any, np.dtype[np.float32]] = np.asarray(
-                    recorded, dtype=np.float32
-                ).reshape(-1)
+                mono = record_input(self.runtime.device, 6.0, rate)
                 if rate != 16_000:
                     mono = resample_audio(mono, rate, 16_000)
                 language_code = cast(Literal["ru", "en"], language)

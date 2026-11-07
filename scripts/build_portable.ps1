@@ -9,6 +9,7 @@ $Python = Join-Path $RepoRoot '.venv\Scripts\python.exe'
 $env:PYTHONPATH = Join-Path $RepoRoot 'src'
 $BuildRoot = Join-Path $RepoRoot 'build\nuitka'
 $CompilationReport = Join-Path $BuildRoot 'nuitka-compilation-report.xml'
+$NuitkaTimingLog = Join-Path $BuildRoot 'nuitka-timestamps.log'
 $AssetRoot = Join-Path $RepoRoot 'build\packaging-assets'
 $DistRoot = Join-Path $RepoRoot 'dist'
 $PortableRoot = Join-Path $DistRoot 'VoxType'
@@ -51,7 +52,10 @@ foreach ($Target in @($BuildRoot, $AssetRoot, $PortableRoot)) {
 New-Item -ItemType Directory -Path $BuildRoot, $DistRoot, $ReleaseRoot -Force | Out-Null
 
 Write-Host '[3/6] Preparing pinned VAD and native icon assets'
+$AssetStopwatch = [Diagnostics.Stopwatch]::StartNew()
 & $Python (Join-Path $RepoRoot 'tools\prepare_packaging_assets.py') --output $AssetRoot --icon-svg $IconSvg
+$AssetStopwatch.Stop()
+Write-Host ("[build] Asset preparation: {0:N3} s" -f $AssetStopwatch.Elapsed.TotalSeconds)
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 $VadAsset = Join-Path $AssetRoot 'silero_vad.onnx'
 $Icon = Join-Path $AssetRoot 'voxtype.ico'
@@ -69,6 +73,7 @@ $NuitkaArguments = @(
     '--assume-yes-for-downloads',
     '--jobs=6',
     '--lto=no',
+    '--show-scons',
     "--report=$CompilationReport",
     '--enable-plugin=pyside6',
     '--include-package=voxtype',
@@ -95,12 +100,12 @@ $NuitkaArguments = @(
 Push-Location -LiteralPath $RepoRoot
 $NuitkaStopwatch = [Diagnostics.Stopwatch]::StartNew()
 try {
-    & $Python @NuitkaArguments
+    & $Python (Join-Path $RepoRoot 'tools\timestamp_process.py') --log $NuitkaTimingLog -- $Python @NuitkaArguments
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }
 finally {
     $NuitkaStopwatch.Stop()
-    Write-Host ("[build] Nuitka wall time: {0:N3} s; report: {1}" -f $NuitkaStopwatch.Elapsed.TotalSeconds, $CompilationReport)
+    Write-Host ("[build] Nuitka wall time: {0:N3} s; report: {1}; timed log: {2}" -f $NuitkaStopwatch.Elapsed.TotalSeconds, $CompilationReport, $NuitkaTimingLog)
     Pop-Location
 }
 
@@ -112,6 +117,7 @@ if (-not (Test-Path -LiteralPath $Executable)) { throw "Missing portable executa
 if ((Get-Item -LiteralPath $Executable).Length -eq 0) { throw 'Portable executable is empty' }
 
 Write-Host '[5/6] Smoke-testing packaged executable'
+$PackagedSmokeStopwatch = [Diagnostics.Stopwatch]::StartNew()
 $Smoke = Start-Process -FilePath $Executable -ArgumentList '--self-test', '--no-ui' -Wait -PassThru -WindowStyle Hidden
 if ($Smoke.ExitCode -ne 0) { throw "Packaged self-test failed with exit code $($Smoke.ExitCode)" }
 $InferenceSmoke = Start-Process -FilePath $Executable -ArgumentList '--inference-smoke-test' -Wait -PassThru -WindowStyle Hidden
@@ -128,8 +134,11 @@ finally {
     $env:VOXTYPE_DATA_DIRECTORY = $PreviousSmokeData
     $env:VOXTYPE_CACHE_DIRECTORY = $PreviousSmokeCache
 }
+$PackagedSmokeStopwatch.Stop()
+Write-Host ("[build] Packaged self/inference/UI smoke: {0:N3} s" -f $PackagedSmokeStopwatch.Elapsed.TotalSeconds)
 
 Write-Host '[6/6] Creating ZIP and SHA-256 checksum'
+$ZipStopwatch = [Diagnostics.Stopwatch]::StartNew()
 for ($Attempt = 1; $Attempt -le 5; $Attempt++) {
     try {
         Compress-Archive -LiteralPath $PortableRoot -DestinationPath $Archive -CompressionLevel Optimal -ErrorAction Stop
@@ -143,6 +152,8 @@ for ($Attempt = 1; $Attempt -le 5; $Attempt++) {
         Start-Sleep -Seconds 2
     }
 }
+$ZipStopwatch.Stop()
+Write-Host ("[build] Portable ZIP: {0:N3} s" -f $ZipStopwatch.Elapsed.TotalSeconds)
 $Hash = Get-FileHash -Algorithm SHA256 -LiteralPath $Archive
 Set-Content -LiteralPath $Checksum -Encoding ascii -Value "$($Hash.Hash.ToLowerInvariant())  $($Hash.Path | Split-Path -Leaf)"
 Write-Host "Portable: $PortableRoot"

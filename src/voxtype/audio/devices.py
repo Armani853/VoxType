@@ -93,3 +93,16 @@ def choose_capture_rate(device: InputDevice, target_rate: int = 16_000) -> int:
     if 48_000 in rates:
         return 48_000
     return min(rates, key=lambda rate: (abs(rate - target_rate), -rate))
+
+
+def choose_capture_channels(device: InputDevice) -> int:
+    """Use the native stereo pin on WDM-KS devices that expose two channels.
+
+    Realtek Stereo Mix can accept a mono format check and open a mono stream,
+    yet never call PortAudio's callback. Its stereo pin supplies PCM normally.
+    Other host APIs retain the lighter mono path.
+    """
+
+    if "WDM-KS" in device.host_api.upper() and device.max_input_channels >= 2:
+        return 2
+    return 1

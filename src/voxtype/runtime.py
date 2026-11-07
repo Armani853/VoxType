@@ -24,7 +24,12 @@ from voxtype.asr.faster_whisper_backend import FasterWhisperBackend
 from voxtype.asr.model_manager import DEFAULT_MODEL_SPECS, ModelManager
 from voxtype.asr.profiles import ASRProfile, ASRProfileConfig, get_profile
 from voxtype.audio.capture import AudioCaptureConfig, AudioCaptureService
-from voxtype.audio.devices import InputDevice, choose_capture_rate, list_input_devices
+from voxtype.audio.devices import (
+    InputDevice,
+    choose_capture_channels,
+    choose_capture_rate,
+    list_input_devices,
+)
 from voxtype.audio.preprocessing import (
     PreprocessingProfile as AudioPreprocessingProfile,
 )
@@ -315,6 +320,7 @@ def build_runtime(*, verbose: bool = False) -> RuntimeBundle:
                 # when the user left the device on "default".
                 device=device.index if settings.audio.device_id is not None else None,
                 input_sample_rate=capture_rate,
+                input_channels=choose_capture_channels(device),
                 callback_queue_chunks=2048,
             ),
             preprocessing=preprocessing,

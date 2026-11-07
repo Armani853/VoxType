@@ -3,7 +3,7 @@
 from types import SimpleNamespace
 
 from voxtype.app import DesktopApplication
-from voxtype.audio.devices import InputDevice
+from voxtype.audio.devices import InputDevice, choose_capture_channels
 from voxtype.settings.schema import AppSettings
 
 
@@ -32,3 +32,22 @@ def test_capture_reconfiguration_uses_cached_devices(monkeypatch) -> None:  # ty
     assert controller.capture_factory is not None
     assert controller.microphone_name == "Microphone (WASAPI)"
     assert runtime.device is device
+
+
+def test_wdm_ks_stereo_pin_is_used_for_capture() -> None:
+    device = InputDevice(
+        index=19,
+        name="Stereo Mix",
+        host_api="Windows WDM-KS",
+        max_input_channels=2,
+        default_sample_rate=48_000,
+        supported_sample_rates=(48_000,),
+        is_default=False,
+    )
+    assert choose_capture_channels(device) == 2
+    assert (
+        choose_capture_channels(
+            InputDevice(12, "Mic", "Windows WASAPI", 2, 48_000, (48_000,), True)
+        )
+        == 1
+    )
