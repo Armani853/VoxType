@@ -86,3 +86,15 @@ The new portable ZIP is **123,551,052 B**, SHA-256 `DDF115657DAE67B6C7CABECCBB6A
 The packaged UI smoke log recorded `shell_ready` **559.3 ms** and first content paint **521.5 ms after MainWindow construction**; the earlier packaged smoke was 1033.5 ms on another candidate, a **1.98×** lower measured interval in two single runs. This excludes process launch/import time and has no distribution. The packaged first-run onboarding still blocked the Qt event loop: `onboarding_constructed` **993.6 ms**, `onboarding_shown` **1048.8 ms total**, `UI_STALL` **1078.0 ms**. This is a known performance defect and the target of no unexplained >200 ms GUI stalls remains unmet. No installed-EXE p95/p99, ASR load, capture-to-text, or shutdown distribution is claimed from this build.
 
 The local Inno Setup 6.7.3 compiler printed **“Non-commercial use only.”** The [official Inno Setup commercial license page](https://jrsoftware.org/isorder.php) says commercial users should purchase a license, and its [purchase help](https://jrsoftware.org/ishelp/topic_purchase.htm) requests a license regardless of version. This is a commercial release dependency to resolve before transfer; the output banner alone does not establish that the resulting installer is legally unusable, and no license key is recorded in this repository.
+
+### Architecture decision against a native rewrite
+
+| Question | Evidence-based answer |
+|---|---|
+| Python-bound components | Small UI orchestration and 50 ms poll perform Python work; the identical-snapshot guard reduced one measured redundant render operation from 0.603 ms median to 0.001 ms. No remaining CPU-saturated Python function has been demonstrated. |
+| Fraction already in native libraries | Not measured as a CPU-time percentage. Qt first-wizard initialization of 434–994 ms is within native `QWizard` calls in cProfile, and CTranslate2/ONNX/PortAudio are native; summing wall times into a precise global fraction would be misleading. |
+| Algorithm changes | Avoiding unnecessary full QSS application on unrelated settings saves a measured 159.6 ms median operation; skip unchanged idle snapshots and avoid constructing unused dialogs and overlay. These were implemented and source-tested. |
+| Rust/C++ module | No justified target: no profiled Python hot path dominates end-user latency. A prototype would add a toolchain and packaging boundary without a measured benefit. |
+| Moving away from PySide6 | Would require rebuilding every Windows view, accessibility surface, tray/overlay/hotkey integration and test evidence. Current bottleneck is a one-time native Qt wizard path, not general Python widget dispatch. |
+| Build/maintenance complexity | A second language or GUI stack adds compiler, ABI, signing and regression work to the existing Nuitka/MSVC/Inno path. This cost is certain; speedup is unproven. |
+| Practical user gain | The measured source first-paint interval improved, but the new packaged build still has a first-run onboarding stall and installed end-to-end latency is unmeasured. No claim of a verified daily-use speedup is made yet. |
