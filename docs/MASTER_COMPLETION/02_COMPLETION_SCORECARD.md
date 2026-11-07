@@ -1,6 +1,6 @@
 # Master completion scorecard
 
-Snapshot 2026-11-06. Formula: 100 × VERIFIED / applicable rows. This is a **lower-bound preliminary score for mapped requirements**, not a precise percentage of the unavailable original TZ or every paragraph of the long prompts. Each row in `01_REQUIREMENTS_MATRIX.md` contributes once. FAILED and BLOCKED count in the denominator. No NOT_APPLICABLE exclusions were made.
+Snapshot 2026-11-07. Formula: 100 × VERIFIED / applicable rows. This is a **lower-bound preliminary score for mapped requirements**, not a precise percentage of the unavailable original TZ or every paragraph of the long prompts. Each row in `01_REQUIREMENTS_MATRIX.md` contributes once. FAILED and BLOCKED count in the denominator. No NOT_APPLICABLE exclusions were made.
 
 | Prompt | Verified | Applicable | Completion | Implemented unverified | Failed | Blocked | Not started | In progress | Not applicable | Blocking issue |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
@@ -9,7 +9,7 @@ Snapshot 2026-11-06. Formula: 100 × VERIFIED / applicable rows. This is a **low
 | PROMPT-03 | 1 | 6 | 16.7% | 3 | 1 | 1 | 0 | 0 | 0 | FA-001, FA-008, current soak |
 | PROMPT-04 | 2 | 5 | 40.0% | 2 | 0 | 1 | 0 | 0 | 0 | 100 current cycles |
 | PROMPT-05 | 1 | 5 | 20.0% | 2 | 1 | 1 | 0 | 0 | 0 | No measured cleanup or full runtime comparison |
-| PROMPT-06 | 1 | 7 | 14.3% | 1 | 2 | 2 | 1 | 0 | Startup/ASR targets and remaining build stages |
+| PROMPT-06 | 2 | 7 | 28.6% | 0 | 2 | 2 | 1 | 0 | Startup/ASR targets and separately timed build stages |
 | PROMPT-07 | 1 | 5 | 20.0% | 1 | 0 | 3 | 0 | 0 | 0 | Full controls and insertion |
 | PROMPT-08 | 0 | 12 | 0.0% | 0 | 0 | 12 | 0 | 0 | 0 | All ten capture-path speech tests |
 | PROMPT-09 | 3 | 8 | 37.5% | 0 | 1 | 4 | 0 | 0 | 0 | End-to-end buyer journey |
@@ -25,3 +25,5 @@ The low score for PROMPT-01 reflects strict remapping of historical claims to cu
 | PROMPT-05 | 0.0% | 20.0% | 4 | Fresh hidden-inclusive disk scan with top 50 and SHA-256 groups, zero errors; no deletion or runtime gain claimed |
 
 The completed `6b8a02e` Nuitka XML report and 597/597 cache hits verify narrow gate P06-002, raising PROMPT-06 from 0.0% to 14.3%. Other prompt percentages are unchanged. This does not prove a total build speedup, release readiness, or the installed-runtime targets.
+
+The `e7726e0` cycle verified P06-003: DEV diagnostics executed from source, QA ran Ruff/mypy and 268 passing tests, and the committed release built portable and installer with packaged and isolated installer smoke. PROMPT-06 therefore rose **14.3% → 28.6%** (2/7 mapped gates). The first-paint metric from the packaged smoke is measured from MainWindow construction, not process launch; the onboarding stall, precise installed latency distribution, ASR outlier and separately timed MSVC/link/copy remain unresolved. No other prompt percentage rose from this code/build cycle.

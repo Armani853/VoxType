@@ -1,5 +1,13 @@
 # Release acceptance state
 
+## Candidate `e7726e0`, 2026-11-07
+
+Application source/packaging commit `e7726e0`, clean at build start. Ruff/mypy passed; **268 tests passed, 5 deselected**. One full Nuitka + Inno build completed; packaged self-test, inference smoke, visible UI smoke, isolated installer install/self-test/uninstall succeeded. Portable EXE SHA-256 `29EA16F79762272684FFDB8721E9298ADFF9474195A88480A14165B136C1EB34`; portable ZIP SHA-256 `DDF115657DAE67B6C7CABECCBB6ADFE788E8379DE6A34C8A161DE0FCE5CF5F36`; installer SHA-256 `3311FF9E661F5F1FEF9F452924F233A2C892A31F3DCBD72A5299EDCC0DC3FCCB`. Names include `e7726e0` and old release files were preserved.
+
+**Still NOT READY.** The packaged GUI smoke logged a roughly 1.08 s Qt event-loop stall during first-run onboarding. The binary has not had an interactive installed-EXE customer journey, ten RU/EN capture-path tests, application insertion matrix, 100 start/exit cycles or 60-minute soak. The local Inno compiler again printed “Non-commercial use only”; check its official commercial licensing before sale. Automated install/uninstall is not a substitute for Computer Use acceptance.
+
+## Historical candidate, 2026-11-06
+
 **NOT READY** on 2026-11-06. Latest source and packaging commit: `4167c4eae5dd9c2e61841cac8ba4298573ec8ba6`; application EXE payload built from `9104e3a`, SHA-256 `824eae37ac91905c4cb193bd5a4e7439fae839d385bc8a7edd547db6a90e16a9`. Production-AppId installer candidate: `build/final-acceptance/VoxType-0.2.4-4167c4e-release-candidate-setup.exe`, 81,017,015 bytes, SHA-256 `c254540e176af815c4539f9ae20750bca3d4e753a5eb2119c58c23a64248ceef`. Its production-AppId installation was **not** tested, to preserve the existing installation.
 
 Ruff, mypy and 261 selected tests passed before this candidate was built; five tests were deselected. Native Qt emitted `0x8001010d` despite test process exit 0. The isolated package guarded against uninstall while app ran and then removed installed files. The current production package has not completed the buyer journey, ten speech scenarios, insertion app matrix, 100 start/exit cycles, 60-minute soak or production upgrade/uninstall. The Inno compiler printed “Non-commercial use only”; sale licensing is unresolved.
