@@ -173,6 +173,10 @@ if PYSIDE6_AVAILABLE:
         def _build_general_page(self) -> None:
             page, form = self._page("Общие", "Поведение приложения и внешний вид.")
             self.autostart_check = QCheckBox("Запускать вместе с Windows", page)
+            self.autostart_check.setToolTip(
+                "Горячие клавиши работают, пока VoxType запущен. "
+                "Включите автозапуск, чтобы они были доступны после входа в Windows."
+            )
             self.minimize_tray_check = QCheckBox("Сворачивать в системный трей", page)
             self.overlay_check = QCheckBox("Показывать индикатор диктовки", page)
             self.sounds_check = QCheckBox("Тихие звуки начала и окончания", page)

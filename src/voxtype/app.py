@@ -521,7 +521,7 @@ class DesktopApplication:
         self._last_state = snapshot.state
         now = time.monotonic()
         if (
-            snapshot.state == "PAUSED_TARGET_LOST"
+            snapshot.state in {"PAUSED_TARGET_LOST", "COMPLETED"}
             and self.controller.injection_service.pending_fragments
             and now - self._last_pending_flush >= 0.5
             and not self._pending_flush_running
@@ -531,7 +531,10 @@ class DesktopApplication:
 
             def flush_worker() -> None:
                 try:
-                    self.controller.flush_pending_text()
+                    if snapshot.state == "COMPLETED":
+                        self.controller.retry_completed_insertion()
+                    else:
+                        self.controller.flush_pending_text()
                 finally:
                     self.signals.pending_flush_ready.emit()
 

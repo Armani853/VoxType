@@ -215,6 +215,8 @@ class PendingTextQueue:
 
 _NO_SPACE_BEFORE = frozenset(".,!?;:%)]}»…")
 _NO_SPACE_AFTER = frozenset("([{«")
+_ASYNC_CLIPBOARD_READERS = frozenset({"browser.exe", "chrome.exe", "msedge.exe", "code.exe"})
+_ASYNC_PASTE_MIN_DELAY_SECONDS = 0.35
 
 
 def prepare_fragment(previous_tail: str, fragment: str) -> str:
@@ -348,8 +350,11 @@ class TextInjectionService:
             if not self._same_target_is_ready(target):
                 raise _TargetChanged("Target changed while preparing clipboard paste")
             self._sender.send_paste_shortcut()
-            if self._paste_delay:
-                self._sleep(self._paste_delay)
+            delay = self._paste_delay
+            if target.process_name.casefold() in _ASYNC_CLIPBOARD_READERS:
+                delay = max(delay, _ASYNC_PASTE_MIN_DELAY_SECONDS)
+            if delay:
+                self._sleep(delay)
         except SendInputError as exc:
             send_error = exc
         finally:

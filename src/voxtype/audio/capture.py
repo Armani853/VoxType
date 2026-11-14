@@ -179,10 +179,6 @@ class AudioCaptureService:
             # callback block conservatively so a session can never claim zero
             # dropped frames after an input overflow.
             self._dropped_frames += max(int(frames), 1)
-            if self._fatal_error is None:
-                self._fatal_error = AudioIngressOverflowError(
-                    "PortAudio reported an input overflow"
-                )
         copied = np.array(indata, dtype=np.float32, copy=True, order="C")
         if self.config.input_channels == 1:
             copied = copied.reshape(-1)
@@ -210,10 +206,6 @@ class AudioCaptureService:
         self._callback_overflows += int(input_overflow)
         if input_overflow:
             self._dropped_frames += max(int(audio.size), 1)
-            if self._fatal_error is None:
-                self._fatal_error = AudioIngressOverflowError(
-                    "Test source reported an input overflow"
-                )
         if not self._enqueue_callback_block(
             _CallbackBlock(audio, captured_at or time(), input_overflow)
         ):

@@ -1,5 +1,6 @@
 """Unrelated settings must not rebuild GUI styles or Windows hooks."""
 
+import time
 from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -86,6 +87,55 @@ def test_idle_snapshot_does_not_construct_overlay() -> None:
     assert app._overlay is None
     app.main.update_snapshot.assert_called_once()
     app.tray.update_snapshot.assert_called_once()
+
+
+def test_completed_session_retries_retained_text_without_blocking_ui(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    app = object.__new__(DesktopApplication)
+    app.controller = MagicMock()
+    app.controller.state.name = "COMPLETED"
+    app.controller.injection_service.pending_fragments = 1
+    app.controller.snapshot.return_value = SimpleNamespace(
+        state="COMPLETED", error_message="", status_message=""
+    )
+    app.runtime = SimpleNamespace(
+        settings=SimpleNamespace(
+            general=SimpleNamespace(show_overlay=False, play_sounds=False),
+            dictation=SimpleNamespace(auto_hide_completed_result=False),
+        )
+    )
+    app.main = MagicMock()
+    app.tray = MagicMock()
+    app.signals = MagicMock()
+    app._overlay = None
+    app._last_rendered_snapshot = None
+    app._last_state = "COMPLETED"
+    app._last_pending_flush = 0.0
+    app._last_resource_sample = time.monotonic()
+    app._pending_flush_running = False
+
+    class DeferredThread:
+        def __init__(self, *, target, **_kwargs):  # type: ignore[no-untyped-def]
+            self.target = target
+
+        def start(self) -> None:
+            return None
+
+    launched: list[DeferredThread] = []
+
+    def make_thread(*, target, **kwargs):  # type: ignore[no-untyped-def]
+        thread = DeferredThread(target=target, **kwargs)
+        launched.append(thread)
+        return thread
+
+    monkeypatch.setattr("voxtype.app.threading.Thread", make_thread)
+    app._poll()
+
+    assert len(launched) == 1
+    assert app._pending_flush_running
+    app.controller.retry_completed_insertion.assert_not_called()
+    launched[0].target()
+    app.controller.retry_completed_insertion.assert_called_once()
+    app.signals.pending_flush_ready.emit.assert_called_once()
 
 
 def test_secondary_windows_are_created_once_on_first_access(qtbot) -> None:  # type: ignore[no-untyped-def]

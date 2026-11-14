@@ -221,6 +221,7 @@ class SlowStopCapture(EmptyCapture):
 
 class FixtureTargetManager:
     def __init__(self) -> None:
+        self.end_calls = 0
         self.target = WindowMetadata(
             101, "Fixture editor", 202, "fixture.exe", IntegrityLevel.MEDIUM
         )
@@ -236,7 +237,7 @@ class FixtureTargetManager:
         return TargetDecision(TargetStatus.READY, self.target, self.target, "ready")
 
     def end_session(self) -> None:
-        return None
+        self.end_calls += 1
 
 
 class FixtureInjection:
@@ -249,6 +250,24 @@ class FixtureInjection:
 
     def close(self) -> None:
         return None
+
+
+class QueuedInjection(FixtureInjection):
+    def __init__(self) -> None:
+        super().__init__()
+        self.pending_fragments = 0
+
+    def submit(self, text: str) -> object:
+        self.fragments.append(text)
+        self.pending_fragments += 1
+        return SimpleNamespace(
+            status=InjectionStatus.QUEUED,
+            target_status=TargetStatus.TARGET_INACTIVE,
+        )
+
+    def flush(self) -> object:
+        self.pending_fragments = 0
+        return SimpleNamespace(status=InjectionStatus.INSERTED)
 
 
 def wait_for_state(
@@ -333,6 +352,34 @@ def test_controller_journals_before_ordered_injection_and_drains(tmp_path: Path)
     session_repository.close()
 
 
+def test_inactive_target_completion_is_not_history_error_and_can_retry(tmp_path: Path) -> None:
+    repository = SessionRepository(tmp_path / "sessions.sqlite3")
+    target = FixtureTargetManager()
+    injection = QueuedInjection()
+    controller = ApplicationController(
+        settings_repository=SettingsRepository(tmp_path / "settings.json"),
+        session_repository=repository,
+        backend=DeterministicBackend(),
+        capture_factory=lambda queue: FixtureCapture(queue),  # type: ignore[arg-type,return-value]
+        segmenter_factory=lambda: StreamingSegmenter(AlwaysSpeech()),
+        target_manager=target,  # type: ignore[arg-type]
+        injection_service=injection,  # type: ignore[arg-type]
+        spool_root=tmp_path / "spool",
+    )
+    controller.initialize()
+    assert controller.start_dictation()
+    wait_for_state(controller, AppState.LISTENING)
+    assert controller.stop_dictation()
+    wait_for_state(controller, AppState.COMPLETED)
+    assert repository.recent(1)[0].status == "completed"
+    assert injection.pending_fragments == 1
+    assert target.end_calls == 0
+    assert controller.retry_completed_insertion()
+    assert target.end_calls == 1
+    assert controller.shutdown()
+    repository.close()
+
+
 def test_model_loading_accepts_only_one_queued_start(tmp_path: Path) -> None:
     repository = SessionRepository(tmp_path / "sessions.sqlite3")
     backend = DelayedLoadBackend()
@@ -405,7 +452,7 @@ def test_capture_creation_error_is_recoverable_from_starting(tmp_path: Path) -> 
     repository.close()
 
 
-def test_input_overflow_reports_microphone_failure_and_allows_retry(tmp_path: Path) -> None:
+def test_input_overflow_warns_and_continues_capture(tmp_path: Path) -> None:
     repository = SessionRepository(tmp_path / "sessions.sqlite3")
     captures: list[FixtureCapture] = []
 
@@ -430,10 +477,17 @@ def test_input_overflow_reports_microphone_failure_and_allows_retry(tmp_path: Pa
     captures[0].output_queue.put(
         AudioChunk(1, np.zeros(480, dtype=np.float32), 16_000, time.time(), True)
     )
-    wait_for_state(controller, AppState.ERROR_RECOVERABLE)
-    assert "Микрофон потерял часть аудио" in controller.snapshot().error_message
-    assert controller.start_dictation()
-    wait_for_state(controller, AppState.LISTENING)
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline:
+        sessions = repository.recent(1)
+        if sessions and "AudioInputOverflow" in sessions[0].warnings:
+            break
+        time.sleep(0.01)
+    assert sessions and "AudioInputOverflow" in sessions[0].warnings
+    assert controller.state is AppState.LISTENING
+    assert "Микрофон потерял часть звука" in controller.snapshot().status_message
+    assert controller.stop_dictation()
+    wait_for_state(controller, AppState.COMPLETED)
     assert controller.shutdown()
     repository.close()
 

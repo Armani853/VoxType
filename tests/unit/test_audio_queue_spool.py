@@ -162,7 +162,7 @@ def test_portaudio_overflow_can_never_report_zero_dropped_frames(tmp_path: Path)
     stats = service.stats()
     assert stats.callback_overflows == 1
     assert stats.dropped_frames >= 480
-    assert service.fatal_error is not None
+    assert service.fatal_error is None
 
 
 def test_streaming_resampler_keeps_duration_and_boundary_continuity() -> None:

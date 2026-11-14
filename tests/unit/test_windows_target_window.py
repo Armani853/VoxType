@@ -135,6 +135,17 @@ def test_start_button_retains_last_observed_external_target() -> None:
     assert decision.status is TargetStatus.TARGET_INACTIVE
 
 
+def test_start_from_voxtype_without_external_target_never_locks_own_window() -> None:
+    own = window(11, 999, process="VoxType.exe")
+    desktop = Desktop(own)
+    targets = manager(desktop)
+
+    decision = targets.start_session()
+
+    assert targets.locked_target is None
+    assert decision.status is TargetStatus.NO_TARGET
+
+
 def test_unknown_integrity_is_blocked_instead_of_guessing() -> None:
     unknown = window(10, 100, integrity=IntegrityLevel.UNKNOWN)
     desktop = Desktop(unknown)

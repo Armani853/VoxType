@@ -437,7 +437,10 @@ class ApplicationController:
             final_stats = capture.stats()
             with self._lock:
                 self._last_stats = final_stats
-        self._complete_session("completed" if not self._error_message else "error")
+        # Delivery warnings are tracked separately from ASR/session failures.
+        # A temporarily inactive target must not mark recognized speech as an
+        # errored history session.
+        self._complete_session("completed")
 
     def _pipeline_loop(self) -> None:
         with self._lock:
@@ -448,6 +451,7 @@ class ApplicationController:
             return
         pending: deque[AudioQueueLease] = deque()
         pending_seconds = 0.0
+        input_overflow_reported = False
 
         def ack_pending() -> None:
             nonlocal pending_seconds
@@ -478,8 +482,13 @@ class ApplicationController:
                     if audio_queue.closed:
                         break
                     continue
-                if lease.chunk.input_overflow:
-                    raise AudioIngressOverflowError("PortAudio input overflow detected")
+                if lease.chunk.input_overflow and not input_overflow_reported:
+                    input_overflow_reported = True
+                    self.logger.warning("audio_input_overflow session_id=%s", self._session_id)
+                    with self._lock:
+                        self._status_message = "Микрофон потерял часть звука; запись продолжается"
+                    if self._session_id is not None:
+                        self.session_repository.add_warning(self._session_id, "AudioInputOverflow")
                 if self._captured_during_pause(lease.chunk.captured_at):
                     audio_queue.ack(lease)
                     continue
@@ -1273,6 +1282,8 @@ class ApplicationController:
                 self._delivery_status = "delivered"
                 self._status_message = "Текст вставлен"
                 self._error_message = ""
+                if int(getattr(self.injection_service, "pending_fragments", 0)) == 0:
+                    self.target_manager.end_session()
                 return True
             if result.status in {InjectionStatus.QUEUED, InjectionStatus.BLOCKED}:
                 self._delivery_status = "queued_target_inactive"
@@ -1319,7 +1330,11 @@ class ApplicationController:
                 and not self.settings.privacy.save_history
             ):
                 self.session_repository.delete(session_id)
-        self.target_manager.end_session()
+        # Retain the original window identity while committed fragments still
+        # await delivery. Otherwise a completed session can never flush when
+        # the user returns to that window.
+        if int(getattr(self.injection_service, "pending_fragments", 0)) == 0:
+            self.target_manager.end_session()
         if audio_archive is not None:
             audio_archive.close()
         if spool is not None:
@@ -1445,7 +1460,10 @@ class ApplicationController:
             "no_target": "Целевое окно не выбрано",
             "suspended": "Сеанс Windows временно приостановлен",
         }
-        return messages.get(str(value), "Целевое окно неактивно; текст сохранён")
+        return messages.get(
+            str(value),
+            "Щёлкните поле целевого окна для вставки; текст сохранён",
+        )
 
     def _require_session_id(self) -> str:
         with self._lock:

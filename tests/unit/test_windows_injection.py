@@ -116,6 +116,25 @@ def test_auto_strategy_pastes_unicode_and_restores_all_original_formats() -> Non
     assert service.pending_fragments == 0
 
 
+def test_browser_paste_waits_for_async_clipboard_reader_before_restore() -> None:
+    browser = WindowMetadata(102, "Browser", 202, "browser.exe", IntegrityLevel.MEDIUM)
+    clipboard = ClipboardManager(MemoryClipboardBackend([unicode_item("original")]))
+    sender = RecordingSender(clipboard)
+    delays: list[float] = []
+    service = TextInjectionService(
+        Resolver(decision(TargetStatus.READY, browser)),
+        clipboard=clipboard,
+        sender=sender,
+        paste_delay=0.08,
+        sleep=delays.append,
+    )
+
+    assert service.submit("Текст").status is InjectionStatus.INSERTED
+    assert delays == [0.35]
+    assert sender.pasted == ["Текст"]
+    assert clipboard.get_text() == "original"
+
+
 def test_inactive_locked_target_queues_then_flushes_in_original_order() -> None:
     resolver = Resolver(decision(TargetStatus.TARGET_INACTIVE))
     service, _, sender = build_service(resolver)

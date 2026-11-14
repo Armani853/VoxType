@@ -146,7 +146,7 @@ class TargetWindowManager:
             # A click on VoxType necessarily makes its own main window
             # foreground.  Retain the most recently observed external target so
             # the Start button behaves like the global hotkey.
-            if blocked is not TargetStatus.OWN_WINDOW or self._locked_target is None:
+            if blocked is not TargetStatus.OWN_WINDOW:
                 self._locked_target = foreground
             self._suspended = False
         return self.resolve(foreground=foreground)
