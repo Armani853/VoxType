@@ -1,5 +1,7 @@
 # Execution checkpoint — 2026-11-15
 
+Latest product HEAD: `a69e644`. For a completed session with retained text and an inactive target, main window and overlay now show **«Ожидает вставки»** and instruct the user to return to the target window; previous display said «Готово». Source Qt tests: 13 passed; Ruff/mypy passed. Installed binary retest is pending. No new Nuitka build yet.
+
 Latest source HEAD: `8a0e25b`. Onboarding now offers an explicit checked Windows-autostart choice and passes it through settings to the existing startup backend. This has Qt/unit evidence (14 passed) and Ruff/mypy pass; current installed EXE still predates it. The existing user profile and startup registration were not changed. This is not a claim that hotkeys work before the application is running.
 
 Current code HEAD: `8de8f34` (after installer safety and hotkey/provenance changes). `scripts/lint.ps1` passed Ruff format/check and mypy (105 source files). Focused tests: 13 passed. Full `scripts/test.ps1`: 277 passed, 5 deselected, 1 failed in a 200-cycle Qt performance test because Windows handles grew 1773→1775 between midpoint and finish, exceeding its `+1` threshold. The same test passed on the single targeted rerun (Windows also printed known `0x8001010d`). Treat this as an unresolved flaky resource assertion; do not call the complete suite green. No new Nuitka build was run after these commits.
