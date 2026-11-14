@@ -1,5 +1,7 @@
 # Execution checkpoint — 2026-11-15
 
+Latest source HEAD: `8a0e25b`. Onboarding now offers an explicit checked Windows-autostart choice and passes it through settings to the existing startup backend. This has Qt/unit evidence (14 passed) and Ruff/mypy pass; current installed EXE still predates it. The existing user profile and startup registration were not changed. This is not a claim that hotkeys work before the application is running.
+
 Current code HEAD: `8de8f34` (after installer safety and hotkey/provenance changes). `scripts/lint.ps1` passed Ruff format/check and mypy (105 source files). Focused tests: 13 passed. Full `scripts/test.ps1`: 277 passed, 5 deselected, 1 failed in a 200-cycle Qt performance test because Windows handles grew 1773→1775 between midpoint and finish, exceeding its `+1` threshold. The same test passed on the single targeted rerun (Windows also printed known `0x8001010d`). Treat this as an unresolved flaky resource assertion; do not call the complete suite green. No new Nuitka build was run after these commits.
 
 At source startup, one conflicting auxiliary hotkey no longer unregisters the dictation hotkey; settings changes still roll back atomically on a conflict. The portable pipeline now writes the full source commit into `dist/VoxType/build-commit.txt`, and the installer pipeline refuses a mismatched portable and requires its ZIP/checksum. This has unit/contract evidence only; current published artifacts remain from `7f9638a`.
