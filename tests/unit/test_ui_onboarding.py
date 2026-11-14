@@ -44,6 +44,9 @@ def test_onboarding_has_eight_real_steps_and_collects_choices(qtbot) -> None:  #
     assert values["audio_device_id"] == "mic-1"
     assert values["model_profile"] == "balanced"
     assert values["onboarding_completed"] is True
+    assert values["start_with_windows"] is True
+    wizard.autostart_check.setChecked(False)
+    assert wizard.setup_values()["start_with_windows"] is False
 
 
 def test_onboarding_emits_external_work_requests(qtbot) -> None:  # type: ignore[no-untyped-def]

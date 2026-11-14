@@ -125,6 +125,18 @@ def test_settings_hotkey_conflict_rolls_back_partial_registration() -> None:
     assert app.hotkeys.unregister_all.call_count == 2
 
 
+def test_onboarding_autostart_choice_reaches_settings_backend() -> None:
+    app = object.__new__(DesktopApplication)
+    app.runtime = SimpleNamespace(settings=AppSettings())
+    app._save_settings = MagicMock()
+
+    app._complete_onboarding({"start_with_windows": True})
+
+    changes = app._save_settings.call_args.args[0]
+    assert changes["general"]["start_with_windows"] is True
+    assert changes["general"]["onboarding_completed"] is True
+
+
 def test_completed_session_retries_retained_text_without_blocking_ui(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     app = object.__new__(DesktopApplication)
     app.controller = MagicMock()

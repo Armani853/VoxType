@@ -14,6 +14,7 @@ if PYSIDE6_AVAILABLE:
     from PySide6.QtGui import QFont, QTextCursor
     from PySide6.QtWidgets import (
         QAbstractButton,
+        QCheckBox,
         QComboBox,
         QHBoxLayout,
         QLabel,
@@ -301,6 +302,11 @@ if PYSIDE6_AVAILABLE:
             self.hotkey_edit = QLineEdit("Ctrl+Alt+Space", finish_card)
             self.hotkey_edit.setObjectName("onboardingHotkey")
             self.hotkey_edit.setToolTip("Сочетание можно позже изменить в настройках")
+            self.autostart_check = QCheckBox(
+                "Запускать VoxType вместе с Windows для работы горячей клавиши", finish_card
+            )
+            self.autostart_check.setObjectName("onboardingAutostart")
+            self.autostart_check.setChecked(True)
             finish_hint = QLabel(
                 "Нажмите сочетание, говорите, затем нажмите его ещё раз. "
                 "RU/EN переключается через Ctrl+Alt+L.",
@@ -310,6 +316,7 @@ if PYSIDE6_AVAILABLE:
             finish_card.content_layout.addWidget(shortcut)
             finish_card.content_layout.addWidget(QLabel("Горячая клавиша", finish_card))
             finish_card.content_layout.addWidget(self.hotkey_edit)
+            finish_card.content_layout.addWidget(self.autostart_check)
             finish_card.content_layout.addWidget(finish_hint)
             finish_layout.addWidget(finish_card)
             finish_layout.addStretch(1)
@@ -566,6 +573,7 @@ if PYSIDE6_AVAILABLE:
                 "audio_device_id": self.microphone_combo.currentData(),
                 "model_profile": self.model_combo.currentData(),
                 "toggle_hotkey": self.hotkey_edit.text().strip() or "Ctrl+Alt+Space",
+                "start_with_windows": self.autostart_check.isChecked(),
                 "onboarding_completed": True,
             }
 

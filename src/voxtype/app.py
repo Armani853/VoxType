@@ -1288,7 +1288,14 @@ class DesktopApplication:
         if not isinstance(values, dict):
             return
         changes = {
-            "general": {"onboarding_completed": True},
+            "general": {
+                "onboarding_completed": True,
+                "start_with_windows": bool(
+                    values.get(
+                        "start_with_windows", self.runtime.settings.general.start_with_windows
+                    )
+                ),
+            },
             "audio": {"device_id": values.get("audio_device_id")},
             "dictation": {
                 "model_profile": "maximum_accuracy"
