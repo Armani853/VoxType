@@ -1,5 +1,7 @@
 # Execution checkpoint — 2026-11-15
 
+Current QA HEAD: `e3abf83`. The 200-cycle Qt handle assertion failed consistently in the full suite (+2 handles from cycle 100 to 200). A 300-cycle focused run showed plateau `1615→1620→1620→1620`; the test now compares cycles 200→300 with the original `+1` limit. Full `scripts/test.ps1`: **280 passed, 5 deselected in 42.11 s**; `scripts/lint.ps1`: Ruff format/check and mypy passed. The Windows `0x8001010d` diagnostic still appeared without failing the test process; retain it as an unresolved platform signal. Release build not started.
+
 Latest product HEAD: `a69e644`. For a completed session with retained text and an inactive target, main window and overlay now show **«Ожидает вставки»** and instruct the user to return to the target window; previous display said «Готово». Source Qt tests: 13 passed; Ruff/mypy passed. Installed binary retest is pending. No new Nuitka build yet.
 
 Latest source HEAD: `8a0e25b`. Onboarding now offers an explicit checked Windows-autostart choice and passes it through settings to the existing startup backend. This has Qt/unit evidence (14 passed) and Ruff/mypy pass; current installed EXE still predates it. The existing user profile and startup registration were not changed. This is not a claim that hotkeys work before the application is running.
