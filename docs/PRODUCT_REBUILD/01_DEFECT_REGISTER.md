@@ -6,7 +6,7 @@
 - **Ожидалось:** тестовая установка не меняет регистрацию удаления рабочей копии; ненужная полная сборка не запускается.
 - **Фактически до исправления:** скрипт сначала собирал и публиковал установщик, затем запускал Inno с тем же `AppId` и `/DIR=build/installer-smoke`; существующая HKCU запись удаления указывает на `build/perf-installed-e7726e0`. Запущенный VoxType остановил Inno, но при закрытом процессе запись могла быть перезаписана.
 - **Причина:** временный путь `/DIR` не изолирует регистрацию Inno по `AppId`.
-- **Исправление:** ранняя проверка HKCU/HKLM uninstall entry и singleton mutex до portable build; публикация после smoke. Исходный production `AppId` не изменён.
+- **Исправление:** ранняя проверка HKCU/HKLM uninstall entry, singleton mutex и существующей smoke-папки до portable build; публикация после smoke. При неудаче uninstall тестовая папка остаётся для восстановления вместо принудительного удаления. Исходный production `AppId` не изменён.
 - **Проверка:** реальный запуск preflight в текущем состоянии остановился за 221 мс без сборки; packaging tests 5/5, Ruff pass. Полный install/uninstall в отдельной Windows-среде ещё не выполнен.
 - **Статус:** `IMPLEMENTED_UNVERIFIED` для полного установщика; предотвращение host overwrite подтверждено. См. `docs/MASTER_COMPLETION/EXECUTION_CHECKPOINT.md`.
 

@@ -10,11 +10,15 @@ $RepoRoot = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
 $ReleaseRoot = Join-Path $RepoRoot 'release'
 $InstallerAppId = '{5A4A7C70-50ED-4F41-90A6-48C69682B1A7}_is1'
 $InstallerMutex = 'Local\VoxType.Desktop.Singleton.v1'
+$SmokeRoot = Join-Path $RepoRoot 'build\installer-smoke'
 
 # Inno Setup records uninstall information by AppId, even when /DIR points at a
 # temporary folder. A smoke install on the host could replace the user's
 # existing uninstall entry. Reject it before any expensive build work begins.
 if (-not $SkipInstallerSmoke) {
+    if (Test-Path -LiteralPath $SmokeRoot) {
+        throw "Installer smoke directory already exists; inspect it before retrying: $SmokeRoot"
+    }
     foreach ($Hive in @('HKCU:', 'HKLM:')) {
         $UninstallKey = Join-Path $Hive "Software\Microsoft\Windows\CurrentVersion\Uninstall\$InstallerAppId"
         if (Test-Path -LiteralPath $UninstallKey) {
@@ -52,8 +56,7 @@ if (-not $Iscc) {
 }
 
 $Output = Join-Path $RepoRoot 'dist\installer'
-$SmokeRoot = Join-Path $RepoRoot 'build\installer-smoke'
-foreach ($Target in @($Output, $SmokeRoot)) {
+foreach ($Target in @($Output)) {
     $FullTarget = [IO.Path]::GetFullPath($Target)
     if (-not $FullTarget.StartsWith($RepoRoot, [StringComparison]::OrdinalIgnoreCase)) {
         throw "Unsafe installer target: $FullTarget"
@@ -78,6 +81,7 @@ if (-not $SkipInstallerSmoke) {
     Write-Host '[installer 2/4] Smoke-installing without administrator privileges'
     $InstallSmokeStopwatch = [Diagnostics.Stopwatch]::StartNew()
     New-Item -ItemType Directory -Path $SmokeRoot -Force | Out-Null
+    $SmokeUninstalled = $false
     try {
         $Install = Start-Process -FilePath $Installer.FullName -ArgumentList @(
             '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/CURRENTUSER', '/NOICONS', "/DIR=$SmokeRoot"
@@ -91,9 +95,10 @@ if (-not $SkipInstallerSmoke) {
         if (-not (Test-Path -LiteralPath $Uninstaller)) { throw 'Smoke install did not produce an uninstaller' }
         $Uninstall = Start-Process -FilePath $Uninstaller -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART' -Wait -PassThru -WindowStyle Hidden
         if ($Uninstall.ExitCode -ne 0) { throw "Smoke uninstall failed with exit code $($Uninstall.ExitCode)" }
+        $SmokeUninstalled = $true
     }
     finally {
-        if (Test-Path -LiteralPath $SmokeRoot) {
+        if ($SmokeUninstalled -and (Test-Path -LiteralPath $SmokeRoot)) {
             Remove-Item -LiteralPath $SmokeRoot -Recurse -Force
         }
     }

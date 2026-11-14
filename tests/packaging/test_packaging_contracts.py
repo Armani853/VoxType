@@ -62,6 +62,10 @@ def test_installer_build_cleans_smokes_and_publishes_checksum() -> None:
     assert "Installer smoke would overwrite an existing VoxType uninstall entry" in script
     assert "[Threading.Mutex]::TryOpenExisting" in script
     assert script.index("Installer smoke would overwrite") < script.index("build_portable.ps1")
+    assert script.index("Installer smoke directory already exists") < script.index(
+        "build_portable.ps1"
+    )
+    assert "if ($SmokeUninstalled -and (Test-Path -LiteralPath $SmokeRoot))" in script
     # Only a smoke-tested installer should be published as a release artifact.
     assert script.index("Smoke-installing") < script.index("Publishing installer release artifact")
 
