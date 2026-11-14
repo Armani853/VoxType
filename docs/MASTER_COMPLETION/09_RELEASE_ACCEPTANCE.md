@@ -1,5 +1,11 @@
 # Release acceptance state
 
+## Candidate `53ed6bb`, 2026-11-15 — NOT READY
+
+Portable source commit `53ed6bbdc9e0f24033717f7e8842e8bc8dd8f8e4` matches `dist/VoxType/build-commit.txt`. `scripts/lint.ps1` passed; `scripts/test.ps1` passed **280 tests, 5 deselected**. One Nuitka build completed in **520.095 s**; packaged self/inference/UI smoke completed in **31.477 s**; ZIP took **26.482 s**. `dist/VoxType/VoxType.exe` SHA-256 `B61D08538F40409E60B529AAF9C29B83488D77DBA14A37A40445369758C277BE`; `release/VoxType-0.2.4-53ed6bb-win64-portable.zip` SHA-256 `C52ADD3D1D01978316DDFD6D78282D963128FC24A9F3625E675466DC908CFDA4`.
+
+Inno compilation succeeded in **96.999 s**, producing `release/VoxType-0.2.4-53ed6bb-win64-setup.exe`, SHA-256 `40FD0D9D564404660201585B8AA83834501D5FE8ED24AC6612D3CDE21EF7E0C7`. Installer smoke was explicitly skipped: the host already has a VoxType uninstall registry entry for the same production AppId, and an older VoxType test process is running. The installer, installed EXE, end-to-end RU/EN capture and insertion, hotkeys, uninstall, and customer journey are **not verified** for this candidate. The Inno compiler reports **“Non-commercial use only”**; commercial licensing must be resolved before sale. No commercial release approval or valuation follows from this build.
+
 ## Candidate `e7726e0`, 2026-11-07
 
 Application source/packaging commit `e7726e0`, clean at build start. Ruff/mypy passed; **268 tests passed, 5 deselected**. One full Nuitka + Inno build completed; packaged self-test, inference smoke, visible UI smoke, isolated installer install/self-test/uninstall succeeded. Portable EXE SHA-256 `29EA16F79762272684FFDB8721E9298ADFF9474195A88480A14165B136C1EB34`; portable ZIP SHA-256 `DDF115657DAE67B6C7CABECCBB6ADFE788E8379DE6A34C8A161DE0FCE5CF5F36`; installer SHA-256 `3311FF9E661F5F1FEF9F452924F233A2C892A31F3DCBD72A5299EDCC0DC3FCCB`. Names include `e7726e0` and old release files were preserved.
