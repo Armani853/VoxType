@@ -608,9 +608,7 @@ class DesktopApplication:
         if failures:
             if strict:
                 self.hotkeys.unregister_all()
-            self.tray.show_message(
-                "Горячая клавиша недоступна", "; ".join(failures), critical=True
-            )
+            self.tray.show_message("Горячая клавиша недоступна", "; ".join(failures), critical=True)
             return False
         return True
 
