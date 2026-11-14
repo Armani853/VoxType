@@ -38,6 +38,7 @@ def test_portable_build_is_checked_safe_standalone_and_smoke_tested() -> None:
         script,
     )
     assert "Get-FileHash -Algorithm SHA256" in script
+    assert "build-commit.txt" in script
     assert "Compress-Archive" in script and "-ErrorAction Stop" in script
     assert '"VoxType-0.2.4-$BuildCommit-win64-portable.zip"' in script
     assert "Release artifact for commit" in script
@@ -57,6 +58,8 @@ def test_installer_build_cleans_smokes_and_publishes_checksum() -> None:
     assert "Join-Path $RepoRoot 'release'" in script
     assert '"VoxType-0.2.4-$BuildCommit-win64-setup.exe"' in script
     assert '"/DBuildCommit=$BuildCommit"' in script
+    assert "Portable build belongs to" in script
+    assert "Matching portable archive and checksum are required" in script
     # Inno's AppId is global to the user, even with /DIR set to a test path.
     # Refuse host smoke tests before running the expensive portable build.
     assert "Installer smoke would overwrite an existing VoxType uninstall entry" in script

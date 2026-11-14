@@ -89,6 +89,42 @@ def test_idle_snapshot_does_not_construct_overlay() -> None:
     app.tray.update_snapshot.assert_called_once()
 
 
+def test_startup_hotkey_conflict_keeps_other_hotkeys_registered() -> None:
+    app = object.__new__(DesktopApplication)
+    app.runtime = SimpleNamespace(settings=AppSettings())
+    app.controller = MagicMock()
+    app.hotkeys = MagicMock()
+    app.tray = MagicMock()
+
+    def register(hotkey, _callback) -> None:  # type: ignore[no-untyped-def]
+        if hotkey.identifier == 2:
+            raise RuntimeError("combination is occupied")
+
+    app.hotkeys.register.side_effect = register
+
+    assert not app._configure_hotkeys(strict=False)
+    assert [call.args[0].identifier for call in app.hotkeys.register.call_args_list] == [
+        1,
+        2,
+        3,
+    ]
+    app.hotkeys.unregister_all.assert_called_once()
+    app.tray.show_message.assert_called_once()
+
+
+def test_settings_hotkey_conflict_rolls_back_partial_registration() -> None:
+    app = object.__new__(DesktopApplication)
+    app.runtime = SimpleNamespace(settings=AppSettings())
+    app.controller = MagicMock()
+    app.hotkeys = MagicMock()
+    app.tray = MagicMock()
+    app.hotkeys.register.side_effect = [None, RuntimeError("combination is occupied")]
+
+    assert not app._configure_hotkeys()
+    assert app.hotkeys.register.call_count == 2
+    assert app.hotkeys.unregister_all.call_count == 2
+
+
 def test_completed_session_retries_retained_text_without_blocking_ui(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     app = object.__new__(DesktopApplication)
     app.controller = MagicMock()

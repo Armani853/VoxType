@@ -33,6 +33,10 @@ $BuildCommit = (& git rev-parse --short HEAD).Trim()
 if ($LASTEXITCODE -ne 0 -or $BuildCommit -notmatch '^[0-9a-f]+$') {
     throw 'Cannot determine build commit for release artifact identity'
 }
+$BuildCommitFull = (& git rev-parse HEAD).Trim()
+if ($LASTEXITCODE -ne 0 -or $BuildCommitFull -notmatch '^[0-9a-f]{40}$') {
+    throw 'Cannot determine full source commit for portable provenance'
+}
 $ArchiveName = "VoxType-0.2.4-$BuildCommit-win64-portable.zip"
 $Archive = Join-Path $ReleaseRoot $ArchiveName
 $Checksum = "$Archive.sha256"
@@ -138,6 +142,7 @@ $PackagedSmokeStopwatch.Stop()
 Write-Host ("[build] Packaged self/inference/UI smoke: {0:N3} s" -f $PackagedSmokeStopwatch.Elapsed.TotalSeconds)
 
 Write-Host '[6/6] Creating ZIP and SHA-256 checksum'
+Set-Content -LiteralPath (Join-Path $PortableRoot 'build-commit.txt') -Encoding ascii -NoNewline -Value $BuildCommitFull
 $ZipStopwatch = [Diagnostics.Stopwatch]::StartNew()
 for ($Attempt = 1; $Attempt -le 5; $Attempt++) {
     try {

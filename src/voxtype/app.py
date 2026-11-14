@@ -211,7 +211,7 @@ class DesktopApplication:
         if runtime.settings.general.start_with_windows:
             runtime.startup.enable()
         self._connect()
-        self._configure_hotkeys()
+        self._configure_hotkeys(strict=False)
         stage("signals_and_hotkeys_connected")
         self.application.installNativeEventFilter(self.hotkey_filter)
         apply_theme(application, ThemeMode(runtime.settings.general.theme))
@@ -571,7 +571,7 @@ class DesktopApplication:
             self._resume_after_suspend = False
             self.controller.toggle_pause()
 
-    def _configure_hotkeys(self) -> bool:
+    def _configure_hotkeys(self, *, strict: bool = True) -> bool:
         self.hotkeys.unregister_all()
         definitions: tuple[tuple[str, int, str, Any], ...] = (
             (
@@ -588,8 +588,9 @@ class DesktopApplication:
             ),
             (self.runtime.settings.hotkeys.pause, 3, "toggle_pause", self.controller.toggle_pause),
         )
-        try:
-            for specification, identifier, name, callback in definitions:
+        failures: list[str] = []
+        for specification, identifier, name, callback in definitions:
+            try:
                 hotkey = parse_hotkey(specification, identifier=identifier, name=name)
 
                 def invoke(
@@ -600,9 +601,16 @@ class DesktopApplication:
                     self._invoke_ui(f"hotkey.{handler_name}", fn)
 
                 self.hotkeys.register(hotkey, invoke)
-        except (ValueError, OSError, RuntimeError) as exc:
-            self.hotkeys.unregister_all()
-            self.tray.show_message("Горячая клавиша недоступна", str(exc), critical=True)
+            except (ValueError, OSError, RuntimeError) as exc:
+                failures.append(f"{name}: {exc}")
+                if strict:
+                    break
+        if failures:
+            if strict:
+                self.hotkeys.unregister_all()
+            self.tray.show_message(
+                "Горячая клавиша недоступна", "; ".join(failures), critical=True
+            )
             return False
         return True
 
@@ -724,7 +732,7 @@ class DesktopApplication:
                 self._configure_capture_factory()
             if vad_changed:
                 self._configure_segmenter_factory()
-            self._configure_hotkeys()
+            self._configure_hotkeys(strict=False)
             self.settings_window.set_diagnostics_status(
                 "Настройки не сохранены: одна из горячих клавиш занята", False
             )

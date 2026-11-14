@@ -44,6 +44,19 @@ if (-not $SkipPortableBuild -or -not (Test-Path -LiteralPath $PortableExe)) {
     & (Join-Path $PSScriptRoot 'build_portable.ps1') -SkipChecks:$SkipChecks
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }
+$PortableCommitFile = Join-Path $RepoRoot 'dist\VoxType\build-commit.txt'
+$ExpectedFullCommit = (& git rev-parse HEAD).Trim()
+if (-not (Test-Path -LiteralPath $PortableCommitFile)) {
+    throw "Portable build provenance is missing: $PortableCommitFile"
+}
+$PortableCommit = (Get-Content -LiteralPath $PortableCommitFile -Raw).Trim()
+if ($PortableCommit -ne $ExpectedFullCommit) {
+    throw "Portable build belongs to $PortableCommit, not current commit $ExpectedFullCommit"
+}
+$ExpectedPortableArchive = Join-Path $ReleaseRoot "VoxType-0.2.4-$BuildCommit-win64-portable.zip"
+if (-not (Test-Path -LiteralPath $ExpectedPortableArchive) -or -not (Test-Path -LiteralPath "$ExpectedPortableArchive.sha256")) {
+    throw "Matching portable archive and checksum are required: $ExpectedPortableArchive"
+}
 
 $Candidates = @(
     (Get-Command iscc.exe -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -ErrorAction SilentlyContinue),
