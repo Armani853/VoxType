@@ -126,7 +126,7 @@ def test_history_and_settings_open_latency_p95(
     assert settings_p95 < 300
 
 
-def test_ui_heartbeat_and_one_hundred_window_cycles_do_not_leak_resources(
+def test_ui_heartbeat_and_repeated_window_cycles_do_not_leak_resources(
     qtbot,  # type: ignore[no-untyped-def]
 ) -> None:
     history = HistoryWindow()
@@ -153,9 +153,10 @@ def test_ui_heartbeat_and_one_hundred_window_cycles_do_not_leak_resources(
     midpoint_rss = initial_rss
     midpoint_threads = initial_threads
     midpoint_handles = initial_handles
+    warm_handles = initial_handles
 
     def cycle() -> None:
-        nonlocal cycles, last_tick, midpoint_rss, midpoint_threads, midpoint_handles
+        nonlocal cycles, last_tick, midpoint_rss, midpoint_threads, midpoint_handles, warm_handles
         now = time.perf_counter()
         ticks.append((now - last_tick) * 1000)
         last_tick = now
@@ -164,10 +165,12 @@ def test_ui_heartbeat_and_one_hundred_window_cycles_do_not_leak_resources(
         selected.hide()
         cycles += 1
         if cycles == 100:
+            warm_handles = process.num_handles()
+        if cycles == 200:
             midpoint_rss = process.memory_info().rss
             midpoint_threads = process.num_threads()
             midpoint_handles = process.num_handles()
-        if cycles >= 200:
+        if cycles >= 300:
             timer.stop()
             loop.quit()
 
@@ -183,9 +186,9 @@ def test_ui_heartbeat_and_one_hundred_window_cycles_do_not_leak_resources(
         f"UI_CYCLES cycles={cycles} max_stall_ms={max_stall_ms:.3f} "
         f"rss={initial_rss}->{midpoint_rss}->{final_rss} "
         f"threads={initial_threads}->{midpoint_threads}->{final_threads} "
-        f"handles={initial_handles}->{midpoint_handles}->{final_handles}"
+        f"handles={initial_handles}->{warm_handles}->{midpoint_handles}->{final_handles}"
     )
-    assert cycles == 200
+    assert cycles == 300
     assert max_stall_ms < 500
     assert final_threads <= midpoint_threads
     assert final_handles <= midpoint_handles + 1
