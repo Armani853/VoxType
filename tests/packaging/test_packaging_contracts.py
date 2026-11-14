@@ -57,6 +57,13 @@ def test_installer_build_cleans_smokes_and_publishes_checksum() -> None:
     assert "Join-Path $RepoRoot 'release'" in script
     assert '"VoxType-0.2.4-$BuildCommit-win64-setup.exe"' in script
     assert '"/DBuildCommit=$BuildCommit"' in script
+    # Inno's AppId is global to the user, even with /DIR set to a test path.
+    # Refuse host smoke tests before running the expensive portable build.
+    assert "Installer smoke would overwrite an existing VoxType uninstall entry" in script
+    assert "[Threading.Mutex]::TryOpenExisting" in script
+    assert script.index("Installer smoke would overwrite") < script.index("build_portable.ps1")
+    # Only a smoke-tested installer should be published as a release artifact.
+    assert script.index("Smoke-installing") < script.index("Publishing installer release artifact")
 
 
 def test_inno_manifest_is_per_user_unsigned_and_not_admin() -> None:

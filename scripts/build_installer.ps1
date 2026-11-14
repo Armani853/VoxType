@@ -8,6 +8,25 @@ param(
 $ErrorActionPreference = 'Stop'
 $RepoRoot = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
 $ReleaseRoot = Join-Path $RepoRoot 'release'
+$InstallerAppId = '{5A4A7C70-50ED-4F41-90A6-48C69682B1A7}_is1'
+$InstallerMutex = 'Local\VoxType.Desktop.Singleton.v1'
+
+# Inno Setup records uninstall information by AppId, even when /DIR points at a
+# temporary folder. A smoke install on the host could replace the user's
+# existing uninstall entry. Reject it before any expensive build work begins.
+if (-not $SkipInstallerSmoke) {
+    foreach ($Hive in @('HKCU:', 'HKLM:')) {
+        $UninstallKey = Join-Path $Hive "Software\Microsoft\Windows\CurrentVersion\Uninstall\$InstallerAppId"
+        if (Test-Path -LiteralPath $UninstallKey) {
+            throw "Installer smoke would overwrite an existing VoxType uninstall entry: $UninstallKey. Use an isolated Windows test environment."
+        }
+    }
+    $ExistingMutex = $null
+    if ([Threading.Mutex]::TryOpenExisting($InstallerMutex, [ref]$ExistingMutex)) {
+        $ExistingMutex.Dispose()
+        throw "Installer smoke cannot run while VoxType is active ($InstallerMutex). Use an isolated Windows test environment."
+    }
+}
 $BuildCommit = (& git rev-parse --short HEAD).Trim()
 if ($LASTEXITCODE -ne 0 -or $BuildCommit -notmatch '^[0-9a-f]+$') {
     throw 'Cannot determine build commit for installer identity'
@@ -55,17 +74,12 @@ $Installer = Get-ChildItem -LiteralPath $Output -Filter '*.exe' | Select-Object 
 if ($null -eq $Installer) { throw 'Installer executable was not produced' }
 if ($Installer.Length -eq 0) { throw 'Installer executable is empty' }
 
-Write-Host '[installer 2/4] Publishing installer release artifact'
-New-Item -ItemType Directory -Path $ReleaseRoot -Force | Out-Null
-$ReleaseInstaller = Join-Path $ReleaseRoot $Installer.Name
-Copy-Item -LiteralPath $Installer.FullName -Destination $ReleaseInstaller -Force
-
 if (-not $SkipInstallerSmoke) {
-    Write-Host '[installer 3/4] Smoke-installing without administrator privileges'
+    Write-Host '[installer 2/4] Smoke-installing without administrator privileges'
     $InstallSmokeStopwatch = [Diagnostics.Stopwatch]::StartNew()
     New-Item -ItemType Directory -Path $SmokeRoot -Force | Out-Null
     try {
-        $Install = Start-Process -FilePath $ReleaseInstaller -ArgumentList @(
+        $Install = Start-Process -FilePath $Installer.FullName -ArgumentList @(
             '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/CURRENTUSER', '/NOICONS', "/DIR=$SmokeRoot"
         ) -Wait -PassThru -WindowStyle Hidden
         if ($Install.ExitCode -ne 0) { throw "Installer smoke install failed with exit code $($Install.ExitCode)" }
@@ -87,8 +101,13 @@ if (-not $SkipInstallerSmoke) {
     Write-Host ("[build] Installer install/self-test/uninstall smoke: {0:N3} s" -f $InstallSmokeStopwatch.Elapsed.TotalSeconds)
 }
 else {
-    Write-Host '[installer 3/4] Installer smoke-test explicitly skipped'
+    Write-Host '[installer 2/4] Installer smoke-test explicitly skipped'
 }
+
+Write-Host '[installer 3/4] Publishing installer release artifact'
+New-Item -ItemType Directory -Path $ReleaseRoot -Force | Out-Null
+$ReleaseInstaller = Join-Path $ReleaseRoot $Installer.Name
+Copy-Item -LiteralPath $Installer.FullName -Destination $ReleaseInstaller
 
 Write-Host '[installer 4/4] Creating SHA-256 checksum'
 $Hash = Get-FileHash -Algorithm SHA256 -LiteralPath $ReleaseInstaller
