@@ -237,6 +237,11 @@ if PYSIDE6_AVAILABLE:
             state = snapshot_from(snapshot)
             self._state = state
             text, color_role = _OVERLAY_STATES[state.state]
+            if (
+                state.state is AppStatus.COMPLETED
+                and state.delivery_status == "queued_target_inactive"
+            ):
+                text, color_role = "Ожидает вставки", "warning"
             self.status_label.setText(text)
             self.status_dot.set_color(OVERLAY_PALETTE[color_role])
             self.language_label.setText(state.language.value.upper())
@@ -244,9 +249,12 @@ if PYSIDE6_AVAILABLE:
             self.audio_meter.set_level(rms_to_meter(state.input_rms), state.clipping_percentage)
             self.processing_label.setText(self._processing_text(state))
             self.processing_label.setToolTip(
-                "Автоматическая вставка не выполнена; полный текст сохранён."
+                "Вернитесь в целевое окно — сохранённый текст вставится автоматически."
                 if state.state is AppStatus.COMPLETED
-                and state.delivery_status in {"failed", "queued_target_inactive", "unknown"}
+                and state.delivery_status == "queued_target_inactive"
+                else "Автоматическая вставка не выполнена; полный текст сохранён."
+                if state.state is AppStatus.COMPLETED
+                and state.delivery_status in {"failed", "unknown"}
                 else ""
             )
             transcript = (
@@ -292,7 +300,9 @@ if PYSIDE6_AVAILABLE:
             if state.state is AppStatus.COMPLETED:
                 if state.delivery_status == "delivered":
                     return "Текст вставлен"
-                if state.delivery_status in {"failed", "queued_target_inactive", "unknown"}:
+                if state.delivery_status == "queued_target_inactive":
+                    return "Вернитесь в целевое окно"
+                if state.delivery_status in {"failed", "unknown"}:
                     return "Текст сохранён"
                 return "Полный текст сохранён"
             if state.queued_audio_seconds >= 10:

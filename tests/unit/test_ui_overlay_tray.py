@@ -104,14 +104,14 @@ def test_completed_overlay_persists_full_result_and_exposes_actions(qtbot) -> No
     )
     overlay.show_without_activating()
     qtbot.waitUntil(overlay.isVisible)
-    assert overlay.status_label.text() == "Готово"
+    assert overlay.status_label.text() == "Ожидает вставки"
     assert overlay.result_text.toPlainText() == "полный подтверждённый результат"
     assert overlay.result_buttons.isVisible()
     assert overlay.copy_all_button.isEnabled()
     assert overlay.copy_all_button.property("primary") is True
     assert overlay.insert_button.isEnabled()
     assert overlay.result_text.minimumHeight() >= 110
-    assert overlay.processing_label.text() == "Текст сохранён"
+    assert overlay.processing_label.text() == "Вернитесь в целевое окно"
     assert not overlay.pause_button.isVisible()
     assert not overlay.stop_button.isVisible()
 

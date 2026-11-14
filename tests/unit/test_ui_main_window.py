@@ -147,6 +147,21 @@ def test_main_window_completed_state_shows_full_transcript_and_new_start(qtbot) 
     assert window.dictation_button.isEnabled()
 
 
+def test_completed_text_waiting_for_target_has_clear_recovery_instruction(qtbot) -> None:  # type: ignore[no-untyped-def]
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.update_snapshot(
+        UIState(
+            state=AppStatus.COMPLETED,
+            full_transcript="сохранённый текст",
+            status_message="Готово",
+            delivery_status="queued_target_inactive",
+        )
+    )
+    assert window.status_label.text() == "Ожидает вставки"
+    assert "Вернитесь в целевое окно" in window.status_detail_label.text()
+
+
 def test_missing_model_is_not_presented_as_ready_and_opens_setup(qtbot) -> None:  # type: ignore[no-untyped-def]
     window = MainWindow()
     qtbot.addWidget(window)

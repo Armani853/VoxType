@@ -364,13 +364,29 @@ if PYSIDE6_AVAILABLE:
                 AppStatus.IDLE,
                 AppStatus.COMPLETED,
             }
-            self.status_dot.set_color(state_color("warning" if needs_model else color_role))
+            awaiting_target = (
+                state.state is AppStatus.COMPLETED
+                and state.delivery_status == "queued_target_inactive"
+            )
+            self.status_dot.set_color(
+                state_color("warning" if needs_model or awaiting_target else color_role)
+            )
             self.status_label.setText(
                 ("Требуется модель" if self._interface_language == "ru" else "Model required")
                 if needs_model
+                else (
+                    "Ожидает вставки" if self._interface_language == "ru" else "Waiting to insert"
+                )
+                if awaiting_target
                 else ui_text(key, self._interface_language)
             )
             detail = state.error_message or state.status_message
+            if awaiting_target and not state.error_message:
+                detail = (
+                    "Вернитесь в целевое окно — сохранённый текст вставится автоматически"
+                    if self._interface_language == "ru"
+                    else "Return to the target window to insert the saved text automatically"
+                )
             if not detail:
                 detail = self._default_status_detail(state)
             self.status_detail_label.setText(detail)
