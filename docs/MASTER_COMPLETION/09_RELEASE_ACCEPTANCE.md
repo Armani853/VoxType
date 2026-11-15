@@ -1,5 +1,11 @@
 # Release acceptance state
 
+## Candidate `8681888`, 2026-11-15 — INSTALLED, NOT COMMERCIALLY APPROVED
+
+Source commit `868188869a2ec95f7611a292c456f406d7fa1ef7` includes the Nuitka autostart fix. Ruff/mypy and `scripts/test.ps1` passed (281 passed, 5 deselected). One Nuitka build: 505.085 s; packaged self/inference/UI smoke: 31.417 s; ZIP: 26.839 s; Inno compile: 100.811 s. Installed program EXE SHA-256 `7E6488B6E74A50557437D79488EEB9BBAD2772A826B1E83217B41CA9F61850A2`; portable ZIP `8DF50171E6191153B491B0B4192A15C99147D241F3C7BC00CE5E777A7EE3FB4A`; installer `6BFCC7BC883A659D22358C38FC11BE52384302BB55BF570E4E4C3A2A2492365B`.
+
+The installer upgraded the working per-user program in `C:\Users\Алла\AppData\Local\Programs\VoxType` (exit 0); installed `--ui-smoke-test` returned 0. In a separate isolated profile with autostart enabled, the packaged binary registered its own `VoxType.exe`, not `python.exe -m voxtype`. After the real-profile launch (PID 27244), HKCU Run still pointed to the installed `VoxType.exe`; settings retained `start_with_windows=true` and the SQLite file remained present. The working installer upgrade was authorized by the user's explicit update request. **Not tested:** real hotkey press, RU/EN capture and insertion, complete GUI/customer journey, installer uninstall of this working copy. Inno still reports “Non-commercial use only”; resolve licensing before sale. No 100% or production approval is claimed.
+
 ## Candidate `53ed6bb`, 2026-11-15 — NOT READY
 
 Computer Use acceptance was stopped at the user's request on 2026-11-15 before old test uninstall or new installer test. The old test process and registration remain. Do not infer installed-EXE acceptance from the packaged smoke.
