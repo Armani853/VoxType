@@ -1,3 +1,5 @@
+import sys
+
 from voxtype.windows.startup import (
     DEFAULT_STARTUP_ENABLED,
     MemoryStartupRegistryBackend,
@@ -46,3 +48,16 @@ def test_windows_command_line_quoting_handles_spaces_and_arguments() -> None:
         ("--profile", "balanced cpu"),
     )
     assert command == '"C:\\Program Files\\VoxType\\VoxType.exe" --profile "balanced cpu"'
+
+
+def test_nuitka_standalone_registers_voxtype_exe_not_embedded_python(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    app = tmp_path / "VoxType.exe"
+    app.touch()
+    (tmp_path / "voxtype").mkdir()
+    monkeypatch.setattr(sys, "executable", str(tmp_path / "python.exe"))
+    monkeypatch.setattr(sys, "argv", [str(app)])
+
+    manager = StartupManager(backend=MemoryStartupRegistryBackend())
+
+    assert manager.command == str(app)
+    assert "-m voxtype" not in manager.command

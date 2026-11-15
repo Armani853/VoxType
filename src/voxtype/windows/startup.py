@@ -114,7 +114,20 @@ class StartupManager:
         selected_arguments = tuple(str(argument) for argument in arguments)
         if executable is None:
             selected_executable = Path(sys.executable)
-            if not getattr(sys, "frozen", False):
+            invoked = Path(sys.argv[0]).resolve() if sys.argv else None
+            packaged = (
+                invoked
+                if invoked is not None
+                and invoked.name.casefold() == "voxtype.exe"
+                and invoked.is_file()
+                else selected_executable.with_name("VoxType.exe")
+            )
+            if packaged.is_file() and (packaged.parent / "voxtype").is_dir():
+                # Nuitka standalone does not set sys.frozen and may expose its
+                # bundled python.exe as sys.executable. Register the app entry
+                # point, never "python.exe -m voxtype", for Windows logon.
+                selected_executable = packaged
+            elif not getattr(sys, "frozen", False):
                 pythonw = selected_executable.with_name("pythonw.exe")
                 if pythonw.exists():
                     selected_executable = pythonw
