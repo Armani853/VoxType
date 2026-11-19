@@ -528,7 +528,7 @@ class DesktopApplication:
         now = time.monotonic()
         if (
             snapshot.state in {"PAUSED_TARGET_LOST", "COMPLETED"}
-            and snapshot.delivery_status != "copy_required"
+            and snapshot.delivery_status not in {"copy_required", "no_result"}
             and self.controller.injection_service.pending_fragments
             and now - self._last_pending_flush >= 0.5
             and not self._pending_flush_running

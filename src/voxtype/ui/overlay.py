@@ -242,6 +242,8 @@ if PYSIDE6_AVAILABLE:
                 and state.delivery_status == "queued_target_inactive"
             ):
                 text, color_role = "Ожидает вставки", "warning"
+            elif state.state is AppStatus.COMPLETED and state.delivery_status == "no_result":
+                text, color_role = "Нет результата", "warning"
             self.status_label.setText(text)
             self.status_dot.set_color(OVERLAY_PALETTE[color_role])
             self.language_label.setText(state.language.value.upper())
@@ -280,6 +282,7 @@ if PYSIDE6_AVAILABLE:
             self.pause_button.setVisible(not completed)
             self.stop_button.setVisible(not completed)
             self.result_buttons.setVisible(completed)
+            self.copy_all_button.setEnabled(bool(transcript))
             self.insert_button.setEnabled(
                 state.delivery_status in {"failed", "queued_target_inactive"}
             )
@@ -301,6 +304,8 @@ if PYSIDE6_AVAILABLE:
             if state.error_message:
                 return state.error_message
             if state.state is AppStatus.COMPLETED:
+                if state.delivery_status == "no_result":
+                    return state.status_message
                 if state.delivery_status == "delivered":
                     return "Текст вставлен"
                 if state.delivery_status == "queued_target_inactive":

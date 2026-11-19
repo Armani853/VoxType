@@ -10,6 +10,7 @@ import argparse
 import json
 import os
 import shutil
+import sys
 import time
 import wave
 from pathlib import Path
@@ -84,15 +85,33 @@ def main() -> int:
                 _wait_for_state(controller, "LISTENING", 30)
                 listening = time.monotonic()
                 backlog = 0.0
+                input_rms = 0.0
+                output_underflows = 0
                 with sd.OutputStream(
                     samplerate=48_000, channels=2, dtype="float32", device=args.output_device
                 ) as output:
                     for offset in range(0, len(stereo), 24_000):
-                        output.write(stereo[offset : offset + 24_000])
-                        backlog = max(backlog, controller.snapshot().queued_audio_seconds)
+                        output_underflows += int(output.write(stereo[offset : offset + 24_000]))
+                        snapshot = controller.snapshot()
+                        backlog = max(backlog, snapshot.queued_audio_seconds)
+                        input_rms = max(input_rms, snapshot.input_rms)
                 end = time.monotonic()
                 controller.stop_dictation()
-                _wait_for_state(controller, "COMPLETED", 60)
+                try:
+                    _wait_for_state(controller, "COMPLETED", 60)
+                except (TimeoutError, RuntimeError) as exc:
+                    results.append(
+                        {
+                            "id": case,
+                            "status": "incomplete",
+                            "reason": str(exc),
+                            "peak_sampled_backlog_seconds": backlog,
+                            "peak_sampled_input_rms": input_rms,
+                            "output_underflows": output_underflows,
+                        }
+                    )
+                    _write_results(args.profile, results)
+                    raise
                 transcript = controller.snapshot().full_transcript
                 metrics = _score(references[case], transcript)
                 metrics["wer"] = metrics.pop("pseudo_wer")
@@ -103,21 +122,36 @@ def main() -> int:
                         "start_to_listening_seconds": listening - start,
                         "playback_end_to_completed_seconds": time.monotonic() - end,
                         "peak_sampled_backlog_seconds": backlog,
+                        "peak_sampled_input_rms": input_rms,
+                        "output_underflows": output_underflows,
                         "peak_sampled_rss_bytes": max(sampler.rss_samples),
                         "peak_sampled_process_cpu_percent": max(sampler.cpu_samples, default=0.0),
                         "metrics": metrics,
                     }
                 )
-                (args.profile / "capture-results.json").write_text(
-                    json.dumps(results, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-                )
+                _write_results(args.profile, results)
                 print(f"{case} completed, WER={metrics['wer']:.1%}", flush=True)
             finally:
                 sampler.stop()
     finally:
+        pending_error = sys.exc_info()[0] is not None
         if not runtime.close():
-            raise RuntimeError("Capture test runtime did not shut down cleanly")
-    return int(any(not result["metrics"]["hypothesis_words"] for result in results))
+            message = "Capture test runtime did not shut down cleanly"
+            if not pending_error:
+                raise RuntimeError(message)
+            print(message, file=sys.stderr)
+    return int(
+        any(
+            not result["metrics"]["hypothesis_words"] or result["output_underflows"]
+            for result in results
+        )
+    )
+
+
+def _write_results(profile: Path, results: list[dict[str, object]]) -> None:
+    (profile / "capture-results.json").write_text(
+        json.dumps(results, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
 
 
 def _wait_for_state(controller: ApplicationController, expected: str, seconds: float) -> None:

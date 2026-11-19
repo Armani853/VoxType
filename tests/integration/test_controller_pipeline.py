@@ -820,6 +820,9 @@ def test_long_silence_does_not_exhaust_durable_inflight_leases(
 
     expected_samples = LongSilenceCapture.chunk_count * LongSilenceCapture.chunk_samples
     assert detector.samples_seen == expected_samples
+    snapshot = controller.snapshot()
+    assert snapshot.delivery_status == "no_result"
+    assert "Речь не распознана" in snapshot.status_message
     assert session_repository.recent()[0].dropped_frames == 0
     assert not any((tmp_path / "spool").rglob("*.vtxpcm"))
     controller.shutdown()

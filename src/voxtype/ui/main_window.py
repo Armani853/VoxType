@@ -368,18 +368,21 @@ if PYSIDE6_AVAILABLE:
                 state.state is AppStatus.COMPLETED
                 and state.delivery_status == "queued_target_inactive"
             )
+            no_result = state.state is AppStatus.COMPLETED and state.delivery_status == "no_result"
             self.status_dot.set_color(
-                state_color("warning" if needs_model or awaiting_target else color_role)
-            )
-            self.status_label.setText(
-                ("Требуется модель" if self._interface_language == "ru" else "Model required")
-                if needs_model
-                else (
-                    "Ожидает вставки" if self._interface_language == "ru" else "Waiting to insert"
+                state_color(
+                    "warning" if needs_model or awaiting_target or no_result else color_role
                 )
-                if awaiting_target
-                else ui_text(key, self._interface_language)
             )
+            status_text = ui_text(key, self._interface_language)
+            is_ru = self._interface_language == "ru"
+            if needs_model:
+                status_text = "Требуется модель" if is_ru else "Model required"
+            elif awaiting_target:
+                status_text = "Ожидает вставки" if is_ru else "Waiting to insert"
+            elif no_result:
+                status_text = "Нет результата" if is_ru else "No result"
+            self.status_label.setText(status_text)
             detail = state.error_message or state.status_message
             if awaiting_target and not state.error_message:
                 detail = (

@@ -1349,6 +1349,14 @@ class ApplicationController:
             self.target_manager.end_session()
         if audio_archive is not None:
             audio_archive.close()
+        no_result = status == "completed" and not completed_text.strip()
+        capture_empty = stats is not None and stats.processed_audio_seconds == 0
+        if no_result:
+            self.logger.info(
+                "dictation_no_result captured_frames=%s processed_seconds=%s",
+                stats.captured_frames if stats is not None else None,
+                stats.processed_audio_seconds if stats is not None else None,
+            )
         if spool is not None:
             spool.close()
             if spool.count == 0 and spool.directory.exists():
@@ -1372,7 +1380,14 @@ class ApplicationController:
             self._pipeline_thread = None
             self._pending_delivery_thread = None
             self._status_message = "Готово" if status == "completed" else self._status_message
-            if not self.settings.dictation.auto_insert:
+            if no_result:
+                self._delivery_status = "no_result"
+                self._status_message = (
+                    "Звук не поступил. Проверьте выбранный микрофон и разрешения Windows."
+                    if capture_empty
+                    else "Речь не распознана. Проверьте уровень микрофона и повторите диктовку."
+                )
+            elif not self.settings.dictation.auto_insert:
                 self._delivery_status = "pending"
             elif self._delivery_status != "failed":
                 self._delivery_status = (
