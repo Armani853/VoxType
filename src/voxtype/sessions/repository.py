@@ -86,6 +86,8 @@ class SessionRepository:
                     payload_json TEXT NOT NULL,
                     UNIQUE(session_id, sequence)
                 );
+                CREATE INDEX IF NOT EXISTS idx_sessions_started_at
+                    ON sessions(started_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_sessions_unfinished
                     ON sessions(finished_at, status);
                 """

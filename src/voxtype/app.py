@@ -25,6 +25,7 @@ from PySide6.QtCore import (
     QObject,
     QSettings,
     QTimer,
+    Qt,
     Signal,
 )
 from PySide6.QtWidgets import QApplication, QFileDialog
@@ -88,6 +89,7 @@ class _WorkerSignals(QObject):
     settings_status = Signal(str, object)
     audio_level = Signal(float, float, str)
     recovery_ready = Signal(str, bool, str)
+    history_ready = Signal(int, object)
     pending_flush_ready = Signal()
     hardware_ready = Signal(str, str)
     devices_ready = Signal(object)
@@ -197,6 +199,8 @@ class DesktopApplication:
         self._last_pending_flush = 0.0
         self._last_resource_sample = 0.0
         self._pending_flush_running = False
+        self._history_revision = 0
+        self._history_loading = False
         self._closed = False
         self._closing = False
         self._heartbeat_last = time.monotonic()
@@ -304,6 +308,9 @@ class DesktopApplication:
         self.signals.diagnostics_ready.connect(self._on_diagnostics_ready)
         self.signals.audio_level.connect(self._on_audio_level)
         self.signals.recovery_ready.connect(self._on_recovery_ready)
+        self.signals.history_ready.connect(
+            self._on_history_ready, Qt.ConnectionType.QueuedConnection
+        )
         self.signals.pending_flush_ready.connect(self._on_pending_flush_ready)
         self.signals.hardware_ready.connect(self._on_hardware_ready)
         self.signals.devices_ready.connect(self._on_devices_ready)
@@ -620,12 +627,17 @@ class DesktopApplication:
         return True
 
     def show_settings(self) -> None:
-        self.settings_window.set_values(self.runtime.settings)
+        window = self.settings_window
+        if window.isVisible():
+            window.raise_()
+            window.activateWindow()
+            return
+        window.set_values(self.runtime.settings)
         devices = [(f"{item.name} ({item.host_api})", item.index) for item in self.runtime.devices]
-        self.settings_window.set_audio_devices(devices, self.runtime.settings.audio.device_id)
+        window.set_audio_devices(devices, self.runtime.settings.audio.device_id)
         self._set_model_choices(set())
-        self.settings_window.show()
-        self.settings_window.raise_()
+        window.show()
+        window.raise_()
         self._run_background("voxtype-settings-devices", self._scan_settings_devices)
         self._run_background("voxtype-settings-models", self._scan_settings_models)
 
@@ -813,12 +825,46 @@ class DesktopApplication:
         self.controller.segmenter_factory = factory
 
     def show_history(self) -> None:
-        self._refresh_history()
         self.history_window.show()
         self.history_window.raise_()
+        self._refresh_history()
 
     def _refresh_history(self) -> None:
-        self.history_window.set_sessions(list(self.runtime.session_repository.recent(250)))
+        if self._closing or self._closed:
+            return
+        self._history_revision += 1
+        if not self._history_loading:
+            self._start_history_load()
+
+    def _start_history_load(self) -> None:
+        revision = self._history_revision
+        self._history_loading = True
+        self.history_window.set_loading(True)
+
+        def read_history() -> None:
+            try:
+                sessions = list(self.runtime.session_repository.recent(250))
+            except Exception:
+                _LOGGER.exception("history_load_failed")
+                self.signals.history_ready.emit(revision, None)
+            else:
+                self.signals.history_ready.emit(revision, sessions)
+
+        self._run_background("voxtype-history-load", read_history)
+
+    def _on_history_ready(self, revision: int, sessions: list[object] | None) -> None:
+        self._history_loading = False
+        if self._closing or self._closed:
+            self.history_window.set_loading(False)
+            return
+        if revision != self._history_revision:
+            self._start_history_load()
+            return
+        self.history_window.set_loading(False)
+        if sessions is None:
+            self.tray.show_message("VoxType", "Не удалось загрузить историю", critical=True)
+            return
+        self.history_window.set_sessions(sessions)
 
     def _delete_history_session(self, session_id: str) -> None:
         if self.runtime.session_repository.delete(session_id):
@@ -828,6 +874,7 @@ class DesktopApplication:
             )
             _remove_owned_path(self.controller.spool_root / session_id, self.controller.spool_root)
             self.history_window.remove_session(session_id)
+            self._refresh_history()
 
     def _recover_history_session(self, session_id: str) -> None:
         def worker() -> None:

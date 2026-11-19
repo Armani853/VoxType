@@ -9,7 +9,7 @@ from ._optional import PYSIDE6_AVAILABLE, require_pyside6
 from .models import HistoryEntry, format_duration, history_entry_from
 
 if PYSIDE6_AVAILABLE:
-    from PySide6.QtCore import Qt, Signal
+    from PySide6.QtCore import QSignalBlocker, Qt, Signal
     from PySide6.QtGui import QGuiApplication
     from PySide6.QtWidgets import (
         QComboBox,
@@ -192,34 +192,39 @@ if PYSIDE6_AVAILABLE:
             self.delete_button.clicked.connect(self._delete_selected)
             self.recover_button.clicked.connect(self._recover_selected)
 
+        def set_loading(self, loading: bool) -> None:
+            self.refresh_button.setText("Загружаю…" if loading else "Обновить")
+            self.refresh_button.setEnabled(not loading)
+
         def set_sessions(self, sessions: list[HistoryEntry | object]) -> None:
-            previous_session_id = self.selected_session_id() or self._detail_session_id
             entries = [history_entry_from(session) for session in sessions]
-            entries.sort(key=lambda entry: _datetime_sort_key(entry.started_at), reverse=True)
-            self._entries = {entry.session_id: entry for entry in entries if entry.session_id}
-            self.table.blockSignals(True)
-            self.table.setSortingEnabled(False)
-            self.table.setRowCount(0)
-            for entry in entries:
-                if not entry.session_id:
-                    continue
-                row = self.table.rowCount()
-                self.table.insertRow(row)
-                started = _format_datetime(entry.started_at)
-                values = (
-                    started,
-                    entry.language.value.upper(),
-                    format_duration(entry.duration_s),
-                    entry.target_application or "—",
-                    _status_text(entry.completion_status),
-                )
-                for column, value in enumerate(values):
-                    item = QTableWidgetItem(value)
-                    item.setData(Qt.ItemDataRole.UserRole, entry.session_id)
-                    item.setToolTip(value)
-                    self.table.setItem(row, column, item)
-            self.table.setSortingEnabled(True)
-            self.table.blockSignals(False)
+            by_id = {entry.session_id: entry for entry in entries if entry.session_id}
+            if by_id == self._entries and self.table.rowCount():
+                return
+            previous_session_id = self.selected_session_id() or self._detail_session_id
+            ordered = sorted(
+                by_id.values(), key=lambda entry: _datetime_sort_key(entry.started_at), reverse=True
+            )
+            self._entries = by_id
+            with QSignalBlocker(self.table):
+                self.table.setSortingEnabled(False)
+                try:
+                    self.table.setRowCount(len(ordered))
+                    for row, entry in enumerate(ordered):
+                        values = (
+                            _format_datetime(entry.started_at),
+                            entry.language.value.upper(),
+                            format_duration(entry.duration_s),
+                            entry.target_application or "—",
+                            _status_text(entry.completion_status),
+                        )
+                        for column, value in enumerate(values):
+                            item = QTableWidgetItem(value)
+                            item.setData(Qt.ItemDataRole.UserRole, entry.session_id)
+                            item.setToolTip(value)
+                            self.table.setItem(row, column, item)
+                finally:
+                    self.table.setSortingEnabled(True)
             self._apply_filters(preferred_session_id=previous_session_id)
 
         def selected_session_id(self) -> str | None:
