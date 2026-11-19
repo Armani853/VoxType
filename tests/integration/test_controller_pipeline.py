@@ -376,6 +376,8 @@ def test_inactive_target_completion_is_not_history_error_and_can_retry(tmp_path:
     assert target.end_calls == 0
     assert controller.retry_completed_insertion()
     assert target.end_calls == 1
+    assert not controller.retry_completed_insertion()
+    assert target.end_calls == 1
     assert controller.shutdown()
     repository.close()
 

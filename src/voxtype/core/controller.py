@@ -37,7 +37,7 @@ from voxtype.transcript.merger import TranscriptMerger, deduplicate_text_boundar
 from voxtype.transcript.vocabulary import Vocabulary
 from voxtype.vad.segmenter import AudioSegment, StreamingSegmenter
 from voxtype.windows.injection import InjectionStatus, TextInjectionService
-from voxtype.windows.target_window import TargetPolicy, TargetWindowManager
+from voxtype.windows.target_window import TargetPolicy, TargetStatus, TargetWindowManager
 
 CaptureFactory = Callable[[LosslessAudioQueue], AudioCaptureService]
 SegmenterFactory = Callable[[], StreamingSegmenter]
@@ -1276,6 +1276,8 @@ class ApplicationController:
     def retry_completed_insertion(self) -> bool:
         """Retry retained FIFO without blocking a Qt handler."""
 
+        if not self.injection_service.pending_fragments:
+            return False
         result = self.injection_service.flush()
         with self._lock:
             if result.status is InjectionStatus.INSERTED:
@@ -1285,9 +1287,19 @@ class ApplicationController:
                 if int(getattr(self.injection_service, "pending_fragments", 0)) == 0:
                     self.target_manager.end_session()
                 return True
-            if result.status in {InjectionStatus.QUEUED, InjectionStatus.BLOCKED}:
+            temporarily_unavailable = (
+                result.status is InjectionStatus.QUEUED
+                and result.target_status in {TargetStatus.TARGET_INACTIVE, TargetStatus.SUSPENDED}
+            ) or (
+                result.status is InjectionStatus.BLOCKED
+                and result.target_status is TargetStatus.READY
+            )
+            if temporarily_unavailable:
                 self._delivery_status = "queued_target_inactive"
                 self._status_message = "Целевое окно неактивно; текст сохранён"
+            elif result.status in {InjectionStatus.BLOCKED, InjectionStatus.QUEUED}:
+                self._delivery_status = "copy_required"
+                self._error_message = "Безопасная вставка недоступна. Скопируйте весь текст."
             else:
                 self._delivery_status = "failed"
                 self._error_message = "Вставка не удалась; весь текст можно скопировать"

@@ -254,7 +254,7 @@ if PYSIDE6_AVAILABLE:
                 and state.delivery_status == "queued_target_inactive"
                 else "Автоматическая вставка не выполнена; полный текст сохранён."
                 if state.state is AppStatus.COMPLETED
-                and state.delivery_status in {"failed", "unknown"}
+                and state.delivery_status in {"failed", "unknown", "copy_required"}
                 else ""
             )
             transcript = (
@@ -281,12 +281,13 @@ if PYSIDE6_AVAILABLE:
             self.stop_button.setVisible(not completed)
             self.result_buttons.setVisible(completed)
             self.insert_button.setEnabled(
-                state.delivery_status in {"pending", "failed", "queued_target_inactive"}
+                state.delivery_status in {"failed", "queued_target_inactive"}
             )
             insertion_failed = state.delivery_status in {
                 "failed",
                 "queued_target_inactive",
                 "unknown",
+                "copy_required",
             }
             primary = completed and insertion_failed
             if self.copy_all_button.property("primary") != primary:
@@ -304,7 +305,7 @@ if PYSIDE6_AVAILABLE:
                     return "Текст вставлен"
                 if state.delivery_status == "queued_target_inactive":
                     return "Вернитесь в целевое окно"
-                if state.delivery_status in {"failed", "unknown"}:
+                if state.delivery_status in {"failed", "unknown", "copy_required"}:
                     return "Текст сохранён"
                 return "Полный текст сохранён"
             if state.queued_audio_seconds >= 10:

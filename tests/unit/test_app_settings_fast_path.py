@@ -143,7 +143,10 @@ def test_completed_session_retries_retained_text_without_blocking_ui(monkeypatch
     app.controller.state.name = "COMPLETED"
     app.controller.injection_service.pending_fragments = 1
     app.controller.snapshot.return_value = SimpleNamespace(
-        state="COMPLETED", error_message="", status_message=""
+        state="COMPLETED",
+        error_message="",
+        status_message="",
+        delivery_status="queued_target_inactive",
     )
     app.runtime = SimpleNamespace(
         settings=SimpleNamespace(
