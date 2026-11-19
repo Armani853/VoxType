@@ -115,7 +115,10 @@ finally {
 
 $CompiledDirectory = Get-ChildItem -LiteralPath $BuildRoot -Directory -Filter '*.dist' | Select-Object -First 1
 if ($null -eq $CompiledDirectory) { throw 'Nuitka standalone directory was not produced' }
+$MoveStopwatch = [Diagnostics.Stopwatch]::StartNew()
 Move-Item -LiteralPath $CompiledDirectory.FullName -Destination $PortableRoot
+$MoveStopwatch.Stop()
+Write-Host ("[build] Move prepared standalone directory: {0:N3} s" -f $MoveStopwatch.Elapsed.TotalSeconds)
 $Executable = Join-Path $PortableRoot 'VoxType.exe'
 if (-not (Test-Path -LiteralPath $Executable)) { throw "Missing portable executable: $Executable" }
 if ((Get-Item -LiteralPath $Executable).Length -eq 0) { throw 'Portable executable is empty' }

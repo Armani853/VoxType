@@ -40,7 +40,13 @@ from voxtype.audio.calibration import (
     device_error_result,
 )
 from voxtype.audio.capture import AudioCaptureConfig, AudioCaptureService
-from voxtype.audio.devices import choose_capture_channels, choose_capture_rate, list_input_devices
+from voxtype.audio.devices import (
+    AudioBackendUnavailable,
+    choose_capture_channels,
+    choose_capture_rate,
+    list_input_devices,
+    resolve_recording_device,
+)
 from voxtype.audio.preprocessing import (
     PreprocessingProfile as AudioPreprocessingProfile,
 )
@@ -641,7 +647,7 @@ class DesktopApplication:
         self._run_background("voxtype-settings-devices", self._scan_settings_devices)
         self._run_background("voxtype-settings-models", self._scan_settings_models)
 
-    def _set_model_choices(self, installed: set[str]) -> None:
+    def _set_model_choices(self, installed: set[str], *, preserve_selection: bool = False) -> None:
         models = [
             (f"small — быстро/баланс{' ✓' if 'small' in installed else ''}", "small"),
             (
@@ -649,15 +655,26 @@ class DesktopApplication:
                 "large-v3-turbo",
             ),
         ]
-        self.settings_window.set_models(models, self.runtime.settings.model.installed_model)
-        self.settings_window.gpu_experimental_check.setChecked(False)
-        self.settings_window.gpu_experimental_check.setEnabled(False)
-        self.settings_window.gpu_experimental_check.setToolTip(
+        window = self.settings_window
+        selected = (
+            window.model_combo.currentData()
+            if preserve_selection
+            else self.runtime.settings.model.installed_model
+        )
+        window.set_models(models, selected)
+        window.gpu_experimental_check.setChecked(False)
+        window.gpu_experimental_check.setEnabled(False)
+        window.gpu_experimental_check.setToolTip(
             "В этой сборке используется проверенный CPU INT8; экспериментальный GPU отключён"
         )
 
     def _scan_settings_devices(self) -> None:
-        self.signals.devices_ready.emit(list_input_devices())
+        try:
+            devices = list_input_devices()
+        except AudioBackendUnavailable:
+            _LOGGER.warning("audio_device_discovery_unavailable")
+            devices = ()
+        self.signals.devices_ready.emit(devices)
 
     def _scan_settings_models(self) -> None:
         self.signals.models_ready.emit(
@@ -670,13 +687,15 @@ class DesktopApplication:
         self.runtime.devices = tuple(items)
         devices = [(f"{item.name} ({item.host_api})", item.index) for item in items]
         if self._settings_window is not None:
-            self._settings_window.set_audio_devices(devices, self.runtime.settings.audio.device_id)
+            self._settings_window.set_audio_devices(devices)
         if self.onboarding is not None:
-            self.onboarding.set_microphones(devices, self.runtime.settings.audio.device_id)
+            selected = self.onboarding.microphone_combo.currentData()
+            self.onboarding.set_microphones(devices, selected)
 
     def _on_models_ready(self, installed: object) -> None:
         self._set_model_choices(
-            set(installed) if isinstance(installed, (set, frozenset)) else set()
+            set(installed) if isinstance(installed, (set, frozenset)) else set(),
+            preserve_selection=True,
         )
 
     def _save_settings(self, values: object) -> None:
@@ -784,7 +803,7 @@ class DesktopApplication:
             (item for item in devices if item.index == self.runtime.settings.audio.device_id),
             self.runtime.device,
         )
-        rate = choose_capture_rate(device)
+        selected_index = self.runtime.settings.audio.device_id
         profile = AudioPreprocessingProfile(self.runtime.settings.audio.preprocessing_profile.value)
         processing = replace(
             PreprocessorSettings.for_profile(profile),
@@ -793,17 +812,13 @@ class DesktopApplication:
         )
 
         def factory(queue: LosslessAudioQueue) -> AudioCaptureService:
+            selected = resolve_recording_device(selected_index, self.runtime.devices)
             return AudioCaptureService(
                 queue,
                 AudioCaptureConfig(
-                    # None asks PortAudio for the current default at session
-                    # start, so a Windows default-device change needs no app
-                    # restart. Explicit user selections remain pinned.
-                    device=(
-                        device.index if self.runtime.settings.audio.device_id is not None else None
-                    ),
-                    input_sample_rate=rate,
-                    input_channels=choose_capture_channels(device),
+                    device=selected.index,
+                    input_sample_rate=choose_capture_rate(selected),
+                    input_channels=choose_capture_channels(selected),
                     callback_queue_chunks=2048,
                 ),
                 preprocessing=processing,
@@ -1179,16 +1194,10 @@ class DesktopApplication:
         threading.Thread(target=worker, name="voxtype-model-benchmark", daemon=True).start()
 
     def _audio_test(self, device_text: str) -> None:
-        try:
-            device = int(device_text)
-        except ValueError:
-            device = self.runtime.device.index
-
         def worker() -> None:
             try:
-                selected = next(
-                    (candidate for candidate in self.runtime.devices if candidate.index == device),
-                    self.runtime.device,
+                selected = resolve_recording_device(
+                    int(device_text) if device_text else None, self.runtime.devices
                 )
                 audio = record_input(selected, 2.0, choose_capture_rate(selected))
                 rms = float(np.sqrt(np.mean(np.square(audio, dtype=np.float64))))

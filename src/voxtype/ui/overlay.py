@@ -235,6 +235,7 @@ if PYSIDE6_AVAILABLE:
 
         def update_snapshot(self, snapshot: UIState | object) -> None:
             state = snapshot_from(snapshot)
+            previous = self._state
             self._state = state
             text, color_role = _OVERLAY_STATES[state.state]
             if (
@@ -268,7 +269,11 @@ if PYSIDE6_AVAILABLE:
             self.provisional_label.setVisible(not completed)
             self.result_text.setVisible(completed)
             if completed:
-                self.result_text.setPlainText(transcript)
+                if (
+                    previous.state is not AppStatus.COMPLETED
+                    or previous.full_transcript != transcript
+                ):
+                    self.result_text.setPlainText(transcript)
             else:
                 self.provisional_label.setText(text_preview(transcript, 420) or "Ожидаю речь…")
             self.queue_label.setText(f"Очередь: {format_backlog(state.queued_audio_seconds)}")

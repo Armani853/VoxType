@@ -12,6 +12,8 @@ from typing import Any, cast
 
 from ._optional import PYSIDE6_AVAILABLE, require_pyside6
 
+_KEEP_SELECTION = object()
+
 if PYSIDE6_AVAILABLE:
     from PySide6.QtCore import QSignalBlocker, Qt, Signal
     from PySide6.QtGui import QKeySequence
@@ -392,11 +394,7 @@ if PYSIDE6_AVAILABLE:
             self.vad_slider.valueChanged.connect(
                 lambda value: self.vad_value_label.setText(f"{value}%")
             )
-            self.test_microphone_button.clicked.connect(
-                lambda: self.audio_test_requested.emit(
-                    str(self.audio_device_combo.currentData() or "")
-                )
-            )
+            self.test_microphone_button.clicked.connect(self._request_audio_test)
             self.download_model_button.clicked.connect(
                 lambda: self.model_download_requested.emit(
                     str(self.model_combo.currentData() or "")
@@ -677,16 +675,23 @@ if PYSIDE6_AVAILABLE:
                 self._loading = False
                 self._set_dirty(False)
 
+        def _request_audio_test(self) -> None:
+            device = self.audio_device_combo.currentData()
+            self.audio_test_requested.emit("" if device is None else str(device))
+
         def set_audio_devices(
             self,
             devices: Iterable[str | tuple[str, object] | object],
-            selected_id: object | None = None,
+            selected_id: object = _KEEP_SELECTION,
         ) -> None:
             previous = (
-                selected_id if selected_id is not None else self.audio_device_combo.currentData()
+                self.audio_device_combo.currentData()
+                if selected_id is _KEEP_SELECTION
+                else selected_id
             )
             blocker = QSignalBlocker(self.audio_device_combo)
             self.audio_device_combo.clear()
+            self.audio_device_combo.addItem("По умолчанию в Windows", None)
             for device in devices:
                 if isinstance(device, str):
                     self.audio_device_combo.addItem(device, device)
@@ -702,8 +707,10 @@ if PYSIDE6_AVAILABLE:
                     self.audio_device_combo.itemText(index),
                     Qt.ItemDataRole.ToolTipRole,
                 )
-            del blocker
+            if previous is not None and self.audio_device_combo.findData(previous) < 0:
+                self.audio_device_combo.addItem(f"Недоступное устройство ({previous})", previous)
             _select_data(self.audio_device_combo, previous)
+            del blocker
 
         def set_models(
             self,
@@ -730,8 +737,8 @@ if PYSIDE6_AVAILABLE:
                     self.model_combo.itemText(index),
                     Qt.ItemDataRole.ToolTipRole,
                 )
-            del blocker
             _select_data(self.model_combo, previous)
+            del blocker
 
         def update_microphone_level(
             self, level: float, clipping_percentage: float = 0.0, message: str = ""

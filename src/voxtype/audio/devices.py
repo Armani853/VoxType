@@ -95,6 +95,22 @@ def choose_capture_rate(device: InputDevice, target_rate: int = 16_000) -> int:
     return min(rates, key=lambda rate: (abs(rate - target_rate), -rate))
 
 
+def resolve_recording_device(
+    selected_index: int | None, known_devices: tuple[InputDevice, ...]
+) -> InputDevice:
+    """Resolve the stream device before choosing its native rate and channel count."""
+    if selected_index is None:
+        devices = list_input_devices(candidate_sample_rates=(16_000, 48_000))
+        for device in devices:
+            if device.is_default:
+                return device
+        raise AudioBackendUnavailable("Windows не назначила устройство записи по умолчанию.")
+    for device in known_devices:
+        if device.index == selected_index:
+            return device
+    raise AudioBackendUnavailable(f"Выбранное устройство записи недоступно ({selected_index}).")
+
+
 def choose_capture_channels(device: InputDevice) -> int:
     """Use the native stereo pin on WDM-KS devices that expose two channels.
 

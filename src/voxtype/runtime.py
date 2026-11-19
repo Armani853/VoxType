@@ -25,10 +25,12 @@ from voxtype.asr.model_manager import DEFAULT_MODEL_SPECS, ModelManager
 from voxtype.asr.profiles import ASRProfile, ASRProfileConfig, get_profile
 from voxtype.audio.capture import AudioCaptureConfig, AudioCaptureService
 from voxtype.audio.devices import (
+    AudioBackendUnavailable,
     InputDevice,
     choose_capture_channels,
     choose_capture_rate,
     list_input_devices,
+    resolve_recording_device,
 )
 from voxtype.audio.preprocessing import (
     PreprocessingProfile as AudioPreprocessingProfile,
@@ -281,8 +283,16 @@ def build_runtime(*, verbose: bool = False) -> RuntimeBundle:
     )
     stage("retention_checked")
     model_manager = ModelManager(data_directory / "models")
-    devices = list_input_devices()
-    device = select_input_device(devices, settings.audio.device_id)
+    try:
+        devices = list_input_devices()
+    except AudioBackendUnavailable:
+        logging.getLogger("voxtype.runtime").warning("audio_device_discovery_unavailable")
+        devices = ()
+    device = (
+        select_input_device(devices, settings.audio.device_id)
+        if devices
+        else InputDevice(-1, "Микрофон не найден", "", 0, 0, (), False)
+    )
     stage("audio_devices_enumerated")
 
     profile = configured_profile(settings)
@@ -313,18 +323,14 @@ def build_runtime(*, verbose: bool = False) -> RuntimeBundle:
         normalization_enabled=settings.audio.normalization,
         noise_suppression_enabled=settings.audio.noise_suppression,
     )
-    capture_rate = choose_capture_rate(device)
-
     def capture_factory(queue: LosslessAudioQueue) -> AudioCaptureService:
+        selected = resolve_recording_device(settings.audio.device_id, devices)
         return AudioCaptureService(
             queue,
             AudioCaptureConfig(
-                # Keep an explicitly selected microphone pinned, but ask
-                # PortAudio for the current Windows default at each session
-                # when the user left the device on "default".
-                device=device.index if settings.audio.device_id is not None else None,
-                input_sample_rate=capture_rate,
-                input_channels=choose_capture_channels(device),
+                device=selected.index,
+                input_sample_rate=choose_capture_rate(selected),
+                input_channels=choose_capture_channels(selected),
                 callback_queue_chunks=2048,
             ),
             preprocessing=preprocessing,
