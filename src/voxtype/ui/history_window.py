@@ -282,10 +282,10 @@ if PYSIDE6_AVAILABLE:
                 entry = self._entries.get(session_id)
                 visible = bool(entry)
                 if entry is not None:
-                    haystack = f"{entry.confirmed_text} {entry.target_application}".casefold()
-                    visible = (not needle or needle in haystack) and (
-                        not language or entry.language.value == language
-                    )
+                    visible = not language or entry.language.value == language
+                    if visible and needle:
+                        haystack = f"{entry.confirmed_text} {entry.target_application}".casefold()
+                        visible = needle in haystack
                     if status:
                         normalized = entry.completion_status.lower()
                         if status == "incomplete":

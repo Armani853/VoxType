@@ -108,6 +108,8 @@ class ApplicationController:
         self._delivery_status = "pending"
         self._capture_started_monotonic: float | None = None
         self._pipeline_thread: threading.Thread | None = None
+        self._inference_thread: threading.Thread | None = None
+        self._recovery_active = False
         self._start_thread: threading.Thread | None = None
         self._preload_thread: threading.Thread | None = None
         self._stop_thread: threading.Thread | None = None
@@ -195,6 +197,8 @@ class ApplicationController:
 
     def start_dictation(self) -> bool:
         with self._lock:
+            if self._shutdown_requested.is_set() or self._recovery_active:
+                return False
             if self.state not in {
                 AppState.IDLE,
                 AppState.COMPLETED,
@@ -222,15 +226,14 @@ class ApplicationController:
             self._last_prompt_result_uncertain = False
             self._pause_intervals.clear()
             self.merger.reset()
-        starter = threading.Thread(
-            target=self._prepare_and_start_runtime,
-            args=(decision,),
-            name="voxtype-session-starter",
-            daemon=True,
-        )
-        with self._lock:
+            starter = threading.Thread(
+                target=self._prepare_and_start_runtime,
+                args=(decision,),
+                name="voxtype-session-starter",
+                daemon=True,
+            )
             self._start_thread = starter
-        starter.start()
+            starter.start()
         return True
 
     def _prepare_and_start_runtime(self, decision: object) -> None:
@@ -377,15 +380,14 @@ class ApplicationController:
             audio_queue = self._audio_queue
             if was_starting:
                 return True
-        stopper = threading.Thread(
-            target=self._stop_capture_and_drain,
-            args=(capture, audio_queue),
-            name="voxtype-capture-stopper",
-            daemon=True,
-        )
-        with self._lock:
+            stopper = threading.Thread(
+                target=self._stop_capture_and_drain,
+                args=(capture, audio_queue),
+                name="voxtype-capture-stopper",
+                daemon=True,
+            )
             self._stop_thread = stopper
-        stopper.start()
+            stopper.start()
         return True
 
     def _stop_capture_and_drain(
@@ -417,7 +419,7 @@ class ApplicationController:
         )
         with self._lock:
             self._finish_thread = finisher
-        finisher.start()
+            finisher.start()
 
     def _wait_for_pipeline(self) -> None:
         with self._lock:
@@ -563,13 +565,14 @@ class ApplicationController:
         )
         with self._lock:
             self._provisional = "Распознаю…"
+        inference_started = time.perf_counter()
         guarded = self._transcribe_guarded_with_timeout(request, committed)
         result = guarded.result
         with self._lock:
             self._last_prompt_result_uncertain = result.possible_inaccuracy
         self.logger.info(
             "chunk_inference session_id=%s sequence=%d model=%s backend=%s audio_s=%.3f "
-            "inference_s=%.3f rtf=%.3f queue_s=%.3f",
+            "inference_s=%.3f rtf=%.3f queue_s=%.3f wall_s=%.3f retry_s=%.3f",
             self._session_id or "none",
             segment.sequence,
             result.model_id,
@@ -578,6 +581,8 @@ class ApplicationController:
             result.processing_seconds,
             result.processing_seconds / max(result.audio_duration_seconds, 1e-9),
             backlog,
+            time.perf_counter() - inference_started,
+            guarded.retry_wall_seconds,
         )
         text = VoiceCommandProcessor(self.settings.dictation.voice_commands).process(
             result.text, language
@@ -799,10 +804,21 @@ class ApplicationController:
                 )
             except BaseException as exc:  # propagate native/backend failures to pipeline owner
                 outcome = exc
+            finally:
+                with self._lock:
+                    self._inference_thread = None
             results.put_nowait(outcome)
 
         thread = threading.Thread(target=worker, name="voxtype-inference-call", daemon=True)
-        thread.start()
+        with self._lock:
+            if self._inference_thread is not None:
+                raise InferenceTimeoutError("previous native inference still owns the model")
+            self._inference_thread = thread
+            try:
+                thread.start()
+            except RuntimeError:
+                self._inference_thread = None
+                raise
         try:
             outcome = results.get(timeout=self.inference_timeout_s)
         except Empty as exc:
@@ -821,10 +837,13 @@ class ApplicationController:
     ) -> bool:
         """Switch an installed model only while no session owns the current one."""
         with self._lock:
-            if self._session_id is not None or self.state not in {
-                AppState.IDLE,
-                AppState.ERROR_RECOVERABLE,
-            }:
+            if (
+                self._shutdown_requested.is_set()
+                or self._recovery_active
+                or self._inference_thread is not None
+                or self._session_id is not None
+                or self.state not in {AppState.IDLE, AppState.ERROR_RECOVERABLE}
+            ):
                 return False
             previous = self.backend
             previous_retry = self.retry_backend
@@ -851,11 +870,22 @@ class ApplicationController:
         """Replay crash-safe PCM and append only the missing transcript tail."""
 
         with self._lock:
-            if self._session_id is not None or self.state not in {
-                AppState.IDLE,
-                AppState.ERROR_RECOVERABLE,
-            }:
+            if (
+                self._shutdown_requested.is_set()
+                or self._recovery_active
+                or self._inference_thread is not None
+                or self._session_id is not None
+                or self.state not in {AppState.IDLE, AppState.ERROR_RECOVERABLE}
+            ):
                 raise RuntimeError("active dictation must finish before recovery")
+            self._recovery_active = True
+        try:
+            return self._recover_session(session_id)
+        finally:
+            with self._lock:
+                self._recovery_active = False
+
+    def _recover_session(self, session_id: str) -> str:
         self.logger.info("session_recovery_started session_id=%s", session_id)
         record = self.session_repository.get(session_id)
         if record is None:
@@ -937,12 +967,9 @@ class ApplicationController:
             condition_on_previous_text=False,
             metadata={"segment_sequence": str(segment.sequence), "recovery": "true"},
         )
-        guarded = self.guard.transcribe_guarded(
-            self.backend,
-            request,
-            committed_text=prompt,
-            retry_backend=self.retry_backend,
-        )
+        if self._shutdown_requested.is_set():
+            raise RuntimeError("shutdown requested during session recovery")
+        guarded = self._transcribe_guarded_with_timeout(request, prompt)
         result = guarded.result
         text = VoiceCommandProcessor(self.settings.dictation.voice_commands).process(
             result.text, language
@@ -1172,6 +1199,10 @@ class ApplicationController:
         elif isinstance(error, AudioIngressOverflowError):
             user_message = (
                 "Микрофон потерял часть аудио. Проверьте устройство записи и повторите диктовку."
+            )
+        elif isinstance(error, InferenceTimeoutError):
+            user_message = (
+                "Модель не ответила вовремя. Текст и оставшееся аудио сохранены для восстановления."
             )
         with self._lock:
             self._error_message = user_message
@@ -1409,6 +1440,10 @@ class ApplicationController:
 
     def shutdown(self) -> bool:
         self._shutdown_requested.set()
+        with self._lock:
+            if self._recovery_active:
+                self.logger.info("shutdown_deferred recovery_still_running=true")
+                return False
         if self.state in {AppState.STARTING, AppState.MODEL_LOADING}:
             self._start_cancelled.set()
         if self.state is AppState.MODEL_LOADING and self._session_id is not None:
@@ -1452,6 +1487,9 @@ class ApplicationController:
         pipeline_alive = False
         with self._lock:
             pipeline_alive = self._pipeline_thread is not None and self._pipeline_thread.is_alive()
+            if self._inference_thread is not None:
+                self.logger.info("shutdown_deferred native_inference_still_running=true")
+                return False
         if self.state is not AppState.SHUTTING_DOWN:
             if self.state is AppState.FINISHING:
                 self._status_message = "Завершение продолжается в журнале"

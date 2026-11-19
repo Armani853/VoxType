@@ -10,8 +10,10 @@ from __future__ import annotations
 import re
 import threading
 import unicodedata
+from collections import deque
 from dataclasses import dataclass
 from difflib import SequenceMatcher
+from itertools import islice
 
 from voxtype.core.models import TranscriptFragment, WordStamp
 from voxtype.transcript.formatter import format_fragment_boundary, join_word_texts
@@ -148,8 +150,8 @@ class TranscriptMerger:
         if chunk_start_s >= self._last_chunk_end_s - 0.02:
             return 0
         limit = min(self.max_overlap_words, len(self._words), len(new_words))
-        previous_tokens = [normalize_token(word.text) for word in self._words]
-        new_tokens = [normalize_token(word.text) for word in new_words]
+        previous_tokens = [normalize_token(word.text) for word in self._words[-limit:]]
+        new_tokens = [normalize_token(word.text) for word in new_words[:limit]]
         for size in range(limit, 0, -1):
             left = previous_tokens[-size:]
             right = new_tokens[:size]
@@ -182,10 +184,15 @@ class TranscriptMerger:
 
         if not self._text or chunk_start_s >= self._last_chunk_end_s - 0.02:
             return 0
-        previous = [
-            normalize_token(match.group(0)) for match in _TOKEN_PATTERN.finditer(self._text)
+        tail = deque(
+            (match.group(0) for match in _TOKEN_PATTERN.finditer(self._text)),
+            maxlen=self.max_overlap_words,
+        )
+        previous = [normalize_token(word) for word in tail]
+        incoming = [
+            normalize_token(match.group(0))
+            for match in islice(_TOKEN_PATTERN.finditer(text), self.max_overlap_words)
         ]
-        incoming = [normalize_token(match.group(0)) for match in _TOKEN_PATTERN.finditer(text)]
         limit = min(self.max_overlap_words, len(previous), len(incoming))
         for size in range(limit, 0, -1):
             left = previous[-size:]

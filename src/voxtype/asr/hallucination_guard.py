@@ -8,6 +8,7 @@ import unicodedata
 from collections import Counter
 from dataclasses import dataclass, replace
 from enum import StrEnum
+from time import perf_counter
 from typing import ClassVar
 
 import numpy as np
@@ -57,6 +58,7 @@ class GuardedTranscription:
     first_assessment: GuardAssessment
     retried: bool
     retry_model_id: str | None = None
+    retry_wall_seconds: float = 0.0
 
 
 class HallucinationGuard:
@@ -214,6 +216,7 @@ class HallucinationGuard:
         if not first_assessment.suspicious:
             return GuardedTranscription(first, first_assessment, first_assessment, False)
         retry_engine = retry_backend or backend
+        retry_started = perf_counter()
         try:
             retry_request = request.conservative_retry()
             if retry_backend is not None:
@@ -240,6 +243,7 @@ class HallucinationGuard:
                 first_assessment,
                 True,
                 retry_engine.model_id,
+                perf_counter() - retry_started,
             )
 
         if retry_assessment.score < first_assessment.score:
@@ -269,6 +273,7 @@ class HallucinationGuard:
             first_assessment,
             True,
             retry_engine.model_id,
+            perf_counter() - retry_started,
         )
 
 
