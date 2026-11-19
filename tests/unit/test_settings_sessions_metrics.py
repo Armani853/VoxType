@@ -68,6 +68,8 @@ def test_acceptance_profile_directories_are_explicitly_isolated(
     monkeypatch.setenv("VOXTYPE_CACHE_DIRECTORY", str(cache))
     assert data_directory_path() == data.resolve()
     assert cache_directory_path() == cache.resolve()
+    monkeypatch.delenv("VOXTYPE_CACHE_DIRECTORY")
+    assert cache_directory_path() == data.resolve() / "cache"
 
 
 def test_measured_profiles_choose_small_balanced_and_turbo_maximum() -> None:

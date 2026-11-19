@@ -80,7 +80,7 @@ if PYSIDE6_AVAILABLE:
             self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             self.setWindowTitle("VoxType")
             self.setWindowIcon(create_app_icon())
-            self._settings = settings or QSettings("VoxType", "VoxType")
+            self._settings = settings if settings is not None else QSettings("VoxType", "VoxType")
             self._drag_offset: QPoint | None = None
             self._state = UIState()
             self._compact = bool(self._settings.value("ui/overlayCompact", True, type=bool))
@@ -288,8 +288,10 @@ if PYSIDE6_AVAILABLE:
                 "queued_target_inactive",
                 "unknown",
             }
-            self.copy_all_button.setProperty("primary", completed and insertion_failed)
-            self._refresh_dynamic_style(self.copy_all_button)
+            primary = completed and insertion_failed
+            if self.copy_all_button.property("primary") != primary:
+                self.copy_all_button.setProperty("primary", primary)
+                self._refresh_dynamic_style(self.copy_all_button)
             if completed and self._compact:
                 self.set_compact(False, persist=False)
 
@@ -347,8 +349,8 @@ if PYSIDE6_AVAILABLE:
             return self._compact
 
         def show_without_activating(self) -> None:
-            self.show()
-            self._apply_windows_no_activate()
+            if not self.isVisible():
+                self.show()
 
         def _restore_position(self) -> None:
             saved_x = self._settings.value("ui/overlayX", None)

@@ -47,7 +47,7 @@ from voxtype.vad.segmenter import SegmentationSettings, StreamingSegmenter
 from voxtype.vad.silero import SileroVAD
 from voxtype.version import __version__
 from voxtype.windows.injection import InjectionStrategy, TextInjectionService
-from voxtype.windows.startup import StartupManager
+from voxtype.windows.startup import MemoryStartupRegistryBackend, StartupManager
 from voxtype.windows.target_window import TargetPolicy, TargetWindowManager
 
 SILERO_VAD_URL = (
@@ -172,7 +172,11 @@ def cache_directory_path() -> Path:
     """Return the cache root without coupling tests to Windows Known Folder APIs."""
 
     override = os.environ.get("VOXTYPE_CACHE_DIRECTORY", "").strip()
-    return Path(override).resolve() if override else user_cache_path(APP_NAME, APP_AUTHOR)
+    if override:
+        return Path(override).resolve()
+    if os.environ.get("VOXTYPE_DATA_DIRECTORY", "").strip():
+        return data_directory_path() / "cache"
+    return user_cache_path(APP_NAME, APP_AUTHOR)
 
 
 @dataclass(slots=True)
@@ -355,7 +359,7 @@ def build_runtime(*, verbose: bool = False) -> RuntimeBundle:
         devices,
         device,
         controller,
-        StartupManager(),
+        StartupManager(backend=MemoryStartupRegistryBackend() if isolated_profile else None),
         data_directory,
         log_path,
         model_manager.is_installed(profile.model_name),

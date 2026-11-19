@@ -23,6 +23,7 @@ from PySide6.QtCore import (
     QAbstractNativeEventFilter,
     QByteArray,
     QObject,
+    QSettings,
     QTimer,
     Signal,
 )
@@ -314,7 +315,12 @@ class DesktopApplication:
     def overlay(self) -> DictationOverlay:
         overlay = self._overlay
         if overlay is None:
-            overlay = DictationOverlay(None)
+            settings = None
+            if os.environ.get("VOXTYPE_DATA_DIRECTORY", "").strip():
+                settings = QSettings(
+                    str(self.runtime.data_directory / "overlay.ini"), QSettings.Format.IniFormat
+                )
+            overlay = DictationOverlay(None, settings=settings)
             self._overlay = overlay
             overlay.pause_requested.connect(
                 lambda: self._invoke_ui("overlay.toggle_pause", self.controller.toggle_pause)
