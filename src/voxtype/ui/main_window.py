@@ -328,6 +328,8 @@ if PYSIDE6_AVAILABLE:
             self.dictation_button.setIcon(IconProvider.icon(icon, 24, self.dictation_button.devicePixelRatioF(), color_token=token))
 
         def set_profile_name(self, name: str) -> None:
+            if self.shell.profile.text() == name:
+                return
             self.shell.profile.setText(name)
             self.subtitle_label.setText(("Профиль · " if self._interface_language == "ru" else "Profile · ") + name)
 

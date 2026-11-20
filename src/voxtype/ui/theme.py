@@ -163,7 +163,7 @@ def stylesheet(mode: ThemeMode | str = ThemeMode.LIGHT) -> str:
     return f"""
     QMainWindow, QDialog, QWizard, QWizardPage {{ background: {colors.background}; }}
     QLabel[muted="true"] {{ color: {colors.text_secondary}; }}
-    QLabel[tertiary="true"] {{ color: {colors.text_tertiary}; }}
+    QLabel[tertiary="true"] {{ color: {colors.text_secondary}; }}
     QLabel[heading="true"] {{
         color: {colors.text_primary};
 
@@ -173,7 +173,7 @@ def stylesheet(mode: ThemeMode | str = ThemeMode.LIGHT) -> str:
 
     }}
     QLabel[caption="true"] {{
-        color: {colors.text_tertiary};
+        color: {colors.text_secondary};
         font-size: {TYPOGRAPHY.caption_pt}pt;
     }}
     QLabel[keyHint="true"] {{

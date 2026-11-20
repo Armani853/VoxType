@@ -230,6 +230,7 @@ class DesktopApplication:
         self.timer.setInterval(50)
         self._last_state = "STARTUP"
         self._last_rendered_snapshot: object | None = None
+        self._header_profile_id: str | None = None
         self._result_dismissed = False
         self._last_pending_flush = 0.0
         self._last_resource_sample = 0.0
@@ -542,15 +543,23 @@ class DesktopApplication:
             self._overlay.hide()
 
     def _update_views_if_changed(self, snapshot: object) -> None:
+        profiles = self.controller.profiles
+        active_profile = getattr(self.controller, "_session_profile", None)
+        state = getattr(snapshot, "state", "")
+        active = state in {"STARTING", "MODEL_LOADING", "LISTENING", "SPEECH_DETECTED",
+                           "TRANSCRIBING", "PAUSED", "PAUSED_TARGET_LOST", "FINISHING"}
+        profile_id = active_profile.id if active and active_profile is not None else profiles.default_id
+        if profile_id != self._header_profile_id or snapshot != self._last_rendered_snapshot:
+            chosen = active_profile if active and active_profile is not None else next(
+                (profile for profile in profiles.profiles() if profile.id == profile_id), None,
+            )
+            self.main.set_profile_name(chosen.name if chosen is not None else "")
+            self._header_profile_id = profile_id
         # Idle and completed snapshots are often identical for many polls.
         # Rewriting every Qt property also repaints the overlay and tray.
         if snapshot == self._last_rendered_snapshot:
             return
         self.main.update_snapshot(snapshot)
-        profiles = getattr(self.controller, "profiles", None)
-        if profiles is not None:
-            chosen = next((profile.name for profile in profiles.profiles() if profile.id == profiles.default_id), "")
-            self.main.set_profile_name(chosen)
         self.tray.update_snapshot(snapshot)
         if self._overlay is not None:
             self._overlay.update_snapshot(snapshot)
@@ -786,6 +795,7 @@ class DesktopApplication:
         if self._professional_window is None:
             self._professional_window = ProfessionalWindow(self.controller, self.main)
             self._professional_window.insertion_requested.connect(self._submit_professional_text)
+            self._professional_window.profiles_refreshed.connect(self._refresh_header_profile)
             self._start_professional_queue()
             if self._file_queue is not None:
                 self._professional_window.bind_transcription_queue(self._file_queue)
@@ -798,6 +808,10 @@ class DesktopApplication:
         self._embed_page(page, self._professional_window)
         if self._professional_window.transcription_panel is not None:
             self._professional_window.transcription_panel.refresh()
+
+    def _refresh_header_profile(self) -> None:
+        self._header_profile_id = None
+        self._update_views_if_changed(self.controller.snapshot())
 
     def _start_professional_queue(self) -> None:
         if self._closing or self._file_queue is not None:

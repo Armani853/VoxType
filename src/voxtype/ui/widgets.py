@@ -42,9 +42,9 @@ if PYSIDE6_AVAILABLE:
             self.content_layout = QVBoxLayout(self)
             self.content_layout.setContentsMargins(
                 SPACING.space_5,
-                SPACING.space_4,
                 SPACING.space_5,
-                SPACING.space_4,
+                SPACING.space_5,
+                SPACING.space_5,
             )
             self.content_layout.setSpacing(spacing)
 

@@ -43,6 +43,7 @@ class ProfessionalWindow(QDialog):
     statistics_ready = Signal(int, object)
     enhancement_ready = Signal(str, str)
     workflow_finished = Signal(str)
+    profiles_refreshed = Signal()
 
     def __init__(self, controller, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -631,6 +632,7 @@ class ProfessionalWindow(QDialog):
             selected = self.profiles.default_id
         if isinstance(selected, str):
             self._reload(selected)
+            self.profiles_refreshed.emit()
         self.feedback.setText(message)
 
     def _save(self) -> None:
@@ -767,11 +769,21 @@ class ProfessionalWindow(QDialog):
                 layout.addWidget(self.snippet_splitter, 1)
                 table.selectionModel().currentChanged.connect(lambda *_args: self._load_snippet_selection())
             else:
-                layout.addWidget(pane, 1)
+                layout.removeWidget(search)
+                self.dictionary_splitter = QSplitter(page)
+                filters = QWidget(self.dictionary_splitter)
+                filter_layout = QVBoxLayout(filters)
+                filter_layout.addWidget(search)
                 categories = VoxComboBox(page)
                 for caption, language in (("Все языки", ""), ("Русский", "ru"), ("English", "en")):
                     categories.addItem(caption, language)
-                layout.insertWidget(1, categories)
+                categories.setAccessibleName("Категории словаря по языку")
+                filter_layout.addWidget(categories)
+                filter_layout.addStretch()
+                self.dictionary_splitter.addWidget(filters)
+                self.dictionary_splitter.addWidget(pane)
+                self.dictionary_splitter.setStretchFactor(1, 3)
+                layout.addWidget(self.dictionary_splitter, 1)
                 categories.currentIndexChanged.connect(
                     lambda _index: self._refresh_collection_table("dictionary")
                 )
@@ -903,7 +915,7 @@ class ProfessionalWindow(QDialog):
     def resizeEvent(self, event: object) -> None:
         super().resizeEvent(event)
         orientation = Qt.Orientation.Vertical if self.width() < 650 else Qt.Orientation.Horizontal
-        for name in ("profile_splitter", "snippet_splitter"):
+        for name in ("profile_splitter", "snippet_splitter", "dictionary_splitter"):
             splitter = getattr(self, name, None)
             if splitter is not None and splitter.orientation() != orientation:
                 splitter.setOrientation(orientation)
