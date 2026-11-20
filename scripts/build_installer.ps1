@@ -102,7 +102,14 @@ if (-not $SkipInstallerSmoke) {
         if ($Install.ExitCode -ne 0) { throw "Installer smoke install failed with exit code $($Install.ExitCode)" }
         $SmokeExe = Join-Path $SmokeRoot 'VoxType.exe'
         if (-not (Test-Path -LiteralPath $SmokeExe)) { throw 'Smoke install did not produce VoxType.exe' }
-        $Smoke = Start-Process -FilePath $SmokeExe -ArgumentList '--self-test', '--no-ui' -Wait -PassThru -WindowStyle Hidden
+        $PreviousData = $env:VOXTYPE_DATA_DIRECTORY
+        try {
+            $env:VOXTYPE_DATA_DIRECTORY = Join-Path $SmokeRoot 'test-profile'
+            $Smoke = Start-Process -FilePath $SmokeExe -ArgumentList '--self-test', '--no-ui' -Wait -PassThru -WindowStyle Hidden
+        }
+        finally {
+            $env:VOXTYPE_DATA_DIRECTORY = $PreviousData
+        }
         if ($Smoke.ExitCode -ne 0) { throw "Installed self-test failed with exit code $($Smoke.ExitCode)" }
         $Uninstaller = Join-Path $SmokeRoot 'unins000.exe'
         if (-not (Test-Path -LiteralPath $Uninstaller)) { throw 'Smoke install did not produce an uninstaller' }

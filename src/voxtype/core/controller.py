@@ -47,6 +47,10 @@ class InferenceTimeoutError(RuntimeError):
     """A native inference call exceeded the bounded session deadline."""
 
 
+class ProcessingCancelled(RuntimeError):
+    """The user stopped processing pending audio."""
+
+
 class ApplicationController:
     """Thread-safe command surface consumed by hotkeys, tray and Qt widgets.
 
@@ -132,6 +136,8 @@ class ApplicationController:
         self._audio_archive: wave.Wave_write | None = None
         self._shutdown_requested = threading.Event()
         self._start_cancelled = threading.Event()
+        self._processing_cancelled = threading.Event()
+        self._delivery_busy = False
         self._delivery_queue: Queue[tuple[str, str] | None] = Queue(maxsize=256)
         self._delivery_thread = threading.Thread(
             target=self._delivery_loop,
@@ -199,6 +205,16 @@ class ApplicationController:
         with self._lock:
             if self._shutdown_requested.is_set() or self._recovery_active:
                 return False
+            if (
+                self._session_id is not None
+                or self._inference_thread is not None
+                or self._delivery_busy
+                or any(
+                    worker is not None and worker.is_alive()
+                    for worker in (self._start_thread, self._stop_thread, self._finish_thread)
+                )
+            ):
+                return False
             if self.state not in {
                 AppState.IDLE,
                 AppState.COMPLETED,
@@ -206,6 +222,7 @@ class ApplicationController:
             }:
                 return False
             self._start_cancelled.clear()
+            self._processing_cancelled.clear()
             decision = self.target_manager.start_session()
             if self.state is AppState.ERROR_RECOVERABLE:
                 self.state_machine.transition(AppState.IDLE, "retry requested")
@@ -214,6 +231,7 @@ class ApplicationController:
             self._session_stopped_monotonic = None
             self._completed_duration_s = 0.0
             self._completed_transcript = ""
+            self._last_stats = None
             self._delivery_status = "pending"
             self._last_fragment = ""
             self._provisional = ""
@@ -430,6 +448,11 @@ class ApplicationController:
                 if self._shutdown_requested.is_set() and pipeline.is_alive():
                     self._status_message = "Ожидаю завершения локального inference"
         self._delivery_queue.join()
+        with self._lock:
+            cancelled = self._processing_cancelled.is_set() and self._session_id is not None
+        if cancelled:
+            self._handle_runtime_error("Обработка отменена", ProcessingCancelled())
+            return
         # The capture-stop snapshot may still include audio awaiting the pipeline.
         # Refresh it only after all leases have been acknowledged so a completed
         # session does not keep showing a stale audio backlog.
@@ -443,6 +466,14 @@ class ApplicationController:
         # A temporarily inactive target must not mark recognized speech as an
         # errored history session.
         self._complete_session("completed")
+
+    def cancel_processing(self) -> bool:
+        with self._lock:
+            if self.state is not AppState.FINISHING or self._session_id is None:
+                return False
+            self._processing_cancelled.set()
+            self._status_message = "Останавливаю обработку; записанный текст сохранён"
+            return True
 
     def _pipeline_loop(self) -> None:
         with self._lock:
@@ -474,6 +505,8 @@ class ApplicationController:
 
         try:
             while True:
+                if self._processing_cancelled.is_set():
+                    raise ProcessingCancelled()
                 lease = audio_queue.acquire(timeout=0.1)
                 if lease is None:
                     with self._lock:
@@ -535,6 +568,8 @@ class ApplicationController:
             self._worker_language = language
 
     def _transcribe_segment(self, segment: AudioSegment, language: Language) -> None:
+        if not segment.samples.size:
+            return
         self.state_machine.transition_if(
             {AppState.LISTENING}, AppState.SPEECH_DETECTED, "VAD emitted speech"
         )
@@ -566,7 +601,11 @@ class ApplicationController:
         with self._lock:
             self._provisional = "Распознаю…"
         inference_started = time.perf_counter()
-        guarded = self._transcribe_guarded_with_timeout(request, committed)
+        guarded = self._transcribe_guarded_with_timeout(
+            request, committed, cancel_event=self._processing_cancelled
+        )
+        if self._processing_cancelled.is_set():
+            raise ProcessingCancelled()
         result = guarded.result
         with self._lock:
             self._last_prompt_result_uncertain = result.possible_inaccuracy
@@ -664,7 +703,7 @@ class ApplicationController:
                     self._delivery_status = "pending"
                     self._status_message = "Подтверждённый текст ожидает вставки"
             if self.settings.dictation.auto_insert:
-                fragment_id = f"{self._session_id or 'none'}:{segment.sequence}"
+                fragment_id = f"{journal.session_id}:{segment.sequence}"
                 try:
                     self._delivery_queue.put_nowait((fragment_id, outcome.insertion_text))
                 except Full:
@@ -691,6 +730,13 @@ class ApplicationController:
                 if item is None:
                     return
                 fragment_id, text = item
+                with self._lock:
+                    if (
+                        self._processing_cancelled.is_set()
+                        or self._session_id != fragment_id.rsplit(":", 1)[0]
+                    ):
+                        continue
+                    self._delivery_busy = True
                 try:
                     injection = (
                         self.injection_service.submit(text, fragment_id=fragment_id)
@@ -704,6 +750,8 @@ class ApplicationController:
                         self._error_message = "Вставка не удалась; весь текст сохранён"
                     continue
                 with self._lock:
+                    if self._processing_cancelled.is_set():
+                        continue
                     if injection.status in {
                         InjectionStatus.QUEUED,
                         InjectionStatus.BLOCKED,
@@ -723,8 +771,11 @@ class ApplicationController:
                         self._error_message = (
                             "Вставка не подтверждена. Автоповтор отключён во избежание дубля."
                         )
-                    else:
+                    elif injection.status is InjectionStatus.INSERTED:
                         self._delivery_status = "delivered"
+                        self._error_message = ""
+                    elif injection.status is InjectionStatus.COPIED:
+                        self._delivery_status = "copied"
                         self._error_message = ""
                 if injection.status in {InjectionStatus.QUEUED, InjectionStatus.BLOCKED}:
                     self.state_machine.transition_if(
@@ -743,6 +794,8 @@ class ApplicationController:
                         "target became available",
                     )
             finally:
+                with self._lock:
+                    self._delivery_busy = False
                 self._delivery_queue.task_done()
 
     def _safe_prompt_context(
@@ -788,7 +841,11 @@ class ApplicationController:
             return new_language
 
     def _transcribe_guarded_with_timeout(
-        self, request: TranscriptionRequest, committed_text: str
+        self,
+        request: TranscriptionRequest,
+        committed_text: str,
+        *,
+        cancel_event: threading.Event | None = None,
     ) -> GuardedTranscription:
         """Run native inference behind one daemon watchdog per serial chunk."""
 
@@ -819,12 +876,20 @@ class ApplicationController:
             except RuntimeError:
                 self._inference_thread = None
                 raise
-        try:
-            outcome = results.get(timeout=self.inference_timeout_s)
-        except Empty as exc:
-            raise InferenceTimeoutError(
-                f"local inference exceeded {self.inference_timeout_s:.1f} seconds"
-            ) from exc
+        deadline = time.monotonic() + self.inference_timeout_s
+        while True:
+            if cancel_event is not None and cancel_event.is_set():
+                raise ProcessingCancelled()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise InferenceTimeoutError(
+                    f"local inference exceeded {self.inference_timeout_s:.1f} seconds"
+                )
+            try:
+                outcome = results.get(timeout=min(remaining, 0.1) if cancel_event else remaining)
+                break
+            except Empty:
+                continue
         if isinstance(outcome, BaseException):
             raise outcome
         return outcome
@@ -1204,6 +1269,10 @@ class ApplicationController:
             user_message = (
                 "Модель не ответила вовремя. Текст и оставшееся аудио сохранены для восстановления."
             )
+        elif isinstance(error, ProcessingCancelled):
+            user_message = (
+                "Обработка отменена. Текст и оставшееся аудио сохранены для восстановления."
+            )
         with self._lock:
             self._error_message = user_message
             self._status_message = "Накопленный текст сохранён в журнале"
@@ -1219,11 +1288,7 @@ class ApplicationController:
                 self.session_repository.add_warning(session_id, type(error).__name__)
             except (KeyError, OSError):
                 self.logger.exception("session_warning_failed")
-        target_state = (
-            AppState.ERROR_FATAL
-            if isinstance(error, InferenceTimeoutError)
-            else AppState.ERROR_RECOVERABLE
-        )
+        target_state = AppState.ERROR_RECOVERABLE
         if self.state not in {
             AppState.ERROR_RECOVERABLE,
             AppState.ERROR_FATAL,
@@ -1287,8 +1352,6 @@ class ApplicationController:
 
     def copy_pending_text(self) -> str:
         result = self.injection_service.copy_pending_to_clipboard(consume=True)
-        if result.status is InjectionStatus.COPIED and self.state is AppState.FINISHING:
-            self._finalize_session("completed_safe_copy")
         return result.delivered_text
 
     def copy_full_transcript(self) -> bool:
@@ -1313,11 +1376,16 @@ class ApplicationController:
         with self._lock:
             if result.status is InjectionStatus.INSERTED:
                 self._delivery_status = "delivered"
-                self._status_message = "Текст вставлен"
+                self._status_message = "Команда вставки отправлена"
                 self._error_message = ""
                 if int(getattr(self.injection_service, "pending_fragments", 0)) == 0:
                     self.target_manager.end_session()
                 return True
+            if result.status is InjectionStatus.COPIED:
+                self._delivery_status = "copied"
+                self._status_message = "Текст скопирован"
+                self._error_message = ""
+                return False
             temporarily_unavailable = (
                 result.status is InjectionStatus.QUEUED
                 and result.target_status in {TargetStatus.TARGET_INACTIVE, TargetStatus.SUSPENDED}
@@ -1420,7 +1488,7 @@ class ApplicationController:
                 )
             elif not self.settings.dictation.auto_insert:
                 self._delivery_status = "pending"
-            elif self._delivery_status != "failed":
+            elif self._delivery_status not in {"failed", "copied"}:
                 self._delivery_status = (
                     "delivered"
                     if int(getattr(self.injection_service, "pending_fragments", 0)) == 0

@@ -352,7 +352,7 @@ class StreamingSegmenter:
     def flush(self) -> tuple[AudioSegment, ...]:
         emitted: list[AudioSegment] = []
         if self._pending.size:
-            pending = self._pending.copy()
+            pending = self._pending
             start = self._pending_start
             self._pending = np.empty(0, dtype=np.float32)
             emitted.extend(self._process_frame(pending, start))

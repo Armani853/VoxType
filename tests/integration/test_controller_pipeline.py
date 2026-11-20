@@ -765,7 +765,7 @@ def test_controller_never_finalizes_completed_when_audio_dispatcher_does_not_sto
     session_repository.close()
 
 
-def test_inference_watchdog_converts_hang_to_fatal_recoverable_session(tmp_path: Path) -> None:
+def test_inference_watchdog_allows_retry_once_native_call_exits(tmp_path: Path) -> None:
     settings_repository = SettingsRepository(tmp_path / "settings.json")
     session_repository = SessionRepository(tmp_path / "sessions.sqlite3")
     controller = ApplicationController(
@@ -783,9 +783,67 @@ def test_inference_watchdog_converts_hang_to_fatal_recoverable_session(tmp_path:
     assert controller.start_dictation()
     wait_for_state(controller, AppState.LISTENING)
     assert controller.stop_dictation()
-    wait_for_state(controller, AppState.ERROR_FATAL)
+    wait_for_state(controller, AppState.ERROR_RECOVERABLE)
+    assert not controller.start_dictation()
+    worker = controller._inference_thread
+    if worker is not None:
+        worker.join(timeout=2)
+    assert controller.shutdown()
     assert session_repository.recent()[0].status == "recovery_required"
     session_repository.close()
+
+
+def test_cancel_processing_drops_late_result_and_next_dictation_works(tmp_path: Path) -> None:
+    entered = threading.Event()
+    release = threading.Event()
+
+    class SlowFirstCall(DeterministicBackend):
+        def transcribe(self, request: TranscriptionRequest) -> TranscriptionResult:
+            if not entered.is_set():
+                entered.set()
+                if not release.wait(5):
+                    raise TimeoutError("test did not release native inference")
+            return super().transcribe(request)
+
+    repository = SessionRepository(tmp_path / "sessions.sqlite3")
+    injection = FixtureInjection()
+    controller = ApplicationController(
+        settings_repository=SettingsRepository(tmp_path / "settings.json"),
+        session_repository=repository,
+        backend=SlowFirstCall(),
+        capture_factory=lambda queue: FixtureCapture(queue),  # type: ignore[arg-type,return-value]
+        segmenter_factory=lambda: StreamingSegmenter(AlwaysSpeech()),
+        target_manager=FixtureTargetManager(),  # type: ignore[arg-type]
+        injection_service=injection,  # type: ignore[arg-type]
+        spool_root=tmp_path / "spool",
+    )
+    try:
+        controller.initialize()
+        assert controller.start_dictation()
+        wait_for_state(controller, AppState.LISTENING)
+        assert controller.stop_dictation()
+        assert entered.wait(5)
+        assert controller.cancel_processing()
+        wait_for_state(controller, AppState.ERROR_RECOVERABLE)
+        assert not controller.start_dictation()
+        native = controller._inference_thread
+        finisher = controller._finish_thread
+        release.set()
+        for worker in (native, finisher):
+            if worker is not None:
+                worker.join(timeout=5)
+                assert not worker.is_alive()
+        assert not injection.fragments
+        assert repository.recent()[0].status == "recovery_required"
+        assert controller.start_dictation()
+        wait_for_state(controller, AppState.LISTENING)
+        assert controller.stop_dictation()
+        wait_for_state(controller, AppState.COMPLETED)
+        assert injection.fragments == ["Привет мир"]
+    finally:
+        release.set()
+        controller.shutdown()
+        repository.close()
 
 
 def test_long_silence_does_not_exhaust_durable_inflight_leases(

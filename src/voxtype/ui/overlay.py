@@ -54,6 +54,7 @@ if PYSIDE6_AVAILABLE:
     class DictationOverlay(QWidget):
         pause_requested = Signal()
         stop_requested = Signal()
+        cancel_processing_requested = Signal()
         compact_changed = Signal(bool)
         position_changed = Signal(int, int)
         copy_all_requested = Signal()
@@ -209,16 +210,23 @@ if PYSIDE6_AVAILABLE:
         def _connect_ui(self) -> None:
             self.expand_button.clicked.connect(self.toggle_compact)
             self.pause_button.clicked.connect(self.pause_requested)
-            self.stop_button.clicked.connect(self.stop_requested)
+            self.stop_button.clicked.connect(self._request_stop)
             self.copy_all_button.clicked.connect(self.copy_all_requested)
             self.insert_button.clicked.connect(self.insert_requested)
             self.close_result_button.clicked.connect(self.close_result_requested)
+
+        def _request_stop(self) -> None:
+            if self._state.state is AppStatus.FINISHING:
+                self.cancel_processing_requested.emit()
+            else:
+                self.stop_requested.emit()
 
         def bind_controller(self, controller: object) -> None:
             self.unbind_controller()
             for signal, method_name in (
                 (self.pause_requested, "toggle_pause"),
                 (self.stop_requested, "toggle_dictation"),
+                (self.cancel_processing_requested, "cancel_processing"),
             ):
                 method = getattr(controller, method_name, None)
                 if callable(method):
@@ -283,7 +291,11 @@ if PYSIDE6_AVAILABLE:
             self.target_label.setToolTip(target)
             paused = state.state in {AppStatus.PAUSED, AppStatus.PAUSED_TARGET_LOST}
             self.pause_button.setText("Продолжить" if paused else "Пауза")
-            self.stop_button.setEnabled(state.state.active)
+            finishing = state.state is AppStatus.FINISHING
+            stop_label = "Отменить обработку" if finishing else "Остановить"
+            if self.stop_button.text() != stop_label:
+                self.stop_button.setText(stop_label)
+            self.stop_button.setEnabled(state.state.active or finishing)
             self.pause_button.setVisible(not completed)
             self.stop_button.setVisible(not completed)
             self.result_buttons.setVisible(completed)
@@ -312,7 +324,9 @@ if PYSIDE6_AVAILABLE:
                 if state.delivery_status == "no_result":
                     return state.status_message
                 if state.delivery_status == "delivered":
-                    return "Текст вставлен"
+                    return "Команда вставки отправлена"
+                if state.delivery_status == "copied":
+                    return "Текст скопирован"
                 if state.delivery_status == "queued_target_inactive":
                     return "Вернитесь в целевое окно"
                 if state.delivery_status in {"failed", "unknown", "copy_required"}:

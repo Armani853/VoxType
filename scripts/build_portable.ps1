@@ -125,8 +125,6 @@ if ((Get-Item -LiteralPath $Executable).Length -eq 0) { throw 'Portable executab
 
 Write-Host '[5/6] Smoke-testing packaged executable'
 $PackagedSmokeStopwatch = [Diagnostics.Stopwatch]::StartNew()
-$Smoke = Start-Process -FilePath $Executable -ArgumentList '--self-test', '--no-ui' -Wait -PassThru -WindowStyle Hidden
-if ($Smoke.ExitCode -ne 0) { throw "Packaged self-test failed with exit code $($Smoke.ExitCode)" }
 $InferenceSmoke = Start-Process -FilePath $Executable -ArgumentList '--inference-smoke-test' -Wait -PassThru -WindowStyle Hidden
 if ($InferenceSmoke.ExitCode -ne 0) { throw "Packaged inference smoke-test failed with exit code $($InferenceSmoke.ExitCode)" }
 $PreviousSmokeData = $env:VOXTYPE_DATA_DIRECTORY
@@ -134,6 +132,8 @@ $PreviousSmokeCache = $env:VOXTYPE_CACHE_DIRECTORY
 try {
     $env:VOXTYPE_DATA_DIRECTORY = Join-Path $BuildRoot 'ui-smoke-profile'
     $env:VOXTYPE_CACHE_DIRECTORY = Join-Path $BuildRoot 'ui-smoke-cache'
+    $Smoke = Start-Process -FilePath $Executable -ArgumentList '--self-test', '--no-ui' -Wait -PassThru -WindowStyle Hidden
+    if ($Smoke.ExitCode -ne 0) { throw "Packaged self-test failed with exit code $($Smoke.ExitCode)" }
     $UiSmoke = Start-Process -FilePath $Executable -ArgumentList '--ui-smoke-test' -Wait -PassThru
     if ($UiSmoke.ExitCode -ne 0) { throw "Packaged Qt startup smoke-test failed with exit code $($UiSmoke.ExitCode)" }
 }

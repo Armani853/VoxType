@@ -364,17 +364,6 @@ class TextInjectionService:
                 )
             except (ClipboardError, OSError):
                 restored = False
-            if not restored:
-                # Some editors (notably Word) strip custom formats while
-                # enriching CF_UNICODETEXT during paste. If the clipboard still
-                # contains exactly our submitted phrase, content ownership is
-                # unambiguous and the original snapshot can be restored without
-                # overwriting unrelated user data.
-                try:
-                    if self._clipboard.get_text() == text:
-                        restored = self._clipboard.restore(snapshot)
-                except (ClipboardError, OSError):
-                    restored = False
         return restored, send_error
 
     def _inject_once(
@@ -390,7 +379,7 @@ class TextInjectionService:
                     detail = ""
                     if not restored:
                         detail = (
-                            "Text was pasted, but the complete clipboard snapshot "
+                            "Paste shortcut was sent, but the complete clipboard snapshot "
                             "could not be restored without overwriting newer content"
                         )
                     return InjectionStrategy.CLIPBOARD, restored, detail

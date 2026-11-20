@@ -323,6 +323,7 @@ def build_runtime(*, verbose: bool = False) -> RuntimeBundle:
         normalization_enabled=settings.audio.normalization,
         noise_suppression_enabled=settings.audio.noise_suppression,
     )
+
     def capture_factory(queue: LosslessAudioQueue) -> AudioCaptureService:
         selected = resolve_recording_device(settings.audio.device_id, devices)
         return AudioCaptureService(

@@ -29,6 +29,11 @@ def main() -> int:
     parser.add_argument("corpus", type=Path)
     parser.add_argument("models", type=Path, help="Existing local model directory to copy")
     parser.add_argument("profile", type=Path, help="New isolated QA profile directory")
+    parser.add_argument(
+        "--link-models",
+        action="store_true",
+        help="Share read-only model files with a QA model directory on the same volume",
+    )
     parser.add_argument("--input-device", type=int, required=True)
     parser.add_argument("--output-device", type=int, required=True)
     parser.add_argument("--case", action="append", help="Case ID. Defaults to the full corpus.")
@@ -45,7 +50,11 @@ def main() -> int:
     if any(case not in references for case in cases):
         parser.error("Unknown case ID")
     for model in ("small", "silero-vad"):
-        shutil.copytree(args.models / model, args.profile / "models" / model)
+        shutil.copytree(
+            args.models / model,
+            args.profile / "models" / model,
+            copy_function=os.link if args.link_models else shutil.copy2,
+        )
     SettingsRepository(args.profile / "settings.json").update(
         {
             "audio": {"device_id": args.input_device},

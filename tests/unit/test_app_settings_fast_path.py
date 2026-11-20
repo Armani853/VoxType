@@ -94,6 +94,7 @@ def test_startup_hotkey_conflict_keeps_other_hotkeys_registered() -> None:
     app.runtime = SimpleNamespace(settings=AppSettings())
     app.controller = MagicMock()
     app.hotkeys = MagicMock()
+    app.hotkeys.unregister_all.return_value = ()
     app.tray = MagicMock()
 
     def register(hotkey, _callback) -> None:  # type: ignore[no-untyped-def]
@@ -117,6 +118,7 @@ def test_settings_hotkey_conflict_rolls_back_partial_registration() -> None:
     app.runtime = SimpleNamespace(settings=AppSettings())
     app.controller = MagicMock()
     app.hotkeys = MagicMock()
+    app.hotkeys.unregister_all.return_value = ()
     app.tray = MagicMock()
     app.hotkeys.register.side_effect = [None, RuntimeError("combination is occupied")]
 

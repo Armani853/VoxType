@@ -7,6 +7,7 @@ import json
 import os
 import sys
 from dataclasses import asdict
+from pathlib import Path
 
 import numpy as np
 
@@ -69,7 +70,12 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if arguments.inference_smoke_test:
         data = data_directory_path()
-        vad_path = install_silero_vad(data)
+        vad_path = Path(sys.executable).resolve().parent / "voxtype_assets" / "silero_vad.onnx"
+        if not vad_path.is_file():
+            vad_path = data / "models" / "silero-vad" / "silero_vad.onnx"
+        if not vad_path.is_file():
+            sys.stderr.write("local VAD model is required for inference smoke-test\n")
+            return 2
         from voxtype.vad.silero import SileroVAD
 
         probability = SileroVAD(vad_path, strict=True).speech_probability(

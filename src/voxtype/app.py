@@ -24,8 +24,8 @@ from PySide6.QtCore import (
     QByteArray,
     QObject,
     QSettings,
-    QTimer,
     Qt,
+    QTimer,
     Signal,
 )
 from PySide6.QtWidgets import QApplication, QFileDialog
@@ -341,6 +341,9 @@ class DesktopApplication:
             overlay.stop_requested.connect(
                 lambda: self._invoke_ui("overlay.stop", self.controller.toggle_dictation)
             )
+            overlay.cancel_processing_requested.connect(
+                lambda: self._invoke_ui("overlay.cancel", self.controller.cancel_processing)
+            )
             overlay.copy_all_requested.connect(
                 lambda: self._run_background(
                     "voxtype-copy-result", self.controller.copy_full_transcript
@@ -592,7 +595,11 @@ class DesktopApplication:
             self.controller.toggle_pause()
 
     def _configure_hotkeys(self, *, strict: bool = True) -> bool:
-        self.hotkeys.unregister_all()
+        if self.hotkeys.unregister_all():
+            self.tray.show_message(
+                "Горячие клавиши", "Не удалось освободить старые сочетания", critical=True
+            )
+            return False
         definitions: tuple[tuple[str, int, str, Any], ...] = (
             (
                 self.runtime.settings.hotkeys.toggle,
