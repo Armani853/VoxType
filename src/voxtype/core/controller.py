@@ -726,6 +726,7 @@ class ApplicationController:
 
         while True:
             item = self._delivery_queue.get()
+            owns_delivery = False
             try:
                 if item is None:
                     return
@@ -737,6 +738,7 @@ class ApplicationController:
                     ):
                         continue
                     self._delivery_busy = True
+                    owns_delivery = True
                 try:
                     injection = (
                         self.injection_service.submit(text, fragment_id=fragment_id)
@@ -794,8 +796,9 @@ class ApplicationController:
                         "target became available",
                     )
             finally:
-                with self._lock:
-                    self._delivery_busy = False
+                if owns_delivery:
+                    with self._lock:
+                        self._delivery_busy = False
                 self._delivery_queue.task_done()
 
     def _safe_prompt_context(
@@ -1368,10 +1371,23 @@ class ApplicationController:
         return copied
 
     def retry_completed_insertion(self) -> bool:
-        """Retry retained FIFO without blocking a Qt handler."""
+        """Reserve the completed session while dispatching its pending text."""
+        with self._lock:
+            if (
+                self.state is not AppState.COMPLETED
+                or self._delivery_busy
+                or self._shutdown_requested.is_set()
+                or not self.injection_service.pending_fragments
+            ):
+                return False
+            self._delivery_busy = True
+        try:
+            return self._retry_retained_insertion()
+        finally:
+            with self._lock:
+                self._delivery_busy = False
 
-        if not self.injection_service.pending_fragments:
-            return False
+    def _retry_retained_insertion(self) -> bool:
         result = self.injection_service.flush()
         with self._lock:
             if result.status is InjectionStatus.INSERTED:
