@@ -15,9 +15,10 @@ from ._optional import PYSIDE6_AVAILABLE, require_pyside6
 _KEEP_SELECTION = object()
 
 if PYSIDE6_AVAILABLE:
-    from PySide6.QtCore import QSignalBlocker, Qt, Signal
+    from PySide6.QtCore import QSettings, QSignalBlocker, Qt, Signal
     from PySide6.QtGui import QKeySequence
     from PySide6.QtWidgets import (
+        QApplication,
         QCheckBox,
         QComboBox,
         QDialog,
@@ -43,6 +44,7 @@ if PYSIDE6_AVAILABLE:
 
     from .theme import SPACING, state_color
     from .widgets import AudioLevelMeter, Card, rms_to_meter
+    from .obsidian import VoxButton, VoxComboBox, VoxEmptyState, VoxSectionHeader, VoxToggle, confirm_delete
 
     class SettingsWindow(QDialog):
         settings_submitted = Signal(object)
@@ -93,7 +95,7 @@ if PYSIDE6_AVAILABLE:
             content = QHBoxLayout()
             self.navigation = QListWidget(self)
             self.navigation.setObjectName("settingsNavigation")
-            self.navigation.setFixedWidth(210)
+            self.navigation.setFixedWidth(154)
             self.navigation.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
             self.pages = QStackedWidget(self)
             self.pages.setObjectName("settingsPages")
@@ -102,11 +104,12 @@ if PYSIDE6_AVAILABLE:
             root.addLayout(content, 1)
 
             self._build_general_page()
-            self._build_dictation_page()
             self._build_audio_page()
+            self._build_dictation_page()
             self._build_model_page()
-            self._build_privacy_page()
             self._build_hotkeys_page()
+            self._build_appearance_page()
+            self._build_privacy_page()
             self._build_diagnostics_page()
             self.navigation.setCurrentRow(0)
 
@@ -144,22 +147,21 @@ if PYSIDE6_AVAILABLE:
                 SPACING.space_4,
             )
             layout.setSpacing(SPACING.space_3)
-            heading = QLabel(title, canvas)
-            heading.setProperty("heading", True)
+            heading = VoxSectionHeader(title, canvas, role="page")
             hint = QLabel(description, canvas)
             hint.setProperty("muted", True)
             hint.setWordWrap(True)
             layout.addWidget(heading)
             layout.addWidget(hint)
-            form_card = Card(canvas)
             form = QFormLayout()
             form.setContentsMargins(0, 0, 0, 0)
             form.setHorizontalSpacing(24)
-            form.setVerticalSpacing(SPACING.space_3)
+            form.setVerticalSpacing(SPACING.space_5)
+            form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+            form.setFormAlignment(Qt.AlignmentFlag.AlignTop)
             form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
             form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-            form_card.content_layout.addLayout(form)
-            layout.addWidget(form_card)
+            layout.addLayout(form)
             layout.addStretch(1)
             scroll.setWidget(canvas)
             self.pages.addWidget(scroll)
@@ -167,21 +169,28 @@ if PYSIDE6_AVAILABLE:
 
         @staticmethod
         def _combo(items: Iterable[tuple[str, object]], parent: QWidget) -> QComboBox:
-            combo = QComboBox(parent)
+            combo = VoxComboBox(parent)
             for label, data in items:
                 combo.addItem(label, data)
             return combo
 
         def _build_general_page(self) -> None:
-            page, form = self._page("Общие", "Поведение приложения и внешний вид.")
-            self.autostart_check = QCheckBox("Запускать вместе с Windows", page)
+            page, form = self._page("Общие", "Запуск приложения и поведение окна.")
+            self.autostart_check = VoxToggle("Запускать вместе с Windows", page)
             self.autostart_check.setToolTip(
                 "Горячие клавиши работают, пока VoxType запущен. "
                 "Включите автозапуск, чтобы они были доступны после входа в Windows."
             )
-            self.minimize_tray_check = QCheckBox("Сворачивать в системный трей", page)
-            self.overlay_check = QCheckBox("Показывать индикатор диктовки", page)
-            self.sounds_check = QCheckBox("Тихие звуки начала и окончания", page)
+            self.minimize_tray_check = VoxToggle("Сворачивать в системный трей", page)
+            self.overlay_check = VoxToggle("Показывать индикатор диктовки", page)
+            self.sounds_check = VoxToggle("Тихие звуки начала и окончания", page)
+            form.addRow(self.autostart_check)
+            form.addRow(self.minimize_tray_check)
+            form.addRow(self.overlay_check)
+            form.addRow(self.sounds_check)
+
+        def _build_appearance_page(self) -> None:
+            page, form = self._page("Внешний вид", "Цветовая схема и язык интерфейса.")
             self.theme_combo = self._combo(
                 (("Как в системе", "system"), ("Светлая", "light"), ("Тёмная", "dark")),
                 page,
@@ -189,15 +198,23 @@ if PYSIDE6_AVAILABLE:
             self.interface_language_combo = self._combo(
                 (("Русский", "ru"), ("English", "en")), page
             )
-            form.addRow(self.autostart_check)
-            form.addRow(self.minimize_tray_check)
-            form.addRow(self.overlay_check)
-            form.addRow(self.sounds_check)
             form.addRow("Тема", self.theme_combo)
             form.addRow("Язык интерфейса", self.interface_language_combo)
+            self.reduce_motion = VoxToggle("Уменьшить анимацию", page)
+            self.reduce_motion.setAccessibleDescription("Отключает декоративные переходы VoxType")
+            form.addRow(self.reduce_motion)
+
+        def set_view_preferences(self, store: QSettings) -> None:
+            self.reduce_motion.setChecked(store.value("ui/reduceMotion", False, type=bool))
+
+            def update(value: bool) -> None:
+                store.setValue("ui/reduceMotion", value)
+                QApplication.instance().setProperty("voxtypeReduceMotion", value)
+
+            self.reduce_motion.toggled.connect(update)
 
         def _build_dictation_page(self) -> None:
-            page, form = self._page("Диктовка", "Язык, способ вставки и политика целевого окна.")
+            page, form = self._page("Распознавание", "Язык, способ вставки и политика целевого окна.")
             self.default_language_combo = self._combo(
                 (("RU — Русский", "ru"), ("EN — English", "en")), page
             )
@@ -294,10 +311,13 @@ if PYSIDE6_AVAILABLE:
             form.addRow("", self.test_microphone_button)
 
         def _build_model_page(self) -> None:
+            self._models_index = self.pages.count()
             page, form = self._page(
-                "Модель", "Установленные локальные модели и вычислительный профиль."
+                "Модели", "Установленные локальные модели и вычислительный профиль."
             )
             self.model_combo = QComboBox(page)
+            self.model_cards = QVBoxLayout()
+            form.addRow(self.model_cards)
             model_actions = QWidget(page)
             actions = QHBoxLayout(model_actions)
             actions.setContentsMargins(0, 0, 0, 0)
@@ -327,6 +347,61 @@ if PYSIDE6_AVAILABLE:
             form.addRow("Потоки CPU", self.cpu_threads_spin)
             form.addRow("Режим питания", self.power_mode_combo)
             form.addRow(self.gpu_experimental_check)
+
+        def open_models(self) -> None:
+            self.navigation.setCurrentRow(self._models_index)
+
+        def confirm_navigation(self) -> bool:
+            if not self._dirty:
+                return True
+            message = QMessageBox(self)
+            message.setWindowTitle("Сохранить изменения?")
+            message.setText("В настройках есть неприменённые изменения.")
+            message.setStandardButtons(QMessageBox.StandardButton.Save
+                                       | QMessageBox.StandardButton.Discard
+                                       | QMessageBox.StandardButton.Cancel)
+            message.setDefaultButton(QMessageBox.StandardButton.Cancel)
+            choice = message.exec()
+            if choice == QMessageBox.StandardButton.Save:
+                self._submit()
+                return True
+            return choice == QMessageBox.StandardButton.Discard
+
+        def set_model_cards(self, items: list[tuple[str, str, str, bool, bool, bool, bool]]) -> None:
+            while self.model_cards.count():
+                old = self.model_cards.takeAt(0).widget()
+                if old is not None:
+                    old.hide()
+                    old.deleteLater()
+            if items and not any(item[3] for item in items):
+                empty = VoxEmptyState("files", "Нет установленных моделей",
+                                      "Для офлайн-диктовки установите одну из моделей ниже.", self)
+                self.model_cards.addWidget(empty)
+            for identifier, description, size, installed, active, install_allowed, usable in items:
+                card = Card(self)
+                title = VoxSectionHeader(identifier, card)
+                card.content_layout.addWidget(title)
+                detail = QLabel(f"Whisper · RU / EN · {size}\n{description}", card)
+                detail.setWordWrap(True)
+                card.content_layout.addWidget(detail)
+                state = "Активна" if active and installed else "Установлена" if installed else "Не установлена"
+                label = QLabel(state if usable else f"{state} · ограничено политикой", card)
+                label.setProperty("muted", True)
+                card.content_layout.addWidget(label)
+                action = VoxButton("Активна" if active and installed else "Активировать" if installed else "Установить", card)
+                action.setEnabled((usable and not active) if installed else install_allowed)
+                if installed:
+                    action.clicked.connect(lambda _checked=False, model=identifier: self._activate_model_card(model))
+                else:
+                    action.clicked.connect(lambda _checked=False, model=identifier: self.model_download_requested.emit(model))
+                card.content_layout.addWidget(action, alignment=Qt.AlignmentFlag.AlignLeft)
+                self.model_cards.addWidget(card)
+
+        def _activate_model_card(self, identifier: str) -> None:
+            index = self.model_combo.findData(identifier)
+            if index >= 0:
+                self.model_combo.setCurrentIndex(index)
+                self._submit()
 
         def _build_privacy_page(self) -> None:
             page, form = self._page(
@@ -780,26 +855,20 @@ if PYSIDE6_AVAILABLE:
             model_id = str(self.model_combo.currentData() or "")
             if not model_id:
                 return
-            answer = QMessageBox.question(
+            if confirm_delete(
                 self,
                 "Удалить модель?",
                 f"Локальная модель «{self.model_combo.currentText()}» будет удалена.",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
-                QMessageBox.StandardButton.Cancel,
-            )
-            if answer is QMessageBox.StandardButton.Yes:
+            ):
                 self.model_delete_requested.emit(model_id)
 
         def _confirm_delete_data(self) -> None:
-            answer = QMessageBox.warning(
+            if confirm_delete(
                 self,
                 "Удалить локальные данные?",
                 "Будут удалены история, журналы сессий и сохранённое аудио. "
                 "Это действие нельзя отменить.",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
-                QMessageBox.StandardButton.Cancel,
-            )
-            if answer is QMessageBox.StandardButton.Yes:
+            ):
                 self.delete_local_data_requested.emit()
 
     def _as_mapping(value: object) -> Mapping[str, object]:

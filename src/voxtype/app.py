@@ -29,7 +29,8 @@ from PySide6.QtCore import (
     QTimer,
     Signal,
 )
-from PySide6.QtWidgets import QApplication, QFileDialog
+from PySide6.QtGui import QKeySequence, QShortcut
+from PySide6.QtWidgets import QApplication, QFileDialog, QInputDialog, QWidget
 
 from voxtype.asr.base import TranscriptionRequest
 from voxtype.asr.benchmark import BenchmarkCase, benchmark_backend, save_benchmark_results
@@ -75,6 +76,8 @@ from voxtype.ui import (
 )
 from voxtype.ui.messages import failure_message
 from voxtype.ui.professional import ProfessionalWindow
+from voxtype.ui.desktop_shell import CommandPalette
+from voxtype.ui.obsidian import ModelDownloadDialog
 from voxtype.core.profiles import DictationProfile
 from voxtype.transcript.professional import VoiceAction
 from voxtype.vad.segmenter import SegmentationSettings, StreamingSegmenter
@@ -92,6 +95,7 @@ _LOGGER = logging.getLogger("voxtype.app")
 class _WorkerSignals(QObject):
     professional_action = Signal(int, object, object)
     professional_delivery_failed = Signal()
+    dashboard_copied = Signal(bool)
     workflow_action = Signal(str, str, str)
     snapshot_ready = Signal(object)
     model_progress = Signal(int, str)
@@ -187,6 +191,16 @@ class DesktopApplication:
             interface_language=runtime.settings.general.ui_language,
             minimize_to_tray=runtime.settings.general.minimize_to_tray,
         )
+        if os.environ.get("VOXTYPE_DATA_DIRECTORY", "").strip():
+            geometry = QSettings(str(runtime.data_directory / "ui.ini"), QSettings.Format.IniFormat)
+        else:
+            geometry = QSettings("VoxType", "VoxType")
+        self.main.set_geometry_store(geometry)
+        self._view_preferences = geometry
+        self.application.setProperty("voxtypeReduceMotion", geometry.value("ui/reduceMotion", False, type=bool))
+        self._model_download_dialog: ModelDownloadDialog | None = None
+        self._open_palette_shortcut = QShortcut(QKeySequence("Ctrl+K"), self.main)
+        self._open_palette_shortcut.activated.connect(self.show_command_palette)
         stage("main_window_constructed")
         self._overlay: DictationOverlay | None = None
         self.tray = TrayController(None)
@@ -306,6 +320,22 @@ class DesktopApplication:
             )
         )
         self.main.settings_requested.connect(self.show_settings)
+        self.main.shell.page_requested.connect(self._navigate_desktop)
+        self.main.shell.about_requested.connect(self.show_diagnostics)
+        self.main.shell.palette_requested.connect(self.show_command_palette)
+        self.main.copy_result_requested.connect(
+            self._copy_dashboard_result
+        )
+        self.signals.dashboard_copied.connect(
+            lambda copied: self._notify_desktop(
+                "copy-transcript", "Текст скопирован" if copied else "Не удалось скопировать текст",
+                "success" if copied else "warning",
+            )
+        )
+        self.main.insert_result_requested.connect(self._insert_dashboard_result)
+        self.main.cancel_processing_requested.connect(
+            lambda: self._invoke_ui("main.cancel", self.controller.cancel_processing)
+        )
         self.main.professional_requested.connect(self.show_professional_tools)
         self.main.exit_requested.connect(self.quit)
         self.main.history_requested.connect(self.show_history)
@@ -389,6 +419,7 @@ class DesktopApplication:
         if window is None:
             window = SettingsWindow(self.main)
             self._settings_window = window
+            window.set_view_preferences(self._view_preferences)
             window.set_privacy_policy(
                 history_disabled=self.controller.policy.disable_history,
                 audio_disabled=self.controller.policy.disable_audio_storage,
@@ -516,6 +547,10 @@ class DesktopApplication:
         if snapshot == self._last_rendered_snapshot:
             return
         self.main.update_snapshot(snapshot)
+        profiles = getattr(self.controller, "profiles", None)
+        if profiles is not None:
+            chosen = next((profile.name for profile in profiles.profiles() if profile.id == profiles.default_id), "")
+            self.main.set_profile_name(chosen)
         self.tray.update_snapshot(snapshot)
         if self._overlay is not None:
             self._overlay.update_snapshot(snapshot)
@@ -564,9 +599,13 @@ class DesktopApplication:
             if self._overlay is not None:
                 self._overlay.hide()
         if snapshot.state != self._last_state and snapshot.state == "ERROR_RECOVERABLE":
-            self.tray.show_message(
-                "VoxType", snapshot.error_message or snapshot.status_message, critical=True
-            )
+            message = snapshot.error_message or snapshot.status_message
+            if self.main.isVisible():
+                self.main.shell.notifications.notify(
+                    "dictation-error", "Диктовка требует внимания", "error", details=message,
+                )
+            else:
+                self.tray.show_message("VoxType", message, critical=True)
         if (
             snapshot.state != self._last_state
             and self.runtime.settings.general.play_sounds
@@ -648,6 +687,10 @@ class DesktopApplication:
             ),
             (self.runtime.settings.hotkeys.pause, 3, "toggle_pause", self.controller.toggle_pause),
         )
+        palette = parse_hotkey("Ctrl+K", identifier=4, name="command_palette")
+        self._open_palette_shortcut.setEnabled(not any(
+            self._shortcut_conflicts(spec, palette) for spec, _identifier, _name, _callback in definitions
+        ))
         failures: list[str] = []
         for specification, identifier, name, callback in definitions:
             try:
@@ -672,15 +715,89 @@ class DesktopApplication:
             return False
         return True
 
-    def show_professional_tools(self) -> None:
+    @staticmethod
+    def _shortcut_conflicts(specification: str, reference: object) -> bool:
+        try:
+            shortcut = parse_hotkey(specification, identifier=4, name="comparison")
+        except ValueError:
+            return False
+        return (shortcut.virtual_key, shortcut.modifiers) == (reference.virtual_key, reference.modifiers)
+
+    def _insert_dashboard_result(self) -> None:
+        state = self.controller.snapshot()
+        if state.full_transcript:
+            self._submit_professional_text(state.full_transcript)
+
+    def _copy_dashboard_result(self) -> None:
+        self._run_background("voxtype-copy-dashboard",
+                             lambda: self.signals.dashboard_copied.emit(self.controller.copy_full_transcript()))
+
+    def show_command_palette(self) -> None:
+        def choose_profile() -> None:
+            profiles = tuple(item for item in self.controller.profiles.profiles() if self.controller.profile_allowed(item))
+            titles = [item.name for item in profiles]
+            if not titles:
+                self.main.shell.notifications.notify("profiles-unavailable", "Нет доступных профилей", "warning")
+                return
+            name, accepted = QInputDialog.getItem(self.main, "Профиль диктовки", "Профиль", titles, editable=False)
+            if accepted:
+                self._run_background("voxtype-palette-profile",
+                                     lambda: self.controller.profiles.set_default(profiles[titles.index(name)].id))
+
+        entries = [
+            ("Начать или остановить диктовку", self.main.dictation_button.click),
+            ("Открыть историю", self.show_history), ("Выбрать профиль", choose_profile),
+            ("Открыть словарь", lambda: self._navigate_desktop("dictionary")),
+            ("Открыть модели", lambda: self._navigate_desktop("models")),
+            ("Открыть настройки", self.show_settings),
+            ("Скопировать последний результат",
+             lambda: self._run_background("voxtype-palette-copy", self.controller.copy_full_transcript)),
+            ("Открыть транскрипции", lambda: self._navigate_desktop("files")),
+        ]
+        CommandPalette(entries, self.main).exec()
+
+    def _navigate_desktop(self, page: str) -> None:
+        current = self.main.shell.current
+        if current in {"settings", "models"} and page not in {"settings", "models"}:
+            window = self.settings_window
+            if not window.confirm_navigation():
+                self.main.shell.show_page(current)
+                return
+            window.set_values(self.runtime.settings)
+        if page in {"home", "dictation"}:
+            self.main.shell.show_page(page)
+            self.main.update_snapshot(self.controller.snapshot())
+        elif page == "history":
+            self.show_history()
+        elif page in {"settings", "models"}:
+            self.show_settings(page)
+        else:
+            self.show_professional_tools(page)
+
+    def _embed_page(self, page: str, window: QWidget) -> None:
+        shell = self.main.shell
+        if shell.stack.indexOf(window) < 0:
+            window.setWindowFlags(Qt.WindowType.Widget)
+            window.setMinimumSize(0, 0)
+        shell.install_page(page, window)
+        shell.show_page(page)
+
+    def show_professional_tools(self, page: str = "profiles") -> None:
         if self._professional_window is None:
             self._professional_window = ProfessionalWindow(self.controller, self.main)
             self._professional_window.insertion_requested.connect(self._submit_professional_text)
             self._start_professional_queue()
             if self._file_queue is not None:
                 self._professional_window.bind_transcription_queue(self._file_queue)
-        self._professional_window.show()
-        self._professional_window.raise_()
+        if not self._professional_window.open_section(page):
+            self.main.shell.unavailable(page, "Раздел недоступен", "Нужный компонент отсутствует или отключён политикой.")
+            return
+        action = self._professional_window.section_action(page)
+        if action is not None:
+            self.main.shell.set_context_action(page, *action)
+        self._embed_page(page, self._professional_window)
+        if self._professional_window.transcription_panel is not None:
+            self._professional_window.transcription_panel.refresh()
 
     def _start_professional_queue(self) -> None:
         if self._closing or self._file_queue is not None:
@@ -712,6 +829,12 @@ class DesktopApplication:
                     panel.refresh()
         except Exception as exc:
             _LOGGER.warning("professional_queue_update_failed type=%s", type(exc).__name__)
+
+    def _notify_desktop(self, key: str, text: str, kind: str = "info") -> None:
+        if self.main.isVisible():
+            self.main.shell.notifications.notify(key, text, kind)
+        else:
+            self.tray.show_message("VoxType", text, critical=kind == "error")
 
     def _submit_professional_text(self, text: str, session: int | None = None) -> None:
         def deliver() -> None:
@@ -770,7 +893,7 @@ class DesktopApplication:
             if payload.get("panel") == "settings":
                 self.show_settings()
             elif payload.get("panel") in {"dictionary", "snippets", "commands", "replacements"}:
-                self.show_professional_tools()
+                self.show_professional_tools(payload["panel"] if payload["panel"] in {"dictionary", "snippets"} else "profiles")
                 if self._professional_window is not None:
                     self._professional_window.open_collection(payload["panel"])
         elif kind == "CopyLastResult":
@@ -798,22 +921,26 @@ class DesktopApplication:
             text = {"InsertParagraph": "\n\n", "InsertNewline": "\n"}.get(kind, payload.get("text", ""))
             self._submit_professional_text(text, session)
 
-    def show_settings(self) -> None:
+    def show_settings(self, page: str = "settings") -> None:
+        if not self.main.isVisible():
+            self._show_main()
+        first = self._settings_window is None
         window = self.settings_window
-        if window.isVisible():
-            window.raise_()
-            window.activateWindow()
+        self._embed_page(page, window)
+        if page == "models":
+            window.open_models()
+        if not first:
             return
+        window.accepted.connect(lambda: self._navigate_desktop("home"))
+        window.rejected.connect(lambda: self._navigate_desktop("home"))
         window.set_values(self.runtime.settings)
         devices = [(f"{item.name} ({item.host_api})", item.index) for item in self.runtime.devices]
         window.set_audio_devices(devices, self.runtime.settings.audio.device_id)
-        self._set_model_choices(set())
-        window.show()
-        window.raise_()
+        self._set_model_choices({})
         self._run_background("voxtype-settings-devices", self._scan_settings_devices)
         self._run_background("voxtype-settings-models", self._scan_settings_models)
 
-    def _set_model_choices(self, installed: set[str], *, preserve_selection: bool = False) -> None:
+    def _set_model_choices(self, installed: dict[str, int], *, preserve_selection: bool = False) -> None:
         models = [
             (f"small — быстро/баланс{' ✓' if 'small' in installed else ''}", "small"),
             (
@@ -828,6 +955,20 @@ class DesktopApplication:
             else self.runtime.settings.model.installed_model
         )
         window.set_models(models, selected)
+        descriptions = {
+            "small": "Модель для повседневной диктовки и работы на CPU.",
+            "large-v3-turbo": "Режим максимальной точности для сложных текстов.",
+        }
+        policy = self.controller.policy
+        cards = []
+        for identifier in descriptions:
+            size = installed.get(identifier)
+            usable = policy.model_allowed(identifier)
+            cards.append((identifier, descriptions[identifier],
+                          f"{size / 1024**2:.0f} МиБ" if size is not None else "Размер не указан",
+                          identifier in installed, identifier == self.controller.backend.model_id,
+                          usable and not policy.enforce_offline_only, usable))
+        window.set_model_cards(cards)
         window.gpu_experimental_check.setChecked(False)
         window.gpu_experimental_check.setEnabled(False)
         window.gpu_experimental_check.setToolTip(
@@ -844,7 +985,7 @@ class DesktopApplication:
 
     def _scan_settings_models(self) -> None:
         self.signals.models_ready.emit(
-            {item.model_id for item in self.runtime.model_manager.list_installed()}
+            {item.model_id: item.size_bytes for item in self.runtime.model_manager.list_installed()}
         )
 
     def _on_devices_ready(self, items: object) -> None:
@@ -867,7 +1008,7 @@ class DesktopApplication:
 
     def _on_models_ready(self, installed: object) -> None:
         self._set_model_choices(
-            set(installed) if isinstance(installed, (set, frozenset)) else set(),
+            installed if isinstance(installed, dict) else {},
             preserve_selection=True,
         )
 
@@ -1023,10 +1164,13 @@ class DesktopApplication:
 
     def show_history(self) -> None:
         if self.controller.policy.disable_history:
-            self.tray.show_message("VoxType", "История отключена политикой организации")
+            self.main.shell.unavailable("history", "История отключена",
+                                        "Организация запретила сохранение истории диктовки.")
             return
-        self.history_window.show()
-        self.history_window.raise_()
+        if not self.main.isVisible():
+            self._show_main()
+        self.main.shell.set_context_action("history", "Обновить", self._refresh_history)
+        self._embed_page("history", self.history_window)
         self._refresh_history()
 
     def _refresh_history(self) -> None:
@@ -1295,6 +1439,13 @@ class DesktopApplication:
         if policy.enforce_offline_only or not policy.model_allowed(spec.model_id):
             self.signals.model_ready.emit(False, "Загрузка модели запрещена политикой организации", spec.model_id)
             return
+        if self.main.shell.current in {"settings", "models"} and self._settings_window is not None:
+            if self._model_download_dialog is not None:
+                self._model_download_dialog.show()
+                self._model_download_dialog.raise_()
+                return
+            self._model_download_dialog = ModelDownloadDialog(spec.model_id, self.main)
+            self._model_download_dialog.show()
 
         def worker() -> None:
             try:
@@ -1329,17 +1480,25 @@ class DesktopApplication:
         threading.Thread(target=worker, name="voxtype-model-install", daemon=True).start()
 
     def _on_model_progress(self, percent: int, message: str) -> None:
+        if self._model_download_dialog is not None:
+            self._model_download_dialog.update_progress(percent, message)
         if self._settings_window is not None:
             self._settings_window.set_model_download_progress(percent, message)
         if self.onboarding is not None:
             self.onboarding.set_model_progress(percent, message)
 
     def _on_model_ready(self, ready: bool, message: str, model_id: str) -> None:
+        if self._model_download_dialog is not None:
+            self._model_download_dialog.close()
+            self._model_download_dialog.deleteLater()
+            self._model_download_dialog = None
         if self._settings_window is not None:
+            self._settings_window.set_model_download_progress(100)
             self._settings_window.set_diagnostics_status(message, ready)
         if ready:
             if self._settings_window is not None:
-                self._settings_window.set_models([(model_id, model_id)], model_id)
+                self._run_background("voxtype-model-list-refresh", self._scan_settings_models)
+        self._notify_desktop("model-result", message, "success" if ready else "error")
         if self.onboarding is not None:
             self.onboarding.set_model_ready(ready, message)
 
@@ -1351,6 +1510,8 @@ class DesktopApplication:
         self.settings_window.set_diagnostics_status(
             "Модель удалена" if removed else "Модель не найдена", removed
         )
+        if removed:
+            self._run_background("voxtype-model-list-refresh", self._scan_settings_models)
 
     def _benchmark_model(self, model_id: str) -> None:
         selected = _coerce_asr_profile(model_id)

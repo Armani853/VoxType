@@ -25,15 +25,17 @@ from .models import (
 )
 
 if PYSIDE6_AVAILABLE:
-    from PySide6.QtCore import QEvent, QObject, Qt, Signal
+    from PySide6.QtCore import QByteArray, QEvent, QObject, QSize, Qt, Signal, QTimer
     from PySide6.QtGui import QCloseEvent, QGuiApplication
     from PySide6.QtWidgets import (
+        QApplication,
         QFrame,
         QGridLayout,
         QHBoxLayout,
         QLabel,
         QMainWindow,
         QPushButton,
+        QProgressBar,
         QScrollArea,
         QSizePolicy,
         QSpacerItem,
@@ -41,11 +43,11 @@ if PYSIDE6_AVAILABLE:
         QWidget,
     )
 
-    from .theme import SPACING, create_app_icon, state_color
+    from .desktop_shell import DesktopShell
+    from .obsidian import IconProvider, VoxButton, VoxCard, VoxShortcutBadge, VoxSectionHeader, WaveformWidget
+    from .theme import SPACING, create_app_icon, state_color, theme_manager
     from .widgets import (
-        AudioLevelMeter,
         Card,
-        ElidedLabel,
         MetricTile,
         SegmentedLanguageControl,
         StatusDot,
@@ -81,6 +83,9 @@ if PYSIDE6_AVAILABLE:
         retry_requested = Signal()
         hidden_to_tray = Signal()
         exit_requested = Signal()
+        copy_result_requested = Signal()
+        insert_result_requested = Signal()
+        cancel_processing_requested = Signal()
 
         def __init__(
             self,
@@ -104,8 +109,9 @@ if PYSIDE6_AVAILABLE:
             self.setObjectName("mainWindow")
             self.setWindowTitle("VoxType — локальная диктовка")
             self.setWindowIcon(create_app_icon())
-            self.resize(980, 760)
-            self.setMinimumSize(780, 600)
+            self.resize(1100, 720)
+            self.setMinimumSize(760, 560)
+            self._geometry_store = None
             self._build_ui()
             self._connect_ui()
             self.retranslate_ui()
@@ -114,46 +120,33 @@ if PYSIDE6_AVAILABLE:
                 self.bind_controller(controller)
 
         def _build_ui(self) -> None:
-            scroll = QScrollArea(self)
+            self.shell = DesktopShell(self)
+            self.setCentralWidget(self.shell)
+            scroll = QScrollArea(self.shell)
             scroll.setWidgetResizable(True)
             scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-            self.setCentralWidget(scroll)
             canvas = QWidget(scroll)
             scroll.setWidget(canvas)
             scroll.viewport().installEventFilter(self)
+            self.shell.install_page("home", scroll)
+            self.shell.install_page("dictation", scroll)
+            self.shell.show_page("home")
             outer = QVBoxLayout(canvas)
-            outer.setContentsMargins(
-                SPACING.space_6,
-                SPACING.space_6,
-                SPACING.space_6,
-                SPACING.space_6,
-            )
-            outer.setSpacing(SPACING.space_5)
+            outer.setContentsMargins(28, 24, 28, 20)
+            outer.setSpacing(16)
 
-            header = QHBoxLayout()
-            title_column = QVBoxLayout()
-            title_column.setSpacing(1)
-            self.title_label = QLabel("VoxType", canvas)
-            self.title_label.setProperty("heading", True)
-            self.subtitle_label = QLabel("Локальная голосовая диктовка", canvas)
+            self.title_label = VoxSectionHeader("Готов к диктовке", canvas, role="hero")
+            outer.addWidget(self.title_label)
+            self.subtitle_label = QLabel("Профиль по умолчанию", canvas)
             self.subtitle_label.setProperty("muted", True)
-            title_column.addWidget(self.title_label)
-            title_column.addWidget(self.subtitle_label)
-            header.addLayout(title_column)
-            self.local_badge = QLabel("ЛОКАЛЬНО", canvas)
-            self.local_badge.setObjectName("localBadge")
-            self.local_badge.setProperty("statusBadge", "success")
-            header.addWidget(self.local_badge)
-            header.addStretch(1)
+            outer.addWidget(self.subtitle_label)
+            self.local_badge = self.shell.privacy
             self.history_button = self._header_button("История", "historyButton")
             self.diagnostics_button = self._header_button("Диагностика", "diagnosticsButton")
             self.settings_button = self._header_button("Настройки", "settingsButton")
             self.professional_button = self._header_button("Профили и инструменты", "professionalButton")
-            header.addWidget(self.history_button)
-            header.addWidget(self.diagnostics_button)
-            header.addWidget(self.settings_button)
-            header.addWidget(self.professional_button)
-            outer.addLayout(header)
+            for button in (self.history_button, self.diagnostics_button, self.settings_button, self.professional_button):
+                button.hide()
 
             self.error_banner = QFrame(canvas)
             self.error_banner.setObjectName("errorBanner")
@@ -171,7 +164,8 @@ if PYSIDE6_AVAILABLE:
             banner_layout.addWidget(self.error_diagnostics_button)
             outer.addWidget(self.error_banner)
 
-            hero = Card(canvas, spacing=14)
+            hero = VoxCard(canvas, spacing=10)
+            hero.setMaximumWidth(660)
             hero.setObjectName("statusCard")
             status_row = QHBoxLayout()
             self.status_dot = StatusDot(hero)
@@ -189,22 +183,41 @@ if PYSIDE6_AVAILABLE:
             self.status_detail_label.setProperty("muted", True)
             self.status_detail_label.setWordWrap(True)
             hero.content_layout.addWidget(self.status_detail_label)
-            self.dictation_button = QPushButton("Начать диктовку", hero)
+            self.dictation_button = VoxButton("", hero, variant="primary")
             self.dictation_button.setObjectName("dictationButton")
-            self.dictation_button.setProperty("primary", True)
+            self.dictation_button.setProperty("voiceControl", True)
+            self.dictation_button.setFixedSize(72, 72)
+            self.dictation_button.setIconSize(QSize(24, 24))
             self.dictation_button.setAccessibleDescription(
-                "Запускает или останавливает текущую сессию диктовки"
+                "Запускает или останавливает диктовку"
             )
-            hero.content_layout.addWidget(self.dictation_button)
-            self.hotkey_label = QLabel("Ctrl+Alt+Space", hero)
-            self.hotkey_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.hotkey_label.setProperty("keyHint", True)
-            hero.content_layout.addWidget(
-                self.hotkey_label,
-                0,
-                Qt.AlignmentFlag.AlignHCenter,
-            )
-            outer.addWidget(hero)
+            from .obsidian import VoiceHalo
+
+            self.voice_halo = VoiceHalo(self.dictation_button, hero)
+            hero.content_layout.addWidget(self.voice_halo, 0, Qt.AlignmentFlag.AlignHCenter)
+            self.voice_action_label = QLabel("Начать диктовку", hero)
+            hero.content_layout.addWidget(self.voice_action_label, 0, Qt.AlignmentFlag.AlignHCenter)
+            self.audio_meter = WaveformWidget(hero)
+            self.audio_meter.setObjectName("audioMeter")
+            hero.content_layout.addWidget(self.audio_meter)
+            self.processing = QProgressBar(hero)
+            self.processing.setRange(0, 0)
+            self.processing.setTextVisible(False)
+            self.processing.setAccessibleName("Обрабатываем речь")
+            self.processing.hide()
+            hero.content_layout.addWidget(self.processing)
+            self.cancel_button = VoxButton("??Начать диктовку?", hero)
+            self.cancel_button.hide()
+            self.cancel_button.clicked.connect(self.cancel_processing_requested)
+            hero.content_layout.addWidget(self.cancel_button, 0, Qt.AlignmentFlag.AlignHCenter)
+            self.hotkey_label = VoxShortcutBadge(self._toggle_hotkey, hero)
+            hero.content_layout.addWidget(self.hotkey_label, 0, Qt.AlignmentFlag.AlignHCenter)
+            centered = QHBoxLayout()
+            centered.addStretch()
+            centered.addWidget(hero, 1)
+            centered.addStretch()
+            outer.addLayout(centered)
+            theme_manager(QApplication.instance()).theme_changed.connect(self._refresh_voice_icon)
 
             device_grid = QGridLayout()
             device_grid.setHorizontalSpacing(16)
@@ -213,16 +226,14 @@ if PYSIDE6_AVAILABLE:
             microphone.setObjectName("microphoneCard")
             self.microphone_title = QLabel("Микрофон", microphone)
             self.microphone_title.setProperty("caption", True)
-            self.microphone_label = ElidedLabel("Системный микрофон", microphone)
+            self.microphone_label = QLabel("Системный микрофон", microphone)
             self.microphone_label.setObjectName("microphoneLabel")
             self.microphone_label.setProperty("sectionHeading", True)
-            self.audio_meter = AudioLevelMeter(microphone)
-            self.audio_meter.setObjectName("audioMeter")
+            self.microphone_label.setWordWrap(True)
             self.audio_hint = QLabel("Нет клиппинга", microphone)
             self.audio_hint.setProperty("caption", True)
             microphone.content_layout.addWidget(self.microphone_title)
             microphone.content_layout.addWidget(self.microphone_label)
-            microphone.content_layout.addWidget(self.audio_meter)
             microphone.content_layout.addWidget(self.audio_hint)
             device_grid.addWidget(microphone, 0, 0)
 
@@ -256,7 +267,10 @@ if PYSIDE6_AVAILABLE:
             metrics.addWidget(self.duration_tile, 1)
             metrics.addWidget(self.backlog_tile, 1)
             metrics.addWidget(self.target_tile, 2)
-            outer.addLayout(metrics)
+            self.metrics_panel = QWidget(canvas)
+            self.metrics_panel.setLayout(metrics)
+            outer.addWidget(self.metrics_panel)
+            self.metrics_panel.hide()
 
             fragment = Card(canvas, spacing=8)
             fragment.setObjectName("lastFragmentCard")
@@ -271,6 +285,17 @@ if PYSIDE6_AVAILABLE:
             self.fragment_label.setMinimumHeight(42)
             fragment.content_layout.addWidget(self.fragment_title)
             fragment.content_layout.addWidget(self.fragment_label)
+            result_actions = QHBoxLayout()
+            self.result_copy = VoxButton("Копировать", fragment)
+            self.result_insert = VoxButton("Вставить снова", fragment)
+            history = VoxButton("Открыть историю", fragment, variant="flat")
+            self.result_copy.clicked.connect(self.copy_result_requested)
+            self.result_insert.clicked.connect(self.insert_result_requested)
+            history.clicked.connect(self.history_requested)
+            for button in (self.result_copy, self.result_insert, history):
+                result_actions.addWidget(button)
+            result_actions.addStretch()
+            fragment.content_layout.addLayout(result_actions)
             outer.addWidget(fragment)
             outer.addItem(
                 QSpacerItem(0, 0, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding)
@@ -296,6 +321,37 @@ if PYSIDE6_AVAILABLE:
                     self.isVisible(),
                 )
             return super().eventFilter(watched, event)
+
+        def _refresh_voice_icon(self, _theme: object = None) -> None:
+            icon = "stop" if self.dictation_button.property("voiceActive") else "mic"
+            token = "canvas" if theme_manager(QApplication.instance()).current_theme.value == "dark" else "surface"
+            self.dictation_button.setIcon(IconProvider.icon(icon, 24, self.dictation_button.devicePixelRatioF(), color_token=token))
+
+        def set_profile_name(self, name: str) -> None:
+            self.shell.profile.setText(name)
+            self.subtitle_label.setText(("Профиль · " if self._interface_language == "ru" else "Profile · ") + name)
+
+        def set_geometry_store(self, store: object) -> None:
+            self._geometry_store = store
+            saved = store.value("mainWindow/geometry")
+            if isinstance(saved, QByteArray):
+                self.restoreGeometry(saved)
+            self._geometry_timer = QTimer(self, interval=350, singleShot=True)
+            self._geometry_timer.timeout.connect(self._save_geometry)
+
+        def _save_geometry(self) -> None:
+            if self._geometry_store is not None:
+                self._geometry_store.setValue("mainWindow/geometry", self.saveGeometry())
+
+        def moveEvent(self, event: object) -> None:
+            super().moveEvent(event)
+            if hasattr(self, "_geometry_timer"):
+                self._geometry_timer.start()
+
+        def resizeEvent(self, event: object) -> None:
+            super().resizeEvent(event)
+            if hasattr(self, "_geometry_timer"):
+                self._geometry_timer.start()
 
         def _header_button(self, text: str, name: str) -> QPushButton:
             button = QPushButton(text, self)
@@ -409,7 +465,15 @@ if PYSIDE6_AVAILABLE:
             self.language_control.set_language(state.language.value)
             self.microphone_label.setText(state.microphone_name or "—")
             self.microphone_label.setToolTip(state.microphone_name)
-            self.audio_meter.set_level(rms_to_meter(state.input_rms), state.clipping_percentage)
+            recording = state.state in {AppStatus.LISTENING, AppStatus.SPEECH_DETECTED, AppStatus.TRANSCRIBING}
+            self.audio_meter.set_active(recording)
+            self.voice_halo.set_recording(recording)
+            if recording:
+                self.audio_meter.set_level(rms_to_meter(state.input_rms))
+            self.audio_meter.setVisible(state.state is not AppStatus.FINISHING)
+            self.processing.setVisible(state.state is AppStatus.FINISHING)
+            self.cancel_button.setVisible(state.state is AppStatus.FINISHING)
+            self.metrics_panel.setVisible(self.shell.current == "dictation")
             self.audio_hint.setText(self._audio_hint(state))
             self.model_label.setText(self._profile_text(state.model_profile))
             model_label = state.model_name or "не загружена"
@@ -430,11 +494,26 @@ if PYSIDE6_AVAILABLE:
                 self.fragment_label.setProperty("tertiary", tertiary)
                 self._refresh_dynamic_style(self.fragment_label)
             active = state.state.active
-            self.dictation_button.setText(
+            self.voice_action_label.setText(
                 ("Настроить модель" if self._interface_language == "ru" else "Set up model")
                 if needs_model
                 else ui_text("stop" if active else "start", self._interface_language)
             )
+            self.dictation_button.setAccessibleName(self.voice_action_label.text())
+            self.dictation_button.setToolTip(self.voice_action_label.text())
+            self.title_label.setText(
+                ("Готов к диктовке" if is_ru else "Ready to dictate")
+                if state.state is AppStatus.IDLE and not needs_model and
+                (state.readiness is None or state.readiness.can_record)
+                else status_text
+            )
+            self.shell.engine.setText(status_text)
+            self.shell.model.setText(model_label)
+            self.result_copy.setEnabled(bool(state.full_transcript or state.last_committed_text))
+            self.result_insert.setEnabled(bool(state.full_transcript) and not active)
+            if self.dictation_button.property("voiceActive") != active:
+                self.dictation_button.setProperty("voiceActive", active)
+                self._refresh_voice_icon()
             if self.dictation_button.property("danger") != active:
                 self.dictation_button.setProperty("danger", active)
                 self._refresh_dynamic_style(self.dictation_button)
@@ -545,7 +624,7 @@ if PYSIDE6_AVAILABLE:
 
         def retranslate_ui(self) -> None:
             locale = self._interface_language
-            self.title_label.setText(ui_text("app_name", locale))
+            self.shell.set_locale(locale)
             self.local_badge.setText(ui_text("local_badge", locale))
             self.history_button.setText(ui_text("history", locale))
             self.diagnostics_button.setText(ui_text("diagnostics", locale))
@@ -574,6 +653,7 @@ if PYSIDE6_AVAILABLE:
 
         def closeEvent(self, event: QCloseEvent) -> None:
             if self._allow_close:
+                self._save_geometry()
                 self.unbind_controller()
                 event.accept()
                 return

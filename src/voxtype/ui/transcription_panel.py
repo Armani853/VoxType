@@ -9,14 +9,18 @@ from sqlite3 import Error as SQLiteError
 from threading import Thread
 
 from PySide6.QtCore import Qt, QUrl, Signal
+from PySide6.QtGui import QTextBlockFormat, QTextCursor
 from PySide6.QtWidgets import (
     QComboBox, QFileDialog, QHBoxLayout, QLabel, QListWidget, QMessageBox, QPushButton,
-    QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
+    QApplication, QProgressBar, QSplitter, QStackedWidget, QTextEdit, QVBoxLayout, QWidget,
 )
 
 from voxtype.asr.file_transcription import FileSegment, FileTranscript, export_transcript
 from voxtype.asr.transcription_queue import FileTranscriptionQueue, TranscriptionJob
 from voxtype.windows.local_paths import is_local_path
+
+from .obsidian import VoxButton, VoxEmptyState, VoxSectionHeader
+from .records_view import RecordsView
 
 
 class TranscriptionPanel(QWidget):
@@ -33,10 +37,12 @@ class TranscriptionPanel(QWidget):
         self._transcript: FileTranscript | None = None
         self._working_segments: list[FileSegment] = []
         self._page = 0
+        self._segment_index = -1
         self._opening = False
         self._writing = False
         self._player = None
         root = QVBoxLayout(self)
+        self.setAcceptDrops(True)
         bar = QHBoxLayout()
         self.language = QComboBox(self)
         for label, value in (("Русский", "ru"), ("English", "en")):
@@ -53,7 +59,7 @@ class TranscriptionPanel(QWidget):
             self.automatic_export.addItem("DOCX", ".docx")
         for combo in (self.language, self.profile, self.priority, self.automatic_export):
             bar.addWidget(combo)
-        self._button(bar, "Добавить аудио…", self._enqueue)
+        self.add_button = self._button(bar, "Добавить файлы…", self._enqueue)
         root.addLayout(bar)
         queue_actions = QHBoxLayout()
         self.pause = self._button(queue_actions, "Пауза очереди", self._pause)
@@ -61,13 +67,41 @@ class TranscriptionPanel(QWidget):
         self._button(queue_actions, "Отменить выбранное", self._cancel)
         self._button(queue_actions, "Открыть транскрипт", self._open)
         root.addLayout(queue_actions)
-        self.jobs = QListWidget(self)
+        self.jobs_pane = QStackedWidget(self)
+        self.jobs = QListWidget(self.jobs_pane)
+        self.jobs.setAccessibleName("Очередь транскрипции")
         self.jobs.itemDoubleClicked.connect(lambda _item: self._open())
-        root.addWidget(self.jobs)
-        self.segments = QTableWidget(0, 3, self)
-        self.segments.setHorizontalHeaderLabels(("Начало, с", "Конец, с", "Текст"))
-        self.segments.horizontalHeader().setStretchLastSection(True)
-        root.addWidget(self.segments, 2)
+        self.jobs_pane.addWidget(self.jobs)
+        self.empty = VoxEmptyState("files", "Нет транскрипций",
+                                   "Добавьте аудиофайлы или перетащите их в эту область.", self.jobs_pane)
+        self.empty.action.setText("Добавить файлы…")
+        self.empty.action.clicked.connect(self._enqueue)
+        self.empty.action.show()
+        self.jobs_pane.addWidget(self.empty)
+        self.jobs_pane.setCurrentWidget(self.empty)
+        root.addWidget(self.jobs_pane)
+        self.progress = QProgressBar(self)
+        self.progress.setRange(0, 0)
+        self.progress.setTextVisible(False)
+        self.progress.setAccessibleName("Выполняется распознавание аудиофайла")
+        self.progress.hide()
+        root.addWidget(self.progress)
+
+        self.editor_split = QSplitter(self)
+        self.segments = RecordsView(("Начало", "Фрагмент"), self.editor_split)
+        self.segments.sortByColumn(0, Qt.SortOrder.AscendingOrder)
+        self.segments.setSortingEnabled(False)
+        self.segments.setAccessibleName("Сегменты с временными метками")
+        self.segment_edit = QTextEdit(self.editor_split)
+        self.segment_edit.setAcceptRichText(False)
+        self.segment_edit.setAccessibleName("Текст выбранного сегмента")
+        self.segment_edit.setPlaceholderText("Выберите сегмент транскрипта")
+        self.segment_edit.setEnabled(False)
+        self.editor_split.addWidget(self.segments)
+        self.editor_split.addWidget(self.segment_edit)
+        self.editor_split.setStretchFactor(1, 2)
+        self.segments.selectionModel().currentChanged.connect(self._segment_selected)
+        root.addWidget(self.editor_split, 2)
         editor_actions = QHBoxLayout()
         self.previous = self._button(editor_actions, "←", lambda: self._change_page(-1))
         self.page_number = QLabel("—", self)
@@ -75,7 +109,10 @@ class TranscriptionPanel(QWidget):
         self.next = self._button(editor_actions, "→", lambda: self._change_page(1))
         self.previous.setEnabled(False)
         self.next.setEnabled(False)
-        self._button(editor_actions, "К выбранному участку аудио", self._seek)
+        self.seek_button = self._button(editor_actions, "К аудио", self._seek)
+        self.seek_button.setEnabled(False)
+        self._button(editor_actions, "Копировать", self._copy)
+        self._button(editor_actions, "Найти…", self._search)
         self._button(editor_actions, "Сохранить правки", self._save)
         self._button(editor_actions, "Экспорт…", self._export)
         root.addLayout(editor_actions)
@@ -86,7 +123,7 @@ class TranscriptionPanel(QWidget):
         self.write_finished.connect(self._finish_write)
 
     def _button(self, row, label, action):
-        button = QPushButton(label, self)
+        button = VoxButton(label, self)
         button.clicked.connect(action)
         row.addWidget(button)
         return button
@@ -119,6 +156,8 @@ class TranscriptionPanel(QWidget):
             return
         current = self._selected()
         self._jobs = jobs
+        self.jobs_pane.setCurrentWidget(self.jobs if jobs else self.empty)
+        self.progress.setVisible(any(job.status == "RUNNING" for job in jobs))
         self.jobs.clear()
         for row, job in enumerate(jobs):
             label = f"{job.status} · {job.language.upper()} · {Path(job.input_path).name}"
@@ -134,33 +173,61 @@ class TranscriptionPanel(QWidget):
         self.refresh()
         if not self.profile.currentData():
             return
-        selected, _ = QFileDialog.getOpenFileName(
-            self, "Аудиофайл", "", "Аудио (*.wav *.mp3 *.m4a *.flac)",
+        sources, _ = QFileDialog.getOpenFileNames(
+            self, "Добавить аудио", "", "Аудио (*.wav *.mp3 *.m4a *.flac)",
         )
-        if not selected:
+        if sources:
+            self._enqueue_sources([Path(name) for name in sources])
+
+    def dragEnterEvent(self, event: object) -> None:
+        if self._local_audio(event):
+            event.acceptProposedAction()
+
+    def dropEvent(self, event: object) -> None:
+        paths = self._local_audio(event)
+        if paths:
+            self._enqueue_sources(paths)
+            event.acceptProposedAction()
+
+    @staticmethod
+    def _local_audio(event: object) -> list[Path]:
+        if not event.mimeData().hasUrls():
+            return []
+        return [Path(url.toLocalFile()) for url in event.mimeData().urls()[:100]
+                if url.isLocalFile() and Path(url.toLocalFile()).suffix.lower() in {".wav", ".mp3", ".m4a", ".flac"}]
+
+    def _enqueue_sources(self, sources: list[Path]) -> None:
+        if not self.profile.currentData():
+            self.feedback.setText("Выберите доступный профиль")
             return
-        source = Path(selected)
-        destination = None
         suffix = self.automatic_export.currentData()
-        if suffix:
-            selected, _ = QFileDialog.getSaveFileName(
-                self, "Новый файл транскрипта", str(source.with_suffix(suffix)),
-                f"{suffix[1:].upper()} (*{suffix})",
-                options=QFileDialog.Option.DontConfirmOverwrite,
-            )
-            if not selected:
-                return
-            destination = Path(selected)
-            if not destination.suffix:
-                destination = destination.with_suffix(suffix)
-        try:
-            self.queue.enqueue(source, destination, self.language.currentData(),
-                               self.profile.currentData(), self.priority.currentData())
-        except (OSError, ValueError, SQLiteError) as exc:
-            self.feedback.setText(str(exc))
-            return
-        self.feedback.setText("Задание добавлено")
+        failures = []
+        for source in sources:
+            destination = None
+            if suffix:
+                selected, _ = QFileDialog.getSaveFileName(
+                    self, "Новый файл транскрипта", str(source.with_suffix(suffix)),
+                    f"{suffix[1:].upper()} (*{suffix})", options=QFileDialog.Option.DontConfirmOverwrite,
+                )
+                if not selected:
+                    continue
+                destination = Path(selected)
+                if not destination.suffix:
+                    destination = destination.with_suffix(suffix)
+            try:
+                self.queue.enqueue(source, destination, self.language.currentData(),
+                                   self.profile.currentData(), self.priority.currentData())
+            except (OSError, ValueError, SQLiteError) as exc:
+                failures.append(str(exc))
+        self.feedback.setText("\n".join(failures[:3]) if failures else "Очередь обновлена")
         self.refresh()
+
+    def resizeEvent(self, event: object) -> None:
+        super().resizeEvent(event)
+        if hasattr(self, "editor_split"):
+            flow = Qt.Orientation.Vertical if self.width() < 620 else Qt.Orientation.Horizontal
+            if flow != self.editor_split.orientation():
+                self.editor_split.setOrientation(flow)
 
     def _pause(self) -> None:
         self.queue.set_paused(not self.queue.paused)
@@ -212,15 +279,27 @@ class TranscriptionPanel(QWidget):
         self.feedback.setText(Path(job.input_path).name)
 
     def _capture_page_edits(self) -> None:
-        if self._transcript is None:
-            return
-        offset = self._page * self._PAGE_SIZE
-        for row in range(self.segments.rowCount()):
-            index = offset + row
-            text = self.segments.item(row, 2).text()
-            item = self._working_segments[index]
-            if text != item.text:
-                self._working_segments[index] = replace(item, text=text)
+        if 0 <= self._segment_index < len(self._working_segments):
+            current = self._working_segments[self._segment_index]
+            value = self.segment_edit.toPlainText()
+            if value != current.text:
+                self._working_segments[self._segment_index] = replace(current, text=value)
+
+    def _segment_selected(self, current: object, _previous: object) -> None:
+        self._capture_page_edits()
+        value = current.data(Qt.ItemDataRole.UserRole) if current.isValid() else None
+        self._segment_index = int(value) if value is not None else -1
+        active = 0 <= self._segment_index < len(self._working_segments)
+        self.segment_edit.setEnabled(active)
+        self.segment_edit.setPlainText(self._working_segments[self._segment_index].text if active else "")
+        if active:
+            cursor = self.segment_edit.textCursor()
+            cursor.select(QTextCursor.SelectionType.Document)
+            format = QTextBlockFormat()
+            format.setLineHeight(135, 1)
+            cursor.mergeBlockFormat(format)
+        self.seek_button.setEnabled(active and self._job is not None
+                                    and Path(self._job.input_path).is_file())
 
     def _change_page(self, step: int) -> None:
         destination = self._page + step
@@ -231,19 +310,45 @@ class TranscriptionPanel(QWidget):
         self._show_page()
 
     def _show_page(self) -> None:
+        self._segment_index = -1
         offset = self._page * self._PAGE_SIZE
         visible = self._working_segments[offset:offset + self._PAGE_SIZE]
-        self.segments.setRowCount(len(visible))
-        for row, segment in enumerate(visible):
-            for column, value in enumerate((f"{segment.start:.3f}", f"{segment.end:.3f}", segment.text)):
-                item = QTableWidgetItem(value)
-                if column < 2:
-                    item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-                self.segments.setItem(row, column, item)
+        self.segments.records.replace([
+            (str(index), (f"{segment.start:08.3f} с", " ".join(segment.text.split())[:90]))
+            for index, segment in enumerate(visible, start=offset)
+        ])
+        if visible:
+            self.segments.selectRow(0)
+        else:
+            self.segment_edit.clear()
+            self.segment_edit.setEnabled(False)
+            self.seek_button.setEnabled(False)
         total = max(1, (len(self._working_segments) + self._PAGE_SIZE - 1) // self._PAGE_SIZE)
         self.page_number.setText(f"{self._page + 1} / {total}")
         self.previous.setEnabled(self._page > 0)
         self.next.setEnabled(self._page + 1 < total)
+
+    def _copy(self) -> None:
+        transcript = self._edited()
+        if transcript is not None:
+            QApplication.clipboard().setText(self.segment_edit.textCursor().selectedText() or transcript.text)
+
+    def _search(self) -> None:
+        from PySide6.QtWidgets import QInputDialog
+
+        query, ok = QInputDialog.getText(self, "Поиск по транскрипту", "Текст")
+        if not ok or not query.strip():
+            return
+        self._capture_page_edits()
+        needle = query.strip().casefold()
+        for index, segment in enumerate(self._working_segments):
+            if needle in segment.text.casefold():
+                self._page = index // self._PAGE_SIZE
+                self._show_page()
+                self.segments.selectRow(index % self._PAGE_SIZE)
+                self.segment_edit.find(query.strip())
+                return
+        self.feedback.setText("Фрагменты не найдены")
 
     def _edited(self) -> FileTranscript | None:
         if self._transcript is None:
@@ -312,7 +417,7 @@ class TranscriptionPanel(QWidget):
         self.feedback.setText(message)
 
     def _seek(self) -> None:
-        row = self.segments.currentRow()
+        row = self._segment_index
         if self._job is None or self._transcript is None or row < 0:
             return
         source = Path(self._job.input_path)
@@ -328,7 +433,7 @@ class TranscriptionPanel(QWidget):
             self._player = QMediaPlayer(self)
             self._player.setAudioOutput(QAudioOutput(self._player))
         url = QUrl.fromLocalFile(str(source))
-        when = round(self._working_segments[self._page * self._PAGE_SIZE + row].start * 1000)
+        when = round(self._working_segments[row].start * 1000)
         player = self._player
         if player.source() == url and player.isSeekable():
             player.setPosition(when)

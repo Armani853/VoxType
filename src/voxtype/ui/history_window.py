@@ -9,21 +9,18 @@ from ._optional import PYSIDE6_AVAILABLE, require_pyside6
 from .models import HistoryEntry, format_duration, history_entry_from
 
 if PYSIDE6_AVAILABLE:
-    from PySide6.QtCore import QSignalBlocker, Qt, QTimer, Signal
+    from PySide6.QtCore import Qt, QTimer, Signal
     from PySide6.QtGui import QGuiApplication
     from PySide6.QtWidgets import (
         QComboBox,
         QDialog,
         QHBoxLayout,
-        QHeaderView,
         QLabel,
         QLineEdit,
         QMessageBox,
         QPushButton,
         QSplitter,
         QStackedLayout,
-        QTableWidget,
-        QTableWidgetItem,
         QTextEdit,
         QVBoxLayout,
         QWidget,
@@ -31,6 +28,9 @@ if PYSIDE6_AVAILABLE:
 
     from .theme import SPACING, state_color
     from .widgets import Card
+    from .obsidian import VoxEmptyState, VoxSearchField, confirm_delete
+    from .records_view import RecordsView
+    from .models import text_preview
 
     class HistoryWindow(QDialog):
         refresh_requested = Signal()
@@ -81,7 +81,7 @@ if PYSIDE6_AVAILABLE:
             root.addLayout(header)
 
             filters = QHBoxLayout()
-            self.search_edit = QLineEdit(self)
+            self.search_edit = VoxSearchField("Поиск по тексту…", self)
             self.search_edit.setObjectName("historySearch")
             self.search_edit.setPlaceholderText("Поиск по тексту…")
             self.search_edit.setClearButtonEnabled(True)
@@ -115,53 +115,26 @@ if PYSIDE6_AVAILABLE:
             self.set_page_available(False)
             root.addLayout(details)
 
-            splitter = QSplitter(Qt.Orientation.Horizontal, self)
+            splitter = self.splitter = QSplitter(Qt.Orientation.Horizontal, self)
             left_panel = QWidget(splitter)
-            left_panel.setMinimumWidth(520)
+            left_panel.setMinimumWidth(0)
             left_stack = QStackedLayout(left_panel)
             left_stack.setContentsMargins(0, 0, 0, 0)
-            self.table = QTableWidget(0, 5, left_panel)
+            self.table = RecordsView(("Начало", "Язык", "Приложение", "Текст"), left_panel)
             self.table.setObjectName("historyTable")
-            self.table.setHorizontalHeaderLabels(
-                ("Начало", "Язык", "Длительность", "Приложение", "Статус")
-            )
-            self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-            self.table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
-            self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-            self.table.setWordWrap(False)
-            self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-            self.table.setSortingEnabled(True)
-            self.table.setShowGrid(False)
-            self.table.verticalHeader().setVisible(False)
-            self.table.verticalHeader().setDefaultSectionSize(38)
-            table_header = self.table.horizontalHeader()
-            table_header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-            table_header.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
-            table_header.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
-            table_header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
-            table_header.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
-            table_header.resizeSection(1, 68)
-            table_header.resizeSection(2, 108)
-            table_header.resizeSection(4, 108)
-
-            empty_panel = Card(left_panel)
-            empty_panel.content_layout.addStretch(1)
-            self.empty_label = QLabel("Записей не найдено", empty_panel)
-            self.empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.empty_label.setProperty("sectionHeading", True)
-            self.empty_hint = QLabel("Попробуйте изменить фильтры.", empty_panel)
-            self.empty_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.empty_hint.setProperty("muted", True)
-            empty_panel.content_layout.addWidget(self.empty_label)
-            empty_panel.content_layout.addWidget(self.empty_hint)
-            empty_panel.content_layout.addStretch(1)
+            self.table.setAccessibleName("Записи истории диктовок")
+            empty_panel = VoxEmptyState("history", "Записей не найдено",
+                                       "Измените фильтры или включите сохранение истории в настройках.", left_panel)
+            empty_panel.action.setText("Сбросить фильтры")
+            empty_panel.action.clicked.connect(self._reset_filters)
+            empty_panel.action.show()
             left_stack.addWidget(self.table)
             left_stack.addWidget(empty_panel)
             self._history_left_stack = left_stack
             self._history_empty_panel = empty_panel
 
             detail = Card(splitter)
-            detail.setMinimumWidth(400)
+            detail.setMinimumWidth(0)
             detail.setObjectName("historyDetail")
             detail_title = QLabel("Расшифровка", detail)
             detail_title.setProperty("sectionHeading", True)
@@ -218,7 +191,7 @@ if PYSIDE6_AVAILABLE:
             self.next_page.clicked.connect(lambda: self._change_page(1))
             self.language_filter.currentIndexChanged.connect(self._search_changed)
             self.status_filter.currentIndexChanged.connect(self._search_changed)
-            self.table.itemSelectionChanged.connect(self._selection_changed)
+            self.table.selectionModel().selectionChanged.connect(self._selection_changed)
             self.copy_button.clicked.connect(self._copy_selected)
             self.insert_button.clicked.connect(self._insert_selected)
             self.export_button.clicked.connect(self._export_selected)
@@ -266,42 +239,30 @@ if PYSIDE6_AVAILABLE:
             self.refresh_button.setText("Загружаю…" if loading else "Обновить")
             self.refresh_button.setEnabled(not loading)
 
+        def resizeEvent(self, event: object) -> None:
+            super().resizeEvent(event)
+            orientation = Qt.Orientation.Vertical if self.width() < 800 else Qt.Orientation.Horizontal
+            if orientation != self.splitter.orientation():
+                self.splitter.setOrientation(orientation)
+                self.splitter.setSizes((280, 360))
+
+        def _reset_filters(self) -> None:
+            for field in (self.search_edit, self.application_filter, self.profile_filter,
+                          self.since_filter, self.until_filter):
+                field.clear()
+            self.language_filter.setCurrentIndex(0)
+            self.status_filter.setCurrentIndex(0)
+            self._search_changed()
+
         def set_sessions(self, sessions: list[HistoryEntry | object]) -> None:
             entries = [history_entry_from(session) for session in sessions]
-            by_id = {entry.session_id: entry for entry in entries if entry.session_id}
-            if by_id == self._entries and self.table.rowCount():
-                return
-            previous_session_id = self.selected_session_id() or self._detail_session_id
-            ordered = sorted(
-                by_id.values(), key=lambda entry: _datetime_sort_key(entry.started_at), reverse=True
-            )
-            self._entries = by_id
-            with QSignalBlocker(self.table):
-                self.table.setSortingEnabled(False)
-                try:
-                    self.table.setRowCount(len(ordered))
-                    for row, entry in enumerate(ordered):
-                        values = (
-                            _format_datetime(entry.started_at),
-                            entry.language.value.upper(),
-                            format_duration(entry.duration_s),
-                            entry.target_application or ("Аудиофайл" if entry.source_type == "file" else "—"),
-                            _status_text(entry.completion_status),
-                        )
-                        for column, value in enumerate(values):
-                            item = QTableWidgetItem(value)
-                            item.setData(Qt.ItemDataRole.UserRole, entry.session_id)
-                            item.setToolTip(value)
-                            self.table.setItem(row, column, item)
-                finally:
-                    self.table.setSortingEnabled(True)
-            self._apply_filters(preferred_session_id=previous_session_id)
+            selected = self.selected_session_id()
+            ordered = sorted(entries, key=lambda entry: _datetime_sort_key(entry.started_at), reverse=True)
+            self._entries = {entry.session_id: entry for entry in ordered if entry.session_id}
+            self._apply_filters(preferred_session_id=selected)
 
         def selected_session_id(self) -> str | None:
-            row = self.table.currentRow()
-            item = self.table.item(row, 0) if row >= 0 else None
-            value = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
-            return str(value) if value else None
+            return self.table.selected_key() or None
 
         def selected_entry(self) -> HistoryEntry | None:
             session_id = self.selected_session_id()
@@ -345,54 +306,30 @@ if PYSIDE6_AVAILABLE:
             needle = "" if self._remote_search else self.search_edit.text().strip().casefold()
             language = str(self.language_filter.currentData() or "")
             status = str(self.status_filter.currentData() or "")
-            visible_rows: list[int] = []
-            visible_session_ids: set[str] = set()
-            for row in range(self.table.rowCount()):
-                item = self.table.item(row, 0)
-                session_id = str(item.data(Qt.ItemDataRole.UserRole)) if item else ""
-                entry = self._entries.get(session_id)
-                visible = bool(entry)
-                if entry is not None:
-                    visible = not language or entry.language.value == language
-                    if visible and needle:
-                        haystack = f"{entry.confirmed_text} {entry.target_application}".casefold()
-                        visible = needle in haystack
-                    if status:
-                        normalized = entry.completion_status.lower()
-                        if status == "incomplete":
-                            visible = visible and normalized not in {
-                                "completed",
-                                "complete",
-                                "success",
-                                "recovered",
-                            }
-                        else:
-                            visible = visible and normalized == status
-                self.table.setRowHidden(row, not visible)
-                if visible:
-                    visible_rows.append(row)
-                    visible_session_ids.add(session_id)
-            has_visible = bool(visible_rows)
-            self._history_left_stack.setCurrentWidget(
-                self.table if has_visible else self._history_empty_panel
-            )
-
-            selected_id = preferred_session_id or self.selected_session_id()
-            if selected_id in visible_session_ids:
-                selected_row = self._row_for_session(selected_id)
-            else:
-                selected_row = visible_rows[0] if visible_rows else -1
-            self.table.blockSignals(True)
-            if selected_row >= 0:
-                self.table.selectRow(selected_row)
-            else:
-                self.table.clearSelection()
-                self.table.setCurrentCell(-1, -1)
-            self.table.blockSignals(False)
-            self._set_action_state(self.selected_entry() if selected_row >= 0 else None)
-            assert (
-                self._detail_session_id is None or self._detail_session_id in visible_session_ids
-            ), "history detail must belong to the filtered dataset"
+            selected = preferred_session_id or self.selected_session_id()
+            rows = []
+            for entry in self._entries.values():
+                if language and language != entry.language.value:
+                    continue
+                if needle and needle not in f"{entry.confirmed_text} {entry.target_application}".casefold():
+                    continue
+                normalized = entry.completion_status.lower()
+                if status == "incomplete":
+                    if normalized in {"completed", "complete", "success", "recovered"}:
+                        continue
+                elif status and normalized != status:
+                    continue
+                rows.append((entry.session_id, (
+                    _format_datetime(entry.started_at), entry.language.value.upper(),
+                    entry.target_application or ("Аудиофайл" if entry.source_type == "file" else "—"),
+                    text_preview(entry.confirmed_text, 110) or _status_text(entry.completion_status),
+                )))
+            self.table.records.replace(rows)
+            self._history_left_stack.setCurrentWidget(self.table if rows else self._history_empty_panel)
+            if rows:
+                row = self._row_for_session(selected) if selected else -1
+                self.table.selectRow(max(0, row))
+            self._set_action_state(self.selected_entry())
 
         @staticmethod
         def _profile_text(entry: HistoryEntry) -> str:
@@ -403,9 +340,8 @@ if PYSIDE6_AVAILABLE:
             }.get(entry.profile.value, entry.profile.value)
 
         def _row_for_session(self, session_id: str) -> int:
-            for row in range(self.table.rowCount()):
-                item = self.table.item(row, 0)
-                if item is not None and item.data(Qt.ItemDataRole.UserRole) == session_id:
+            for row in range(self.table.proxy.rowCount()):
+                if self.table.proxy.index(row, 0).data(Qt.ItemDataRole.UserRole) == session_id:
                     return row
             return -1
 
@@ -415,15 +351,7 @@ if PYSIDE6_AVAILABLE:
 
         @property
         def visible_session_ids(self) -> set[str]:
-            identifiers: set[str] = set()
-            for row in range(self.table.rowCount()):
-                if self.table.isRowHidden(row):
-                    continue
-                item = self.table.item(row, 0)
-                value = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
-                if value:
-                    identifiers.add(str(value))
-            return identifiers
+            return {identifier for identifier, _cells in self.table.records.records}
 
         def _copy_selected(self) -> None:
             entry = self.selected_entry()
@@ -457,22 +385,15 @@ if PYSIDE6_AVAILABLE:
             session_id = self.selected_session_id()
             if not session_id:
                 return
-            answer = QMessageBox.question(
+            if confirm_delete(
                 self,
                 "Удалить запись?",
                 "Текст и связанные с этой сессией локальные данные будут удалены.",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
-                QMessageBox.StandardButton.Cancel,
-            )
-            if answer is QMessageBox.StandardButton.Yes:
+            ):
                 self.delete_requested.emit(session_id)
 
         def remove_session(self, session_id: str) -> None:
             self._entries.pop(session_id, None)
-            for row in range(self.table.rowCount() - 1, -1, -1):
-                item = self.table.item(row, 0)
-                if item is not None and item.data(Qt.ItemDataRole.UserRole) == session_id:
-                    self.table.removeRow(row)
             self._apply_filters()
 
     def _datetime_sort_key(value: datetime | str | float) -> float:

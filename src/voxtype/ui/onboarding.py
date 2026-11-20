@@ -72,9 +72,9 @@ if PYSIDE6_AVAILABLE:
                 self.setWizardStyle(QWizard.WizardStyle.ModernStyle)
             self.setOption(QWizard.WizardOption.NoBackButtonOnStartPage, True)
             self.setOption(QWizard.WizardOption.NoCancelButtonOnLastPage, True)
-            self.resize(740, 540)
+            self.resize(720, 560)
             self.setMinimumSize(640, 480)
-            self.setButtonText(QWizard.WizardButton.NextButton, "Далее")
+            self.setButtonText(QWizard.WizardButton.NextButton, "Продолжить")
             self.setButtonText(QWizard.WizardButton.BackButton, "Назад")
             self.setButtonText(QWizard.WizardButton.CancelButton, "Отмена")
             self.setButtonText(QWizard.WizardButton.FinishButton, "Начать работу")
@@ -333,7 +333,13 @@ if PYSIDE6_AVAILABLE:
                 label = QLabel(f"Шаг {index} из {total}", page)
                 label.setObjectName(f"onboardingStep{index}")
                 label.setProperty("caption", True)
+                progress = QProgressBar(page)
+                progress.setRange(0, total)
+                progress.setValue(index)
+                progress.setTextVisible(False)
+                progress.setAccessibleName(f"Мастер настройки, шаг {index} из {total}")
                 layout.insertWidget(0, label)
+                layout.insertWidget(1, progress)
                 layout.setContentsMargins(
                     SPACING.space_5,
                     SPACING.space_4,

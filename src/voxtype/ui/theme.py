@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
+from functools import lru_cache
 from typing import Any
 
 from ._optional import PYSIDE6_AVAILABLE, require_pyside6
@@ -57,8 +58,8 @@ class SpacingTokens:
 @dataclass(frozen=True, slots=True)
 class RadiusTokens:
     radius_sm: int = 8
-    radius_md: int = 10
-    radius_lg: int = 16
+    radius_md: int = 8
+    radius_lg: int = 12
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,60 +71,40 @@ class TypographyTokens:
     window_title_pt: int = 20
 
 
-LIGHT_PALETTE = SemanticPalette(
-    background="#F5F7FB",
-    surface="#FFFFFF",
-    surface_subtle="#F0F3F8",
-    text_primary="#172033",
-    text_secondary="#526077",
-    text_tertiary="#768196",
-    border="#DCE3ED",
-    border_strong="#C7D1E0",
-    primary="#5B5FEF",
-    primary_hover="#4F53DF",
-    primary_pressed="#4145C9",
-    primary_subtle="#ECECFF",
-    success="#168B5D",
-    success_subtle="#E6F7EF",
-    warning="#A86100",
-    warning_subtle="#FFF4E1",
-    error="#C83F4B",
-    error_subtle="#FFF0F1",
-    info="#3568D4",
-    info_subtle="#EDF3FF",
-    focus_ring="#777AF7",
-    disabled_text="#8B96A8",
-    disabled_surface="#EEF1F5",
+DARK = dict(
+    canvas="#101116", sidebar="#14161D", surface="#191B23", surface_hover="#222530",
+    surface_raised="#252835", border="#303442", border_subtle="#262A35",
+    text_primary="#F2F3F8", text_secondary="#A0A5B8", text_muted="#73798D",
+    accent="#818CF8", accent_hover="#9BA3FF", accent_pressed="#6975E5",
+    accent_soft="#292D4D", success="#34D399", warning="#FBBF24", danger="#FB7185",
+)
+LIGHT = dict(
+    canvas="#F7F8FC", sidebar="#F0F2F7", surface="#FFFFFF", surface_hover="#F1F3F9",
+    surface_raised="#E9ECF5", border="#DCE0EB", border_subtle="#E9ECF2",
+    text_primary="#181B27", text_secondary="#626A7C", text_muted="#828A9A",
+    accent="#5B61D6", accent_hover="#4F55CB", accent_pressed="#4048B4",
+    accent_soft="#E9EAFE", success="#16845E", warning="#A66A08", danger="#D34259",
 )
 
-DARK_PALETTE = SemanticPalette(
-    background="#10131B",
-    surface="#191E2A",
-    surface_subtle="#222938",
-    text_primary="#F2F5FA",
-    text_secondary="#BBC3D2",
-    text_tertiary="#98A3B7",
-    border="#30394A",
-    border_strong="#465167",
-    primary="#7B7FF6",
-    primary_hover="#9093FF",
-    primary_pressed="#686CE1",
-    primary_subtle="#292B58",
-    success="#45C691",
-    success_subtle="#173C31",
-    warning="#F0AE42",
-    warning_subtle="#493719",
-    error="#EF6871",
-    error_subtle="#4A252B",
-    info="#77A3FF",
-    info_subtle="#203352",
-    focus_ring="#A4A6FF",
-    disabled_text="#747E91",
-    disabled_surface="#202633",
-)
+
+def _semantic(tokens: dict[str, str], *, dark: bool) -> SemanticPalette:
+    t = tokens
+    return SemanticPalette(
+        t["canvas"], t["surface"], t["surface_hover"],
+        t["text_primary"], t["text_secondary"], t["text_muted"],
+        t["border_subtle"], t["border"], t["accent"], t["accent_hover"],
+        t["accent_pressed"], t["accent_soft"], t["success"],
+        "#16342D" if dark else "#E7F6EF", t["warning"], "#392F20" if dark else "#FFF4DE",
+        t["danger"], "#39252F" if dark else "#FFEBEF", t["accent"], t["accent_soft"],
+        t["accent"], t["text_muted"], t["surface_raised"],
+    )
+
+
+LIGHT_PALETTE = _semantic(LIGHT, dark=False)
+DARK_PALETTE = _semantic(DARK, dark=True)
 
 OVERLAY_PALETTE = {
-    "background": "rgba(24, 29, 40, 247)",
+    "background": "#191B23",
     "surface": "#222938",
     "surface_hover": "#354055",
     "text_primary": "#F7F8FB",
@@ -156,8 +137,14 @@ def palette(mode: ThemeMode | str = ThemeMode.LIGHT) -> SemanticPalette:
     return DARK_PALETTE if resolved is ThemeMode.DARK else LIGHT_PALETTE
 
 
-def state_color(state: str, mode: ThemeMode | str = ThemeMode.LIGHT) -> str:
-    colors = palette(mode)
+def state_color(state: str, mode: ThemeMode | str | None = None) -> str:
+    if mode is None and PYSIDE6_AVAILABLE:
+        from PySide6.QtWidgets import QApplication
+
+        app = QApplication.instance()
+        if app is not None:
+            mode = app.property("voxtypeTheme")
+    colors = palette(mode or ThemeMode.LIGHT)
     return {
         "neutral": colors.text_tertiary,
         "primary": colors.primary,
@@ -168,21 +155,22 @@ def state_color(state: str, mode: ThemeMode | str = ThemeMode.LIGHT) -> str:
     }.get(state, colors.text_tertiary)
 
 
+@lru_cache(maxsize=4)
 def stylesheet(mode: ThemeMode | str = ThemeMode.LIGHT) -> str:
     colors = palette(mode)
+    tokens = DARK if colors is DARK_PALETTE else LIGHT
+    on_accent = tokens["canvas"] if tokens is DARK else "#FFFFFF"
     return f"""
     QMainWindow, QDialog, QWizard, QWizardPage {{ background: {colors.background}; }}
     QLabel[muted="true"] {{ color: {colors.text_secondary}; }}
     QLabel[tertiary="true"] {{ color: {colors.text_tertiary}; }}
     QLabel[heading="true"] {{
         color: {colors.text_primary};
-        font-size: {TYPOGRAPHY.window_title_pt}pt;
-        font-weight: 650;
+
     }}
     QLabel[sectionHeading="true"] {{
         color: {colors.text_primary};
-        font-size: {TYPOGRAPHY.card_title_pt}pt;
-        font-weight: 600;
+
     }}
     QLabel[caption="true"] {{
         color: {colors.text_tertiary};
@@ -241,10 +229,10 @@ def stylesheet(mode: ThemeMode | str = ThemeMode.LIGHT) -> str:
         border-color: {colors.border};
     }}
     QPushButton[primary="true"] {{
-        color: white;
+        color: {on_accent};
         background: {colors.primary};
         border-color: {colors.primary};
-        min-height: 52px;
+        min-height: 42px;
         border-radius: 13px;
         font-size: {TYPOGRAPHY.card_title_pt}pt;
         font-weight: 650;
@@ -258,7 +246,7 @@ def stylesheet(mode: ThemeMode | str = ThemeMode.LIGHT) -> str:
         border-color: {colors.primary_pressed};
     }}
     QPushButton[compactPrimary="true"] {{
-        color: white;
+        color: {on_accent};
         background: {colors.primary};
         border-color: {colors.primary};
         min-height: 34px;
@@ -349,7 +337,7 @@ def stylesheet(mode: ThemeMode | str = ThemeMode.LIGHT) -> str:
     QSlider::handle:horizontal {{
         width: 16px; margin: -6px 0; border-radius: 8px; background: {colors.primary};
     }}
-    QListWidget, QTreeWidget, QTableWidget {{
+    QListWidget, QTreeWidget, QTableWidget, QTableView {{
         background: {colors.surface};
         alternate-background-color: {colors.surface_subtle};
         border: 1px solid {colors.border};
@@ -365,7 +353,7 @@ def stylesheet(mode: ThemeMode | str = ThemeMode.LIGHT) -> str:
     QListWidget::item:hover, QTreeWidget::item:hover, QTableWidget::item:hover {{
         background: {colors.surface_subtle};
     }}
-    QListWidget::item:selected, QTreeWidget::item:selected, QTableWidget::item:selected {{
+    QListWidget::item:selected, QTreeWidget::item:selected, QTableWidget::item:selected, QTableView::item:selected {{
         background: {colors.primary_subtle};
         color: {colors.text_primary};
     }}
@@ -411,6 +399,24 @@ def stylesheet(mode: ThemeMode | str = ThemeMode.LIGHT) -> str:
     QMenu::item {{ padding: 7px 24px 7px 10px; border-radius: 6px; }}
     QMenu::item:selected {{ background: {colors.primary_subtle}; color: {colors.text_primary}; }}
     QMenu::separator {{ height: 1px; background: {colors.border}; margin: 5px 8px; }}
+    QFrame#obsidianSidebar {{ background: {tokens["sidebar"]}; border-right: 1px solid {colors.border}; }}
+    QFrame#obsidianHeader {{ background: {tokens["canvas"]}; border-bottom: 1px solid {colors.border}; }}
+    QPushButton[navRow="true"] {{
+        text-align: left; min-height: 38px; padding-left: 11px;
+        border: 1px solid transparent; border-left: 2px solid transparent;
+        background: transparent; color: {colors.text_secondary};
+    }}
+    QPushButton[navRow="true"]:hover {{ background: {colors.surface_subtle}; }}
+    QPushButton[navRow="true"]:checked {{
+        background: {colors.primary_subtle}; color: {colors.text_primary};
+        border-left-color: {colors.primary};
+    }}
+    QPushButton[navRow="true"]:focus {{ border-color: {colors.focus_ring}; }}
+    QPushButton[voiceControl="true"] {{
+        min-height: 0; padding: 0; border-radius: 36px;
+    }}
+    QPushButton[voiceControl="true"]:focus {{ border: 2px solid {tokens["text_primary"]}; }}
+    QLineEdit[invalid="true"] {{ border-color: {colors.error}; }}
     QToolTip {{
         color: {colors.text_primary};
         background: {colors.surface};
@@ -420,6 +426,7 @@ def stylesheet(mode: ThemeMode | str = ThemeMode.LIGHT) -> str:
     """
 
 
+@lru_cache(maxsize=1)
 def overlay_stylesheet() -> str:
     colors = OVERLAY_PALETTE
     return f"""
@@ -450,6 +457,9 @@ def overlay_stylesheet() -> str:
         font-family: "Cascadia Mono", Consolas;
         font-weight: 600;
     }}
+    QPushButton[overlayIcon="true"] {{ padding: 0; min-height: 0; border-radius: 6px; }}
+    QPushButton[overlayIcon="true"]:hover {{ background: {colors["surface_hover"]}; }}
+    QPushButton[overlayIcon="true"]:pressed {{ background: {colors["primary_subtle"]}; }}
     QPushButton {{
         color: {colors["text_primary"]};
         background: {colors["surface"]};
@@ -491,39 +501,104 @@ def overlay_stylesheet() -> str:
 
 
 if PYSIDE6_AVAILABLE:
-    from PySide6.QtCore import Qt
+    from PySide6.QtCore import QObject, Qt, Signal
     from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPalette, QPen, QPixmap
 
     _APP_ICON_CACHE: dict[tuple[int, str], QIcon] = {}
 
+    class ThemeManager(QObject):
+        theme_changed = Signal(object)
+
+        def __init__(self, app: Any) -> None:
+            super().__init__(app)
+            self.app = app
+            self.requested = ThemeMode.SYSTEM
+            self.current_theme = ThemeMode.LIGHT
+            self._applied = False
+            self._native_palette = QPalette(app.palette())
+            hints = app.styleHints()
+            if hasattr(hints, "colorSchemeChanged"):
+                hints.colorSchemeChanged.connect(self._system_changed)
+
+        def resolve_system_theme(self) -> ThemeMode:
+            hints = self.app.styleHints()
+            if hasattr(hints, "colorScheme"):
+                scheme = hints.colorScheme()
+                if scheme == Qt.ColorScheme.Dark:
+                    return ThemeMode.DARK
+                if scheme == Qt.ColorScheme.Light:
+                    return ThemeMode.LIGHT
+            if self._applied:
+                return self.current_theme
+            return (ThemeMode.DARK if self._native_palette.color(QPalette.ColorRole.Window).lightness() < 128
+                    else ThemeMode.LIGHT)
+
+        def get_token(self, name: str) -> str:
+            return (DARK if self.current_theme is ThemeMode.DARK else LIGHT)[name]
+
+        def set_theme(self, mode: ThemeMode | str) -> ThemeMode:
+            self.requested = ThemeMode(mode)
+            resolved = self.resolve_system_theme() if self.requested is ThemeMode.SYSTEM else self.requested
+            if self._applied and resolved is self.current_theme:
+                return resolved
+            self._applied = True
+            self.current_theme = resolved
+            self.app.setProperty("voxtypeTheme", resolved.value)
+            self.app.setFont(typography("body"))
+            self.app.setPalette(_qt_palette(resolved))
+            self.app.setStyleSheet(stylesheet(resolved))
+            self.theme_changed.emit(resolved)
+            return resolved
+
+        def _system_changed(self, _scheme: object) -> None:
+            if self.requested is ThemeMode.SYSTEM:
+                self.set_theme(ThemeMode.SYSTEM)
+
+
+    @lru_cache(maxsize=2)
+    def _qt_palette(mode: ThemeMode) -> QPalette:
+        colors = palette(mode)
+        result = QPalette()
+        for role, value in {
+            "Window": colors.background, "Base": colors.surface, "AlternateBase": colors.surface_subtle,
+            "WindowText": colors.text_primary, "Text": colors.text_primary, "ButtonText": colors.text_primary,
+            "Button": colors.surface, "Highlight": colors.primary_subtle,
+            "HighlightedText": colors.text_primary, "PlaceholderText": colors.text_secondary,
+            "ToolTipBase": colors.surface, "ToolTipText": colors.text_primary,
+        }.items():
+            result.setColor(getattr(QPalette.ColorRole, role), QColor(value))
+        for role in (QPalette.ColorRole.WindowText, QPalette.ColorRole.Text, QPalette.ColorRole.ButtonText):
+            result.setColor(QPalette.ColorGroup.Disabled, role, QColor(colors.disabled_text))
+        return result
+
+
+    def typography(role: str) -> QFont:
+        size, emphasis = {
+            "hero": (28, True), "page": (23, True), "section": (16, True),
+            "body": (13, False), "emphasis": (13, True), "caption": (12, False), "micro": (11, False),
+        }[role]
+        font = QFont()
+        font.setFamilies(["Segoe UI Variable", "Segoe UI", "sans-serif"])
+        font.setPixelSize(size)
+        font.setWeight(QFont.Weight.DemiBold if emphasis else QFont.Weight.Normal)
+        return font
+
+
+    def theme_manager(app: Any) -> ThemeManager:
+        manager = getattr(app, "_voxtype_theme_manager", None)
+        if manager is None:
+            manager = ThemeManager(app)
+            app._voxtype_theme_manager = manager
+        return manager
+
+
     def resolved_theme(app: Any, mode: ThemeMode | str) -> ThemeMode:
-        requested = (
-            ThemeMode(mode) if str(mode) in ThemeMode._value2member_map_ else ThemeMode.SYSTEM
-        )
-        if requested is not ThemeMode.SYSTEM:
-            return requested
-        lightness = app.palette().color(QPalette.ColorRole.Window).lightness()
-        return ThemeMode.DARK if lightness < 128 else ThemeMode.LIGHT
+        requested = ThemeMode(mode)
+        return theme_manager(app).resolve_system_theme() if requested is ThemeMode.SYSTEM else requested
+
 
     def apply_theme(app: Any, mode: ThemeMode | str = ThemeMode.SYSTEM) -> ThemeMode:
-        resolved = resolved_theme(app, mode)
-        colors = palette(resolved)
-        font = QFont()
-        font.setFamilies(["Segoe UI Variable", "Segoe UI"])
-        font.setPointSize(TYPOGRAPHY.body_pt)
-        app.setFont(font)
-        native_palette = app.palette()
-        for group in (QPalette.ColorGroup.Active, QPalette.ColorGroup.Inactive):
-            for role in (
-                QPalette.ColorRole.WindowText,
-                QPalette.ColorRole.Text,
-                QPalette.ColorRole.ButtonText,
-            ):
-                native_palette.setColor(group, role, QColor(colors.text_primary))
-        app.setPalette(native_palette)
-        app.setProperty("voxtypeTheme", resolved.value)
-        app.setStyleSheet(stylesheet(resolved))
-        return resolved
+        return theme_manager(app).set_theme(mode)
 
     def create_app_icon(size: int = 64, color: str = LIGHT_PALETTE.primary) -> Any:
         """Create a multi-resolution microphone icon without asset I/O."""
