@@ -39,9 +39,10 @@ def format_fragment_boundary(
     *,
     add_space: bool = True,
     capitalize: bool = True,
+    normalize: bool = True,
 ) -> str:
     """Return only the insertion text with safe spacing at a committed boundary."""
-    current = normalize_internal_spacing(fragment)
+    current = normalize_internal_spacing(fragment) if normalize else fragment
     if not current:
         return ""
     if capitalize and (not previous.strip() or previous.rstrip().endswith((".", "!", "?", "\n"))):

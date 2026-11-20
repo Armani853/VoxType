@@ -70,7 +70,7 @@ class ModelSettings:
 
 @dataclass(slots=True)
 class PrivacySettings:
-    save_history: bool = True
+    save_history: bool = False
     save_audio: bool = False
     retention_days: int = 30
 
@@ -94,6 +94,7 @@ class AppSettings:
     hotkeys: HotkeySettings = field(default_factory=HotkeySettings)
     overlay_x: int | None = None
     overlay_y: int | None = None
+    professional: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

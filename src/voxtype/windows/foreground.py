@@ -66,6 +66,7 @@ class WindowMetadata:
     process_name: str
     integrity_level: IntegrityLevel
     captured_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    process_path: str | None = None
 
     @property
     def identity(self) -> tuple[int, int]:
@@ -86,6 +87,16 @@ class _TOKEN_MANDATORY_LABEL(ctypes.Structure):
     _fields_ = [("Label", _SID_AND_ATTRIBUTES)]
 
 
+class _GUI_THREAD_INFO(ctypes.Structure):
+    _fields_ = [
+        ("size", wintypes.DWORD), ("flags", wintypes.DWORD),
+        ("active", wintypes.HWND), ("focus", wintypes.HWND),
+        ("capture", wintypes.HWND), ("menu_owner", wintypes.HWND),
+        ("move_size", wintypes.HWND), ("caret", wintypes.HWND),
+        ("caret_rect", wintypes.RECT),
+    ]
+
+
 @lru_cache(maxsize=1)
 def _configure_apis() -> tuple[Any, Any, Any]:
     user32 = load_library("user32")
@@ -100,6 +111,10 @@ def _configure_apis() -> tuple[Any, Any, Any]:
     user32.GetWindowTextW.restype = ctypes.c_int
     user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
     user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+    user32.GetGUIThreadInfo.argtypes = [wintypes.DWORD, ctypes.POINTER(_GUI_THREAD_INFO)]
+    user32.GetGUIThreadInfo.restype = wintypes.BOOL
+    user32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+    user32.GetClassNameW.restype = ctypes.c_int
     user32.IsWindow.argtypes = [wintypes.HWND]
     user32.IsWindow.restype = wintypes.BOOL
     user32.SetForegroundWindow.argtypes = [wintypes.HWND]
@@ -179,8 +194,8 @@ def _open_process(process_id: int) -> int:
     return int(kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, process_id) or 0)
 
 
-def get_process_name(process_id: int) -> str:
-    """Return the executable basename, or an empty string if access is denied."""
+def get_process_path(process_id: int) -> str:
+    """Return the executable path, or an empty string if access is denied."""
 
     require_windows()
     if process_id <= 0:
@@ -196,9 +211,13 @@ def get_process_name(process_id: int) -> str:
             wintypes.HANDLE(process), 0, buffer, ctypes.byref(capacity)
         ):
             return ""
-        return Path(buffer.value[: capacity.value]).name
+        return buffer.value[: capacity.value]
     finally:
         kernel32.CloseHandle(wintypes.HANDLE(process))
+
+
+def get_process_name(process_id: int) -> str:
+    return Path(get_process_path(process_id)).name
 
 
 def get_process_integrity(process_id: int) -> IntegrityLevel:
@@ -272,18 +291,37 @@ def capture_window(hwnd: int) -> WindowMetadata | None:
     process_id = get_window_process_id(hwnd)
     if process_id <= 0:
         return None
+    process_path = get_process_path(process_id)
     return WindowMetadata(
         hwnd=hwnd,
         title=get_window_title(hwnd),
         process_id=process_id,
-        process_name=get_process_name(process_id),
+        process_name=Path(process_path).name,
         integrity_level=get_process_integrity(process_id),
+        process_path=process_path or None,
     )
 
 
 def capture_foreground() -> WindowMetadata | None:
     hwnd = get_foreground_hwnd()
     return capture_window(hwnd) if hwnd else None
+
+
+def focused_control_type(target: WindowMetadata) -> str | None:
+    if os.name != "nt" or get_foreground_hwnd() != target.hwnd:
+        return None
+    user32, _, _ = _configure_apis()
+    process = wintypes.DWORD()
+    thread = user32.GetWindowThreadProcessId(_as_hwnd(target.hwnd), ctypes.byref(process))
+    if not thread or process.value != target.process_id:
+        return None
+    info = _GUI_THREAD_INFO()
+    info.size = ctypes.sizeof(info)
+    if not user32.GetGUIThreadInfo(thread, ctypes.byref(info)) or not info.focus:
+        return None
+    output = ctypes.create_unicode_buffer(256)
+    length = user32.GetClassNameW(info.focus, output, len(output))
+    return output.value if length and get_foreground_hwnd() == target.hwnd else None
 
 
 def request_foreground(hwnd: int) -> bool:

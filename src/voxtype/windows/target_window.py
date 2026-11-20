@@ -36,6 +36,7 @@ class TargetStatus(StrEnum):
     HIGHER_INTEGRITY = "higher_integrity"
     INTEGRITY_UNKNOWN = "integrity_unknown"
     SUSPENDED = "suspended"
+    ENTERPRISE_BLOCKED = "enterprise_blocked"
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,6 +111,7 @@ class TargetWindowManager:
         self._protected_process_names = {
             name.casefold() for name in protected_process_names if name
         }
+        self.application_blocked: Callable[[WindowMetadata], bool] | None = None
         self._locked_target: WindowMetadata | None = None
         self._suspended = False
         self._lock = threading.RLock()
@@ -187,6 +189,8 @@ class TargetWindowManager:
             or target.process_name.casefold() in self._protected_process_names
         ):
             return TargetStatus.OWN_WINDOW
+        if self.application_blocked is not None and self.application_blocked(target):
+            return TargetStatus.ENTERPRISE_BLOCKED
         comparison = compare_integrity(target.integrity_level, self._current_integrity)
         if comparison is IntegrityComparison.TARGET_HIGHER:
             return TargetStatus.HIGHER_INTEGRITY
@@ -206,6 +210,7 @@ class TargetWindowManager:
             TargetStatus.HIGHER_INTEGRITY: "UIPI blocks input into a higher-integrity process",
             TargetStatus.INTEGRITY_UNKNOWN: "Target integrity could not be verified safely",
             TargetStatus.SUSPENDED: "Windows session is suspended or resuming",
+            TargetStatus.ENTERPRISE_BLOCKED: "Диктовка в этом приложении запрещена политикой организации",
         }
         return reasons[status]
 

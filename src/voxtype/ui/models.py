@@ -12,6 +12,8 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any
 
+from voxtype.core.models import AppReadiness
+
 
 class AppStatus(StrEnum):
     STARTING = "STARTING"
@@ -126,6 +128,7 @@ class UIState:
     error_message: str = ""
     full_transcript: str = ""
     delivery_status: str = "pending"
+    readiness: AppReadiness | None = None
 
     def __post_init__(self) -> None:
         self.state = AppStatus.coerce(self.state)
@@ -153,6 +156,8 @@ class HistoryEntry:
     processing_time_s: float = 0.0
     dropped_frames: int = 0
     completion_status: str = "completed"
+    profile_id: str = "general"
+    source_type: str = "dictation"
 
     def __post_init__(self) -> None:
         self.language = DictationLanguage.coerce(self.language)
@@ -215,6 +220,7 @@ def snapshot_from(source: UIState | Mapping[str, Any] | object) -> UIState:
         error_message=read("error_message", ""),
         full_transcript=read("full_transcript", ""),
         delivery_status=read("delivery_status", "pending"),
+        readiness=read("readiness", None),
     )
 
 
@@ -244,6 +250,8 @@ def history_entry_from(source: HistoryEntry | Mapping[str, Any] | object) -> His
         processing_time_s=read("processing_time_s", read("processing_s", 0.0)),
         dropped_frames=read("dropped_frames", 0),
         completion_status=str(read("completion_status", read("status", "completed"))),
+        profile_id=str(read("profile_id", "general")),
+        source_type=str(read("source_type", "dictation")),
     )
 
 

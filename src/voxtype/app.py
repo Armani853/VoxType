@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import shutil
+import sqlite3
 import sys
 import threading
 import time
@@ -73,6 +74,9 @@ from voxtype.ui import (
     create_app_icon,
 )
 from voxtype.ui.messages import failure_message
+from voxtype.ui.professional import ProfessionalWindow
+from voxtype.core.profiles import DictationProfile
+from voxtype.transcript.professional import VoiceAction
 from voxtype.vad.segmenter import SegmentationSettings, StreamingSegmenter
 from voxtype.vad.silero import SileroVAD
 from voxtype.version import __version__
@@ -86,6 +90,10 @@ _LOGGER = logging.getLogger("voxtype.app")
 
 
 class _WorkerSignals(QObject):
+    professional_action = Signal(int, object, object)
+    professional_delivery_failed = Signal()
+    workflow_action = Signal(str, str, str)
+    snapshot_ready = Signal(object)
     model_progress = Signal(int, str)
     model_ready = Signal(bool, str, str)
     calibration_progress = Signal(int, str)
@@ -172,16 +180,23 @@ class DesktopApplication:
         self.runtime = runtime
         self.controller = runtime.controller
         self.signals = _WorkerSignals()
+        self.controller.professional_action = self.signals.professional_action.emit
+        self.controller.workflows.desktop_action = self.signals.workflow_action.emit
         self.main = MainWindow(
             None,
             interface_language=runtime.settings.general.ui_language,
             minimize_to_tray=runtime.settings.general.minimize_to_tray,
         )
-        self.main.set_model_available(runtime.selected_model_installed)
         stage("main_window_constructed")
         self._overlay: DictationOverlay | None = None
         self.tray = TrayController(None)
         self._settings_window: SettingsWindow | None = None
+        self._professional_window: ProfessionalWindow | None = None
+        self._file_queue = None
+        self._interactive_asr = threading.Event()
+        self._professional_timer = QTimer(self.main, interval=750)
+        self._professional_timer.timeout.connect(self._poll_professional)
+        QTimer.singleShot(1100, self._start_professional_queue)
         self._history_window: HistoryWindow | None = None
         self._diagnostics_window: DiagnosticsWindow | None = None
         stage("auxiliary_widgets_constructed")
@@ -260,7 +275,7 @@ class DesktopApplication:
         stage("qt_timers_started")
         if not runtime.settings.general.onboarding_completed:
             QTimer.singleShot(100, self.show_onboarding)
-        if runtime.session_repository.unfinished():
+        if not self.controller.policy.disable_history and runtime.session_repository.unfinished():
             self.tray.show_message(
                 "VoxType",
                 "Найдена незавершённая сессия. Откройте историю для восстановления текста.",
@@ -291,6 +306,7 @@ class DesktopApplication:
             )
         )
         self.main.settings_requested.connect(self.show_settings)
+        self.main.professional_requested.connect(self.show_professional_tools)
         self.main.exit_requested.connect(self.quit)
         self.main.history_requested.connect(self.show_history)
         self.main.diagnostics_requested.connect(self.show_diagnostics)
@@ -314,6 +330,16 @@ class DesktopApplication:
         self.signals.diagnostics_ready.connect(self._on_diagnostics_ready)
         self.signals.audio_level.connect(self._on_audio_level)
         self.signals.recovery_ready.connect(self._on_recovery_ready)
+        self.signals.professional_action.connect(
+            self._on_professional_action, Qt.ConnectionType.QueuedConnection
+        )
+        self.signals.professional_delivery_failed.connect(
+            lambda: self.tray.show_message("VoxType", "Не удалось отправить текст в целевое окно", critical=True)
+        )
+        self.signals.workflow_action.connect(
+            self._on_workflow_action, Qt.ConnectionType.QueuedConnection
+        )
+        self.signals.snapshot_ready.connect(self._update_views_if_changed)
         self.signals.history_ready.connect(
             self._on_history_ready, Qt.ConnectionType.QueuedConnection
         )
@@ -363,6 +389,10 @@ class DesktopApplication:
         if window is None:
             window = SettingsWindow(self.main)
             self._settings_window = window
+            window.set_privacy_policy(
+                history_disabled=self.controller.policy.disable_history,
+                audio_disabled=self.controller.policy.disable_audio_storage,
+            )
             window.settings_submitted.connect(self._save_settings)
             window.onboarding_requested.connect(self.show_onboarding)
             window.open_data_folder_requested.connect(self._open_data_folder)
@@ -386,6 +416,9 @@ class DesktopApplication:
             window = HistoryWindow(self.main)
             self._history_window = window
             window.refresh_requested.connect(self._refresh_history)
+            window.enable_repository_search()
+            window.insert_requested.connect(self._submit_professional_text)
+            window.clear_requested.connect(self._clear_finished_history)
             window.delete_requested.connect(self._delete_history_session)
             window.recover_requested.connect(self._recover_history_session)
             window.export_requested.connect(self._export_history_session)
@@ -490,13 +523,13 @@ class DesktopApplication:
 
     def _poll(self) -> None:
         poll_started = time.perf_counter()
-        if self.controller.state.name == "IDLE":
+        if self.controller.state.name in {"IDLE", "COMPLETED", "ERROR_RECOVERABLE"} and not self.controller.injection_service.pending_fragments:
             with suppress(OSError, RuntimeError):
                 self.controller.target_manager.remember_foreground_target()
         target_done = time.perf_counter()
         snapshot = self.controller.snapshot()
         snapshot_done = time.perf_counter()
-        self._update_views_if_changed(snapshot)
+        self.signals.snapshot_ready.emit(snapshot)
         widgets_done = time.perf_counter()
         active = snapshot.state in {
             "STARTING",
@@ -639,6 +672,132 @@ class DesktopApplication:
             return False
         return True
 
+    def show_professional_tools(self) -> None:
+        if self._professional_window is None:
+            self._professional_window = ProfessionalWindow(self.controller, self.main)
+            self._professional_window.insertion_requested.connect(self._submit_professional_text)
+            self._start_professional_queue()
+            if self._file_queue is not None:
+                self._professional_window.bind_transcription_queue(self._file_queue)
+        self._professional_window.show()
+        self._professional_window.raise_()
+
+    def _start_professional_queue(self) -> None:
+        if self._closing or self._file_queue is not None:
+            return
+        from importlib.util import find_spec
+
+        if find_spec("av") is None:
+            return
+        from voxtype.asr.transcription_queue import FileTranscriptionQueue
+
+        try:
+            self._file_queue = FileTranscriptionQueue(
+                self.runtime.session_repository.path, self.controller,
+            )
+        except (OSError, RuntimeError, sqlite3.Error):
+            _LOGGER.exception("file_queue_initialization_failed")
+            return
+        self._professional_timer.start()
+
+    def _poll_professional(self) -> None:
+        if self._closing or self._file_queue is None:
+            return
+        try:
+            if not self._interactive_asr.is_set():
+                self._file_queue.tick()
+            if self._professional_window is not None:
+                panel = self._professional_window.transcription_panel
+                if panel is not None:
+                    panel.refresh()
+        except Exception as exc:
+            _LOGGER.warning("professional_queue_update_failed type=%s", type(exc).__name__)
+
+    def _submit_professional_text(self, text: str, session: int | None = None) -> None:
+        def deliver() -> None:
+            if not self.controller.insert_professional_text(text, session):
+                self.signals.professional_delivery_failed.emit()
+
+        self._run_background("voxtype-professional-insertion", deliver)
+
+    def _on_workflow_action(self, action: str, title: str, text: str) -> None:
+        if self._closing:
+            return
+        if action == "copy":
+            QApplication.clipboard().setText(text)
+            return
+        from PySide6.QtWidgets import QDialog, QPlainTextEdit, QPushButton, QVBoxLayout
+
+        dialog = QDialog(self.main)
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        dialog.setWindowTitle(title)
+        dialog.resize(630, 420)
+        layout = QVBoxLayout(dialog)
+        preview = QPlainTextEdit(text, dialog)
+        layout.addWidget(preview)
+        export_button = QPushButton("Экспорт TXT…", dialog)
+        layout.addWidget(export_button)
+
+        def save() -> None:
+            filename, _ = QFileDialog.getSaveFileName(dialog, "Экспорт черновика", "VoxType.txt", "TXT (*.txt)")
+            if filename:
+                try:
+                    Path(filename).write_text(preview.toPlainText(), encoding="utf-8")
+                except OSError:
+                    self.tray.show_message("VoxType", "Не удалось сохранить черновик", critical=True)
+
+        export_button.clicked.connect(save)
+        dialog.open()
+
+    def _on_professional_action(
+        self, session: int, action: VoiceAction, profile: DictationProfile
+    ) -> None:
+        if (self._closing or not self.controller.policy.allow_voice_commands
+                or not self.controller.professional_session_is_current(session)):
+            return
+        from PySide6.QtWidgets import QMessageBox
+
+        if action.confirmation_required and QMessageBox.question(
+            self.main, "Голосовая команда", f"Выполнить команду «{action.trigger}»?"
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        if not self.controller.professional_session_is_current(session):
+            return
+        kind, payload = action.action_type, action.payload
+        if kind == "CancelCurrentSession":
+            self.controller.cancel_professional_session(session)
+        elif kind == "OpenVoxTypePanel":
+            if payload.get("panel") == "settings":
+                self.show_settings()
+            elif payload.get("panel") in {"dictionary", "snippets", "commands", "replacements"}:
+                self.show_professional_tools()
+                if self._professional_window is not None:
+                    self._professional_window.open_collection(payload["panel"])
+        elif kind == "CopyLastResult":
+            self._run_background("voxtype-professional-copy", self.controller.copy_previous_result)
+        elif kind == "SwitchProfile":
+            name = payload.get("name", "").casefold()
+            profiles = self.controller.profiles
+            selected = next((
+                item for item in profiles.profiles() if self.controller.profile_allowed(item)
+                and name in {item.id.casefold(), item.name.casefold()}
+            ), None)
+            if selected is not None:
+                self._run_background("voxtype-switch-profile", lambda: profiles.set_default(selected.id))
+        elif kind == "InsertSnippet" and self.controller.policy.allow_user_snippets:
+            snippet = self.controller.professional_content.snapshot().find_snippet(
+                payload.get("name", ""), profile
+            )
+            if snippet is not None:
+                self.show_professional_tools()
+                if self._professional_window is not None:
+                    text = self._professional_window.render_snippet(snippet)
+                    if text is not None:
+                        self._submit_professional_text(text, session)
+        elif kind in {"InsertLiteralText", "InsertParagraph", "InsertNewline"}:
+            text = {"InsertParagraph": "\n\n", "InsertNewline": "\n"}.get(kind, payload.get("text", ""))
+            self._submit_professional_text(text, session)
+
     def show_settings(self) -> None:
         window = self.settings_window
         if window.isVisible():
@@ -692,6 +851,13 @@ class DesktopApplication:
         if not isinstance(items, (list, tuple)):
             return
         self.runtime.devices = tuple(items)
+        selected_device = self.runtime.settings.audio.device_id
+        self.controller.set_recording_availability(
+            microphone=any(
+                item.is_default if selected_device is None else item.index == selected_device
+                for item in items
+            )
+        )
         devices = [(f"{item.name} ({item.host_api})", item.index) for item in items]
         if self._settings_window is not None:
             self._settings_window.set_audio_devices(devices)
@@ -708,6 +874,15 @@ class DesktopApplication:
     def _save_settings(self, values: object) -> None:
         if not isinstance(values, dict):
             return
+        values = dict(values)
+        policy = self.controller.policy
+        if isinstance(values.get("privacy"), dict):
+            privacy = dict(values["privacy"])
+            if policy.disable_history:
+                privacy.pop("save_history", None)
+            if policy.disable_audio_storage:
+                privacy.pop("save_audio", None)
+            values["privacy"] = privacy
         previous = self.runtime.settings
         previous_autostart = previous.general.start_with_windows
         updated = self.runtime.settings_repository.update(values)
@@ -847,6 +1022,9 @@ class DesktopApplication:
         self.controller.segmenter_factory = factory
 
     def show_history(self) -> None:
+        if self.controller.policy.disable_history:
+            self.tray.show_message("VoxType", "История отключена политикой организации")
+            return
         self.history_window.show()
         self.history_window.raise_()
         self._refresh_history()
@@ -862,19 +1040,20 @@ class DesktopApplication:
         revision = self._history_revision
         self._history_loading = True
         self.history_window.set_loading(True)
+        options = self.history_window.search_options()
 
         def read_history() -> None:
             try:
-                sessions = list(self.runtime.session_repository.recent(250))
+                sessions, more = self.runtime.session_repository.search(**options)
             except Exception:
                 _LOGGER.exception("history_load_failed")
                 self.signals.history_ready.emit(revision, None)
             else:
-                self.signals.history_ready.emit(revision, sessions)
+                self.signals.history_ready.emit(revision, (sessions, more))
 
         self._run_background("voxtype-history-load", read_history)
 
-    def _on_history_ready(self, revision: int, sessions: list[object] | None) -> None:
+    def _on_history_ready(self, revision: int, result: tuple | None) -> None:
         self._history_loading = False
         if self._closing or self._closed:
             self.history_window.set_loading(False)
@@ -883,10 +1062,12 @@ class DesktopApplication:
             self._start_history_load()
             return
         self.history_window.set_loading(False)
-        if sessions is None:
+        if result is None:
             self.tray.show_message("VoxType", "Не удалось загрузить историю", critical=True)
             return
-        self.history_window.set_sessions(sessions)
+        sessions, more = result
+        self.history_window.set_page_available(more)
+        self.history_window.set_sessions(list(sessions))
 
     def _delete_history_session(self, session_id: str) -> None:
         if self.runtime.session_repository.delete(session_id):
@@ -896,6 +1077,15 @@ class DesktopApplication:
             )
             _remove_owned_path(self.controller.spool_root / session_id, self.controller.spool_root)
             self.history_window.remove_session(session_id)
+            self._refresh_history()
+
+    def _clear_finished_history(self) -> None:
+        try:
+            self.runtime.session_repository.delete_all_finished()
+        except Exception as exc:
+            _LOGGER.warning("history_clear_failed type=%s", type(exc).__name__)
+            self.tray.show_message("VoxType", "Не удалось очистить историю", critical=True)
+        else:
             self._refresh_history()
 
     def _recover_history_session(self, session_id: str) -> None:
@@ -1101,6 +1291,10 @@ class DesktopApplication:
     def _download_model(self, profile_text: str) -> None:
         selected = _coerce_asr_profile(profile_text)
         spec = DEFAULT_MODEL_SPECS[selected]
+        policy = self.controller.policy
+        if policy.enforce_offline_only or not policy.model_allowed(spec.model_id):
+            self.signals.model_ready.emit(False, "Загрузка модели запрещена политикой организации", spec.model_id)
+            return
 
         def worker() -> None:
             try:
@@ -1146,7 +1340,6 @@ class DesktopApplication:
         if ready:
             if self._settings_window is not None:
                 self._settings_window.set_models([(model_id, model_id)], model_id)
-            self.main.set_model_available(model_id == self.controller.backend.model_id)
         if self.onboarding is not None:
             self.onboarding.set_model_ready(ready, message)
 
@@ -1160,6 +1353,14 @@ class DesktopApplication:
         )
 
     def _benchmark_model(self, model_id: str) -> None:
+        selected = _coerce_asr_profile(model_id)
+        if not self.controller.policy.model_allowed(DEFAULT_MODEL_SPECS[selected].model_id):
+            self.settings_window.set_diagnostics_status("Модель запрещена политикой организации", False)
+            return
+        if self._interactive_asr.is_set() or (self._file_queue is not None and self._file_queue.busy):
+            self.settings_window.set_diagnostics_status("Дождитесь завершения текущего распознавания", False)
+            return
+        self._interactive_asr.set()
         self.settings_window.set_diagnostics_status("Говорите обычным голосом 6 секунд…")
 
         def worker() -> None:
@@ -1170,7 +1371,6 @@ class DesktopApplication:
                 audio = record_input(self.runtime.device, seconds, capture_rate)
                 if capture_rate != sample_rate:
                     audio = resample_audio(audio, capture_rate, sample_rate)
-                selected = _coerce_asr_profile(model_id)
                 spec = DEFAULT_MODEL_SPECS[selected]
                 if not self.runtime.model_manager.is_installed(spec.model_id):
                     raise RuntimeError("selected model is not installed")
@@ -1196,6 +1396,8 @@ class DesktopApplication:
             except Exception as exc:
                 _LOGGER.exception("model_benchmark_failed type=%s", type(exc).__name__)
                 ok, message = False, failure_message("benchmark")
+            finally:
+                self._interactive_asr.clear()
             self.signals.settings_status.emit(message, ok)
 
         threading.Thread(target=worker, name="voxtype-model-benchmark", daemon=True).start()
@@ -1217,7 +1419,7 @@ class DesktopApplication:
         threading.Thread(target=worker, name="voxtype-audio-test", daemon=True).start()
 
     def _delete_local_data(self) -> None:
-        if self.controller.state.name != "IDLE":
+        if self.controller.state.name != "IDLE" or (self._file_queue and self._file_queue.busy):
             self.settings_window.set_diagnostics_status(
                 "Сначала завершите активную диктовку", False
             )
@@ -1294,6 +1496,14 @@ class DesktopApplication:
         )
 
     def _test_phrase(self, language: str) -> None:
+        if not self.controller.policy.model_allowed(self.controller.backend.model_id):
+            self.signals.phrase_ready.emit(language, "Модель запрещена политикой организации", False)
+            return
+        if self._interactive_asr.is_set() or (self._file_queue is not None and self._file_queue.busy):
+            self.signals.phrase_ready.emit(language, "Дождитесь завершения текущего распознавания", False)
+            return
+        self._interactive_asr.set()
+
         def worker() -> None:
             try:
                 rate = choose_capture_rate(self.runtime.device)
@@ -1308,8 +1518,12 @@ class DesktopApplication:
                 ok = bool(text.strip())
                 rtf = result.processing_seconds / max(result.audio_duration_seconds, 1e-9)
                 selected = _coerce_asr_profile(self.controller.backend.model_id)
-                if rtf > 0.7 and selected is not ASRProfile.FAST:
-                    fast_spec = DEFAULT_MODEL_SPECS[ASRProfile.FAST]
+                policy = self.controller.policy
+                fast_spec = DEFAULT_MODEL_SPECS[ASRProfile.FAST]
+                if (rtf > 0.7 and selected is not ASRProfile.FAST
+                        and policy.model_allowed(fast_spec.model_id)
+                        and (not policy.enforce_offline_only
+                             or self.runtime.model_manager.is_installed(fast_spec.model_id))):
 
                     def progress(done: int, total: int | None) -> None:
                         percent = int(done * 100 / total) if total else 0
@@ -1317,7 +1531,8 @@ class DesktopApplication:
                             percent, "Устанавливаю быстрый профиль по результату RTF"
                         )
 
-                    self.runtime.model_manager.install(fast_spec, progress=progress)
+                    if not self.runtime.model_manager.is_installed(fast_spec.model_id):
+                        self.runtime.model_manager.install(fast_spec, progress=progress)
                     fast_backend = self.runtime.backend_for(ASRProfile.FAST)
                     fast_result = benchmark_backend(
                         ASRProfile.FAST,
@@ -1343,6 +1558,8 @@ class DesktopApplication:
             except Exception as exc:
                 _LOGGER.exception("phrase_test_failed type=%s", type(exc).__name__)
                 text, ok = failure_message("phrase_test"), False
+            finally:
+                self._interactive_asr.clear()
             self.signals.phrase_ready.emit(language, text, ok)
 
         threading.Thread(target=worker, name="voxtype-phrase-test", daemon=True).start()
@@ -1389,12 +1606,17 @@ class DesktopApplication:
             return False
         self._closing = True
         self.timer.stop()
+        self._professional_timer.stop()
+        if self._file_queue is not None:
+            self._file_queue.begin_shutdown()
         self._heartbeat_timer.stop()
         self._heartbeat_stop.set()
         self.tray.show_message("VoxType", "Безопасно завершаю работу в фоне")
 
         def worker() -> None:
             try:
+                if self._file_queue is not None:
+                    self._file_queue.wait_for_worker(2)
                 closed = self.runtime.close()
             except Exception:
                 _LOGGER.exception("shutdown_worker_failed")

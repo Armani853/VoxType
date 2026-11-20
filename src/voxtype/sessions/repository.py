@@ -34,6 +34,8 @@ class SessionRecord:
     processing_s: float
     dropped_frames: int
     status: str
+    profile_id: str = "general"
+    source_type: str = "dictation"
 
 
 class SessionRepository:
@@ -56,6 +58,7 @@ class SessionRepository:
             self._initialize_schema()
 
     def _initialize_schema(self) -> None:
+        self._connection.create_function("unicode_casefold", 1, str.casefold, deterministic=True)
         with self._connection:
             self._connection.execute("PRAGMA journal_mode=WAL")
             self._connection.execute("PRAGMA synchronous=FULL")
@@ -90,8 +93,73 @@ class SessionRepository:
                     ON sessions(started_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_sessions_unfinished
                     ON sessions(finished_at, status);
+                CREATE TABLE IF NOT EXISTS usage_by_day (
+                    utc_day TEXT NOT NULL, profile_id TEXT NOT NULL, outcome TEXT NOT NULL,
+                    sessions INTEGER NOT NULL, duration_ms INTEGER NOT NULL,
+                    words INTEGER NOT NULL, processing_ms INTEGER NOT NULL,
+                    PRIMARY KEY(utc_day, profile_id, outcome)
+                );
+                CREATE TABLE IF NOT EXISTS workflow_runs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, steps_json TEXT NOT NULL
+                );
                 """
             )
+            columns = {row["name"] for row in self._connection.execute("PRAGMA table_info(sessions)")}
+            if "profile_id" not in columns:
+                self._connection.execute(
+                    "ALTER TABLE sessions ADD COLUMN profile_id TEXT NOT NULL DEFAULT 'general'"
+                )
+            if "source_type" not in columns:
+                self._connection.execute(
+                    "ALTER TABLE sessions ADD COLUMN source_type TEXT NOT NULL DEFAULT 'dictation'"
+                )
+            self._connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_sessions_profile ON sessions(profile_id, started_at DESC)"
+            )
+            self._initialize_search()
+
+    def _initialize_search(self) -> None:
+        existing = self._connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE name = 'session_search'"
+        ).fetchone()
+        triggers = self._connection.execute(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'session_search_%'"
+        ).fetchone()[0]
+        try:
+            self._connection.execute(
+                """CREATE VIRTUAL TABLE IF NOT EXISTS session_search
+                USING fts5(committed_text, content='sessions', content_rowid='rowid')"""
+            )
+            self._connection.execute("SELECT rowid FROM session_search LIMIT 0")
+        except sqlite3.OperationalError as exc:
+            if "no such module" not in str(exc).lower():
+                raise
+            self._fts = False
+            for operation in ("insert", "delete", "update"):
+                self._connection.execute(f"DROP TRIGGER IF EXISTS session_search_{operation}")
+            return
+        self._fts = True
+        self._connection.executescript(
+            """
+            CREATE TRIGGER IF NOT EXISTS session_search_insert AFTER INSERT ON sessions
+            BEGIN
+                INSERT INTO session_search(rowid, committed_text) VALUES(new.rowid, new.committed_text);
+            END;
+            CREATE TRIGGER IF NOT EXISTS session_search_delete AFTER DELETE ON sessions
+            BEGIN
+                INSERT INTO session_search(session_search, rowid, committed_text)
+                    VALUES('delete', old.rowid, old.committed_text);
+            END;
+            CREATE TRIGGER IF NOT EXISTS session_search_update AFTER UPDATE OF committed_text ON sessions
+            BEGIN
+                INSERT INTO session_search(session_search, rowid, committed_text)
+                    VALUES('delete', old.rowid, old.committed_text);
+                INSERT INTO session_search(rowid, committed_text) VALUES(new.rowid, new.committed_text);
+            END;
+            """
+        )
+        if existing is None or triggers != 3:
+            self._connection.execute("INSERT INTO session_search(session_search) VALUES('rebuild')")
 
     def _quarantine_corrupt_database(self) -> Path:
         stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime())
@@ -117,14 +185,17 @@ class SessionRepository:
         profile: ModelProfile,
         target_application: str,
         session_id: str | None = None,
+        *,
+        profile_id: str = "general",
+        source_type: str = "dictation",
     ) -> str:
         identifier = session_id or str(uuid.uuid4())
         with self._lock, self._connection:
             self._connection.execute(
                 """INSERT INTO sessions(
                     session_id, started_at, language, model, profile,
-                    target_application, status
-                ) VALUES (?, ?, ?, ?, ?, ?, 'active')""",
+                    target_application, profile_id, source_type, status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active')""",
                 (
                     identifier,
                     time.time(),
@@ -132,9 +203,26 @@ class SessionRepository:
                     model,
                     profile.value,
                     target_application,
+                    profile_id,
+                    source_type,
                 ),
             )
         return identifier
+
+    def save_file_record(
+        self, session_id: str, language: str, model: str, profile_id: str,
+        model_profile: str, duration: float, text: str,
+    ) -> None:
+        now = time.time()
+        with self._lock, self._connection:
+            self._connection.execute(
+                """INSERT INTO sessions
+                   (session_id, started_at, finished_at, language, model, profile, profile_id,
+                    target_application, source_type, committed_text, audio_duration_s, status)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, '', 'file', ?, ?, 'completed')
+                   ON CONFLICT(session_id) DO NOTHING""",
+                (session_id, now, now, language, model, model_profile, profile_id, text, duration),
+            )
 
     def append_event(
         self, session_id: str, sequence: int, event_type: str, payload: dict[str, Any]
@@ -268,6 +356,89 @@ class SessionRepository:
             ).fetchall()
         return tuple(self._record(row) for row in rows)
 
+    def search(
+        self, *, text: str = "", profile: str = "", application: str = "",
+        since: float | None = None, until: float | None = None, page: int = 0,
+        language: str = "", status: str = "",
+    ) -> tuple[tuple[SessionRecord, ...], bool]:
+        clauses: list[str] = []
+        values: list[str | float | int] = []
+        text = text.strip()[:256]
+        if text and self._fts and any(char.isalnum() for char in text):
+            clauses.append("rowid IN (SELECT rowid FROM session_search WHERE session_search MATCH ?)")
+            values.append('"' + text.replace('"', '""') + '"')
+        elif text:
+            clauses.append("unicode_casefold(committed_text) LIKE ? ESCAPE '!'")
+            escaped = text.casefold().replace("!", "!!").replace("%", "!%").replace("_", "!_")
+            values.append(f"%{escaped}%")
+        if profile:
+            clauses.append("profile_id = ?")
+            values.append(profile)
+        if application:
+            clauses.append("instr(lower(target_application), lower(?)) > 0")
+            values.append(application)
+        if language:
+            clauses.append("language = ?")
+            values.append(language)
+        if status == "incomplete":
+            clauses.append("status NOT IN ('completed', 'recovered')")
+        elif status:
+            clauses.append("status = ?")
+            values.append(status)
+        if since is not None:
+            clauses.append("started_at >= ?")
+            values.append(since)
+        if until is not None:
+            clauses.append("started_at < ?")
+            values.append(until)
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        with self._lock:
+            rows = self._connection.execute(
+                f"SELECT * FROM sessions{where} ORDER BY started_at DESC, rowid DESC LIMIT 101 OFFSET ?",
+                (*values, max(0, page) * 100),
+            ).fetchall()
+        return tuple(self._record(row) for row in rows[:100]), len(rows) > 100
+
+    def record_usage(
+        self, profile_id: str, outcome: str, duration_ms: int, words: int, processing_ms: int,
+    ) -> None:
+        with self._lock, self._connection:
+            self._connection.execute(
+                """INSERT INTO usage_by_day VALUES (date('now'), ?, ?, 1, ?, ?, ?)
+                   ON CONFLICT(utc_day, profile_id, outcome) DO UPDATE SET
+                       sessions = sessions + 1, duration_ms = duration_ms + excluded.duration_ms,
+                       words = words + excluded.words, processing_ms = processing_ms + excluded.processing_ms""",
+                (profile_id, outcome, duration_ms, words, processing_ms),
+            )
+
+    def usage_summary(self, *, weekly: bool) -> tuple[dict[str, Any], ...]:
+        period = "date(utc_day, 'weekday 0', '-6 days')" if weekly else "utc_day"
+        with self._lock:
+            rows = self._connection.execute(
+                f"""SELECT {period} AS period, profile_id, outcome, SUM(sessions) AS sessions,
+                           SUM(duration_ms) AS duration_ms, SUM(words) AS words,
+                           SUM(processing_ms) AS processing_ms FROM usage_by_day
+                    WHERE utc_day >= date('now', '-90 days')
+                    GROUP BY period, profile_id, outcome ORDER BY period DESC, profile_id, outcome"""
+            ).fetchall()
+        return tuple(dict(row) for row in rows)
+
+    def save_workflow_steps(self, steps: list[dict[str, str]]) -> None:
+        with self._lock, self._connection:
+            self._connection.execute("INSERT INTO workflow_runs(steps_json) VALUES (?)", (json.dumps(steps),))
+            self._connection.execute(
+                """DELETE FROM workflow_runs WHERE id IN (
+                       SELECT id FROM workflow_runs ORDER BY id DESC LIMIT -1 OFFSET 100
+                   )"""
+            )
+
+    def latest_workflow_steps(self) -> list[dict[str, str]]:
+        with self._lock:
+            record = self._connection.execute(
+                "SELECT steps_json FROM workflow_runs ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        return json.loads(record["steps_json"]) if record else []
+
     def language_switches(self, session_id: str) -> tuple[tuple[float, str], ...]:
         """Return durable language changes for replaying an unfinished spool."""
 
@@ -314,16 +485,11 @@ class SessionRepository:
         """Remove local history without touching active recovery journals."""
 
         with self._lock, self._connection:
-            rows = self._connection.execute(
-                "SELECT session_id FROM sessions WHERE finished_at IS NOT NULL"
-            ).fetchall()
-            identifiers = tuple(str(row["session_id"]) for row in rows)
-            for identifier in identifiers:
-                self._connection.execute(
-                    "DELETE FROM session_events WHERE session_id=?", (identifier,)
-                )
-                self._connection.execute("DELETE FROM sessions WHERE session_id=?", (identifier,))
-        return len(identifiers)
+            condition = "finished_at IS NOT NULL AND status NOT IN ('active', 'recovery_required')"
+            self._connection.execute(
+                f"DELETE FROM session_events WHERE session_id IN (SELECT session_id FROM sessions WHERE {condition})"
+            )
+            return self._connection.execute(f"DELETE FROM sessions WHERE {condition}").rowcount
 
     def delete_all(self) -> int:
         """Erase every transcript and journal after capture has stopped."""
@@ -333,6 +499,13 @@ class SessionRepository:
             total = int(row["total"]) if row is not None else 0
             self._connection.execute("DELETE FROM session_events")
             self._connection.execute("DELETE FROM sessions")
+            self._connection.execute("DELETE FROM usage_by_day")
+            self._connection.execute("DELETE FROM workflow_runs")
+            if self._connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE name = 'transcription_jobs'"
+            ).fetchone():
+                self._connection.execute("DELETE FROM transcription_jobs")
+                self._connection.execute("UPDATE transcription_queue_state SET paused = 0")
         return total
 
     def close(self) -> None:
@@ -362,6 +535,8 @@ class SessionRepository:
             processing_s=float(row["processing_s"]),
             dropped_frames=int(row["dropped_frames"]),
             status=row["status"],
+            profile_id=row["profile_id"],
+            source_type=row["source_type"],
         )
 
 

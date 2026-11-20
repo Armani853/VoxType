@@ -21,6 +21,7 @@ from urllib.request import Request, urlopen
 from platformdirs import user_cache_path, user_data_path
 
 from voxtype.asr.faster_whisper_backend import FasterWhisperBackend
+from voxtype.asr.base import ASRModelUnavailable
 from voxtype.asr.model_manager import DEFAULT_MODEL_SPECS, ModelManager
 from voxtype.asr.profiles import ASRProfile, ASRProfileConfig, get_profile
 from voxtype.audio.capture import AudioCaptureConfig, AudioCaptureService
@@ -218,6 +219,12 @@ class RuntimeBundle:
             retry_config,
         )
 
+    def backend_for_model(self, model_id: str) -> FasterWhisperBackend:
+        if not self.model_manager.is_installed(model_id):
+            raise ASRModelUnavailable("Selected profile model is not installed")
+        profile = ASRProfile.MAXIMUM_ACCURACY if model_id == "large-v3-turbo" else ASRProfile.BALANCED
+        return self.backend_for(profile)
+
     def close(self) -> bool:
         if not self.controller.shutdown():
             return False
@@ -315,6 +322,7 @@ def build_runtime(*, verbose: bool = False) -> RuntimeBundle:
         target_manager,
         strategy=InjectionStrategy(settings.dictation.injection_mode.value),
         paste_delay=max(350, settings.dictation.insertion_delay_ms) / 1_000.0,
+        persist_pending=settings.privacy.save_history,
     )
 
     audio_profile = AudioPreprocessingProfile(settings.audio.preprocessing_profile.value)
@@ -356,9 +364,18 @@ def build_runtime(*, verbose: bool = False) -> RuntimeBundle:
         spool_root=cache_directory / "audio-spool",
         microphone_name=f"{device.name} ({device.host_api})",
     )
+    installed = model_manager.is_installed(profile.model_name)
+    controller.set_recording_availability(
+        microphone=any(
+            item.is_default if settings.audio.device_id is None
+            else item.index == settings.audio.device_id
+            for item in devices
+        ),
+        model=installed,
+    )
     controller.initialize(preload_model=False)
     stage("controller_initialized")
-    return RuntimeBundle(
+    bundle = RuntimeBundle(
         settings_repository,
         session_repository,
         model_manager,
@@ -369,8 +386,10 @@ def build_runtime(*, verbose: bool = False) -> RuntimeBundle:
         StartupManager(backend=MemoryStartupRegistryBackend() if isolated_profile else None),
         data_directory,
         log_path,
-        model_manager.is_installed(profile.model_name),
+        installed,
     )
+    controller.profile_backend_factory = bundle.backend_for_model
+    return bundle
 
 
 __all__ = [

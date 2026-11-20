@@ -74,6 +74,7 @@ if PYSIDE6_AVAILABLE:
         pause_toggle_requested = Signal()
         language_change_requested = Signal(str)
         settings_requested = Signal()
+        professional_requested = Signal()
         history_requested = Signal()
         diagnostics_requested = Signal()
         onboarding_requested = Signal()
@@ -147,9 +148,11 @@ if PYSIDE6_AVAILABLE:
             self.history_button = self._header_button("История", "historyButton")
             self.diagnostics_button = self._header_button("Диагностика", "diagnosticsButton")
             self.settings_button = self._header_button("Настройки", "settingsButton")
+            self.professional_button = self._header_button("Профили и инструменты", "professionalButton")
             header.addWidget(self.history_button)
             header.addWidget(self.diagnostics_button)
             header.addWidget(self.settings_button)
+            header.addWidget(self.professional_button)
             outer.addLayout(header)
 
             self.error_banner = QFrame(canvas)
@@ -304,6 +307,7 @@ if PYSIDE6_AVAILABLE:
             self.dictation_button.clicked.connect(self._on_dictation_button_clicked)
             self.language_control.language_changed.connect(self._on_language_selected)
             self.settings_button.clicked.connect(self.settings_requested)
+            self.professional_button.clicked.connect(self.professional_requested)
             self.history_button.clicked.connect(self.history_requested)
             self.diagnostics_button.clicked.connect(self.diagnostics_requested)
             self.error_diagnostics_button.clicked.connect(self.diagnostics_requested)
@@ -311,11 +315,14 @@ if PYSIDE6_AVAILABLE:
             self.copy_text_button.clicked.connect(self._copy_accumulated_text)
 
         def _on_dictation_button_clicked(self) -> None:
-            if not self._model_available and self._state.state in {
+            if (
+                self._state.readiness is not None
+                and self._state.readiness.reason == "model_missing"
+            ) or (not self._model_available and self._state.state in {
                 AppStatus.IDLE,
                 AppStatus.COMPLETED,
                 AppStatus.ERROR_RECOVERABLE,
-            }:
+            }):
                 self.onboarding_requested.emit()
             else:
                 self.dictation_toggle_requested.emit()
@@ -364,6 +371,8 @@ if PYSIDE6_AVAILABLE:
                 AppStatus.IDLE,
                 AppStatus.COMPLETED,
             }
+            if state.readiness is not None:
+                needs_model = state.readiness.reason == "model_missing"
             awaiting_target = (
                 state.state is AppStatus.COMPLETED
                 and state.delivery_status == "queued_target_inactive"
@@ -382,8 +391,12 @@ if PYSIDE6_AVAILABLE:
                 status_text = "Ожидает вставки" if is_ru else "Waiting to insert"
             elif no_result:
                 status_text = "Нет результата" if is_ru else "No result"
+            elif state.readiness is not None and state.readiness.reason == "microphone_missing":
+                status_text = "Микрофон недоступен" if is_ru else "Microphone unavailable"
             self.status_label.setText(status_text)
             detail = state.error_message or state.status_message
+            if state.readiness is not None and state.readiness.reason == "microphone_missing":
+                detail = "Выберите доступный микрофон в настройках"
             if awaiting_target and not state.error_message:
                 detail = (
                     "Вернитесь в целевое окно — сохранённый текст вставится автоматически"
@@ -426,6 +439,10 @@ if PYSIDE6_AVAILABLE:
                 self.dictation_button.setProperty("danger", active)
                 self._refresh_dynamic_style(self.dictation_button)
             self.dictation_button.setEnabled(
+                needs_model or (
+                    state.readiness is not None
+                    and (state.readiness.can_record or (active and state.state is not AppStatus.FINISHING))
+                ) if state.readiness is not None else
                 state.state
                 not in {
                     AppStatus.FINISHING,

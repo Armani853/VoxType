@@ -115,6 +115,29 @@ class HardwareInfo:
 
 
 @dataclass(frozen=True, slots=True)
+class AppReadiness:
+    phase: AppPhase
+    reason: str
+    message: str
+    can_record: bool
+    can_cancel: bool
+    session_id: int | None = None
+
+
+class AppPhase(StrEnum):
+    INITIALIZING = "initializing"
+    MODEL_REQUIRED = "model_required"
+    MODEL_LOADING = "model_loading"
+    MICROPHONE_UNAVAILABLE = "microphone_unavailable"
+    READY = "ready"
+    RECORDING = "recording"
+    PROCESSING = "processing"
+    INSERTING = "inserting"
+    ERROR = "error"
+    SHUTTING_DOWN = "shutting_down"
+
+
+@dataclass(frozen=True, slots=True)
 class ControllerSnapshot:
     state: str
     language: Language
@@ -133,3 +156,4 @@ class ControllerSnapshot:
     error_message: str = ""
     full_transcript: str = ""
     delivery_status: str = "pending"
+    readiness: AppReadiness | None = None

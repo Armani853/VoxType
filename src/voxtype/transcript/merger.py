@@ -7,6 +7,8 @@ pause. Exact text equality alone is deliberately insufficient.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import re
 import threading
 import unicodedata
@@ -97,6 +99,9 @@ class TranscriptMerger:
         *,
         add_space: bool = True,
         capitalize: bool = True,
+        transform: Callable[[str], str] | None = None,
+        preserve_format: bool = False,
+        code_spacing: bool = False,
     ) -> MergeOutcome:
         with self._lock:
             if fragment.sequence <= self._last_sequence:
@@ -116,8 +121,17 @@ class TranscriptMerger:
             raw_insertion = self._text_after_prefix(fragment.text, overlap_count)
             if remaining and (not raw_insertion or overlap_count >= len(absolute)):
                 raw_insertion = join_word_texts([word.text for word in remaining])
-            insertion = format_fragment_boundary(
-                self._text, raw_insertion, add_space=add_space, capitalize=capitalize
+            if raw_insertion and transform is not None:
+                raw_insertion = transform(raw_insertion)
+            insertion = raw_insertion if raw_insertion in {"\n", "\n\n"} else (
+                format_fragment_boundary(
+                    self._text, raw_insertion,
+                    add_space=add_space and not (
+                        code_spacing and (self._text.endswith("_") or raw_insertion.startswith(("_", "(")))
+                    ),
+                    capitalize=capitalize,
+                    normalize=not preserve_format,
+                )
             )
             if insertion:
                 self._text += insertion

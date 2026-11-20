@@ -9,6 +9,7 @@ import tempfile
 import threading
 import time
 from dataclasses import fields, is_dataclass
+from copy import deepcopy
 from enum import Enum
 from pathlib import Path
 from typing import Any, cast, get_type_hints
@@ -44,16 +45,22 @@ class SettingsRepository:
         self.path = path or base / "settings.json"
         self.last_recovery_backup: Path | None = None
         self._lock = threading.RLock()
+        self._professional: dict[str, Any] | None = None
 
     def load(self) -> AppSettings:
         with self._lock:
             if not self.path.exists():
+                self._professional = None
                 return create_default_settings()
             try:
                 raw = json.loads(self.path.read_text(encoding="utf-8"))
                 if not isinstance(raw, dict):
                     raise ValueError("Settings root must be an object")
-                return _convert_dataclass(AppSettings, migrate_settings(raw))
+                settings = _convert_dataclass(AppSettings, migrate_settings(raw))
+                if not isinstance(settings.professional, dict):
+                    settings.professional = {}
+                self._professional = deepcopy(settings.professional)
+                return settings
             except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError):
                 self.path.parent.mkdir(parents=True, exist_ok=True)
                 suffix = time.strftime("%Y%m%d-%H%M%S", time.localtime())
@@ -62,11 +69,13 @@ class SettingsRepository:
                     shutil.copy2(self.path, backup)
                     self.last_recovery_backup = backup
                 defaults = create_default_settings()
-                self.save(defaults)
+                self.save(defaults, replace_professional=True)
                 return defaults
 
-    def save(self, settings: AppSettings) -> None:
+    def save(self, settings: AppSettings, *, replace_professional: bool = False) -> None:
         with self._lock:
+            if self._professional is not None and not replace_professional:
+                settings.professional = deepcopy(self._professional)
             self.path.parent.mkdir(parents=True, exist_ok=True)
             payload = json.dumps(
                 settings.to_dict(), ensure_ascii=False, indent=2, sort_keys=True, default=str
@@ -82,6 +91,7 @@ class SettingsRepository:
                     stream.flush()
                     os.fsync(stream.fileno())
                 os.replace(temporary, self.path)
+                self._professional = deepcopy(settings.professional)
             finally:
                 if temporary.exists():
                     temporary.unlink()
@@ -101,5 +111,5 @@ class SettingsRepository:
 
             merge(merged, changes)
             settings = _convert_dataclass(AppSettings, migrate_settings(merged))
-            self.save(settings)
+            self.save(settings, replace_professional="professional" in changes)
             return settings

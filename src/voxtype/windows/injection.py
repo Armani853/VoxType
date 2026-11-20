@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import tempfile
 import threading
@@ -82,6 +83,8 @@ class PendingFragment:
     text: str
     target_identity: tuple[int, int] | None
     fragment_id: str = ""
+    exact_text: bool = False
+    strategy: str = ""
 
 
 class PendingTextQueue:
@@ -91,13 +94,12 @@ class PendingTextQueue:
     recovery remains the responsibility of SessionJournal.
     """
 
-    def __init__(self, *, memory_limit_bytes: int = 256 * 1024) -> None:
+    def __init__(self, *, memory_limit_bytes: int = 256 * 1024, allow_disk: bool = True) -> None:
         if memory_limit_bytes < 1:
             raise ValueError("memory_limit_bytes must be positive")
         self._memory_limit_bytes = memory_limit_bytes
-        self._stream = tempfile.SpooledTemporaryFile(  # noqa: SIM115
-            max_size=memory_limit_bytes, mode="w+b"
-        )
+        self._allow_disk = allow_disk
+        self._stream = self._new_stream()
         self._read_offset = 0
         self._count = 0
         self._characters = 0
@@ -118,6 +120,8 @@ class PendingTextQueue:
         *,
         target_identity: tuple[int, int] | None = None,
         fragment_id: str = "",
+        exact_text: bool = False,
+        strategy: str = "",
     ) -> None:
         if not text:
             return
@@ -125,10 +129,16 @@ class PendingTextQueue:
             "target": None if target_identity is None else list(target_identity),
             "text": text,
             "fragment_id": fragment_id,
+            "exact_text": exact_text,
+            "strategy": strategy,
         }
         record = json.dumps(payload, ensure_ascii=False).encode("utf-8") + b"\n"
         with self._lock:
             self._stream.seek(0, 2)
+            if not self._allow_disk and self._stream.tell() + len(record) > self._memory_limit_bytes:
+                self._compact_memory()
+                if self._stream.tell() + len(record) > self._memory_limit_bytes:
+                    raise BufferError("Pending text reached the memory limit")
             self._stream.write(record)
             self._stream.flush()
             self._count += 1
@@ -150,7 +160,10 @@ class PendingTextQueue:
             target = (raw_target[0], raw_target[1])
         else:
             raise RuntimeError("pending-text spool contains an invalid target identity")
-        return PendingFragment(value["text"], target, str(value.get("fragment_id", "")))
+        return PendingFragment(
+            value["text"], target, str(value.get("fragment_id", "")),
+            bool(value.get("exact_text")), str(value.get("strategy", "")),
+        )
 
     def peek_record(self) -> PendingFragment | None:
         with self._lock:
@@ -186,24 +199,37 @@ class PendingTextQueue:
             return record
 
     def __iter__(self) -> Iterator[str]:
+        return (record.text for record in self.records())
+
+    def records(self) -> tuple[PendingFragment, ...]:
         with self._lock:
             offset = self._read_offset
             remaining = self._count
-            values: list[str] = []
+            values: list[PendingFragment] = []
             self._stream.seek(offset)
             for _ in range(remaining):
                 line = self._stream.readline()
                 if not line:
                     raise RuntimeError("pending-text spool ended before its index")
-                values.append(self._decode_record(line).text)
-        return iter(values)
+                values.append(self._decode_record(line))
+        return tuple(values)
 
     def _reset_stream(self) -> None:
         self._stream.close()
-        self._stream = tempfile.SpooledTemporaryFile(  # noqa: SIM115
-            max_size=self._memory_limit_bytes, mode="w+b"
-        )
+        self._stream = self._new_stream()
         self._read_offset = 0
+
+    def _new_stream(self):
+        if not self._allow_disk:
+            return io.BytesIO()
+        return tempfile.SpooledTemporaryFile(max_size=self._memory_limit_bytes, mode="w+b")
+
+    def _compact_memory(self) -> None:
+        if self._read_offset:
+            self._stream.seek(self._read_offset)
+            remaining = self._stream.read()
+            self._reset_stream()
+            self._stream.write(remaining)
 
     def close(self) -> None:
         with self._lock:
@@ -268,6 +294,7 @@ class TextInjectionService:
         strategy: InjectionStrategy | str = InjectionStrategy.AUTO,
         paste_delay: float = 0.35,
         pending_memory_bytes: int = 256 * 1024,
+        persist_pending: bool = True,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         if paste_delay < 0:
@@ -278,12 +305,29 @@ class TextInjectionService:
         self._strategy = InjectionStrategy(strategy)
         self._paste_delay = paste_delay
         self._sleep = sleep
-        self._pending = PendingTextQueue(memory_limit_bytes=pending_memory_bytes)
+        self._pending_memory_bytes = pending_memory_bytes
+        self._persist_pending = persist_pending
+        self._pending = self._make_pending(persist_pending)
         self._tails: dict[tuple[int, int], str] = {}
         self._known_fragment_ids: set[str] = set()
         self._delivered_fragment_ids: set[str] = set()
         self._delivery_statuses: dict[str, DeliveryStatus] = {}
         self._lock = threading.RLock()
+
+    def _make_pending(self, persist: bool) -> PendingTextQueue:
+        limit = self._pending_memory_bytes if persist else max(4 * 1024 * 1024, self._pending_memory_bytes)
+        return PendingTextQueue(memory_limit_bytes=limit, allow_disk=persist)
+
+    def configure_pending_storage(self, persist: bool) -> bool:
+        with self._lock:
+            if persist == self._persist_pending:
+                return True
+            if len(self._pending):
+                return False
+            self._pending.close()
+            self._pending = self._make_pending(persist)
+            self._persist_pending = persist
+            return True
 
     @property
     def strategy(self) -> InjectionStrategy:
@@ -425,6 +469,7 @@ class TextInjectionService:
         *,
         strategy: InjectionStrategy | str | None = None,
         fragment_id: str = "",
+        exact_text: bool = False,
     ) -> InjectionResult:
         """Accept a committed fragment, retaining it until delivery succeeds."""
 
@@ -454,7 +499,7 @@ class TextInjectionService:
             try:
                 binding = self._targets.resolve()
             except Exception as exc:
-                self._pending.append(text, fragment_id=fragment_id)
+                self._pending.append(text, fragment_id=fragment_id, exact_text=exact_text)
                 if fragment_id:
                     self._known_fragment_ids.add(fragment_id)
                     self._delivery_statuses[fragment_id] = DeliveryStatus.FAILED
@@ -473,6 +518,8 @@ class TextInjectionService:
                 text,
                 target_identity=target_identity,
                 fragment_id=fragment_id,
+                exact_text=exact_text,
+                strategy=InjectionStrategy(strategy).value if strategy is not None else "",
             )
             if fragment_id:
                 self._known_fragment_ids.add(fragment_id)
@@ -483,6 +530,22 @@ class TextInjectionService:
             return self.flush(strategy=selected, submitted_text=text)
 
     inject = submit
+
+    def dispatch_explicit(self, text: str, target: WindowMetadata) -> bool:
+        """Dispatch once to the selected target without draining dictation FIFO."""
+        if not text:
+            return False
+        with self._lock:
+            if not self._same_target_is_ready(target):
+                return False
+            try:
+                strategy = self._strategy
+                if strategy is InjectionStrategy.SAFE_COPY:
+                    return False
+                self._inject_once(text, target, strategy)
+            except (_TargetChanged, SendInputError, ClipboardError, OSError):
+                return False
+            return True
 
     def flush(
         self,
@@ -543,13 +606,13 @@ class TextInjectionService:
                         "use safe copy instead",
                     )
                 raw = pending.text
-                prepared = prepare_fragment(self._tail_for(decision.target), raw)
+                prepared = raw if pending.exact_text else prepare_fragment(self._tail_for(decision.target), raw)
                 if not prepared:
                     self._pending.popleft()
                     continue
                 try:
                     used_strategy, restored, injection_detail = self._inject_once(
-                        prepared, decision.target, selected
+                        prepared, decision.target, InjectionStrategy(pending.strategy) if pending.strategy else selected
                     )
                 except _TargetChanged as exc:
                     return InjectionResult(
@@ -620,8 +683,14 @@ class TextInjectionService:
         """Explicit UIPI-safe fallback; no synthetic input is generated."""
 
         with self._lock:
-            fragments = tuple(iter(self._pending))
-            text = join_fragments(fragments)
+            fragments = self._pending.records()
+            prepared: list[str] = []
+            tail = ""
+            for fragment in fragments:
+                piece = fragment.text if fragment.exact_text else prepare_fragment(tail, fragment.text)
+                prepared.append(piece)
+                tail = (tail + piece)[-128:]
+            text = "".join(prepared)
             if not text:
                 return InjectionResult(
                     InjectionStatus.EMPTY,

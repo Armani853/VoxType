@@ -22,6 +22,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+selection = ["comtypes>=1.4,<2; sys_platform == 'win32'"]
+docx = ["python-docx>=1,<2"]
 dev = [
   "coverage==7.15.2",
   "hypothesis==6.163.0",

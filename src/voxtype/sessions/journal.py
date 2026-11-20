@@ -8,9 +8,10 @@ from voxtype.sessions.repository import SessionRepository
 
 
 class SessionJournal:
-    def __init__(self, repository: SessionRepository, session_id: str):
+    def __init__(self, repository: SessionRepository, session_id: str, *, persist_text: bool = True):
         self.repository = repository
         self.session_id = session_id
+        self.persist_text = persist_text
         self._sequence = 0
         self._lock = threading.Lock()
 
@@ -27,7 +28,12 @@ class SessionJournal:
             raise ValueError("Cannot journal empty committed text")
         with self._lock:
             sequence = self._sequence
-            if not self.repository.commit_text(self.session_id, sequence, text):
+            saved = (
+                self.repository.commit_text(self.session_id, sequence, text)
+                if self.persist_text
+                else self.repository.append_event(self.session_id, sequence, "text_committed", {})
+            )
+            if not saved:
                 raise RuntimeError(f"Duplicate journal sequence {sequence}")
             self._sequence += 1
             return sequence

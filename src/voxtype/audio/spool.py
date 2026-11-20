@@ -290,7 +290,7 @@ class LosslessAudioQueue:
         self,
         *,
         max_ram_chunks: int,
-        spool: DiskSpool,
+        spool: DiskSpool | None,
         spill_threshold: float = 0.75,
         max_inflight: int | None = None,
         durable: bool = False,
@@ -307,18 +307,18 @@ class LosslessAudioQueue:
         self._ram: deque[AudioChunk] = deque()
         self._inflight: dict[int, AudioQueueLease] = {}
         self._next_token = 1
-        self._spilling = spool.count > 0
+        self._spilling = spool is not None and spool.count > 0
         self._closed = False
         self._condition = Condition(RLock())
         self._captured_frames = 0
         self._dropped_frames = 0
         self._callback_overflows = 0
         self._processed_seconds = 0.0
-        self._queued_seconds = spool.queued_seconds
-        self._high_watermark = spool.count
+        self._queued_seconds = spool.queued_seconds if spool else 0.0
+        self._high_watermark = spool.count if spool else 0
         self._current_rms = 0.0
         self._clipping = 0.0
-        self._last_sequence = spool.highest_sequence
+        self._last_sequence = spool.highest_sequence if spool else -1
 
     @property
     def next_sequence(self) -> int:
@@ -331,32 +331,26 @@ class LosslessAudioQueue:
                 raise AudioQueueClosed("audio queue is closed")
             if chunk.sequence <= self._last_sequence:
                 raise ValueError("audio chunk sequences must be strictly increasing")
-            should_spill = self._durable or (
-                self._spilling or self.spool.count > 0 or len(self._ram) >= self._spill_at
-            )
-            if should_spill:
+            spool = self.spool
+            if spool is not None and (self._durable or self._spilling or spool.count > 0
+                                      or len(self._ram) >= self._spill_at):
                 self._spilling = True
                 # Once backlog reaches disk, persist the older RAM prefix first.
                 # A process crash can then recover a contiguous FIFO, rather than
                 # finding later disk chunks after an irrecoverable memory gap.
                 while self._ram:
-                    self.spool.append(self._ram[0])
+                    spool.append(self._ram[0])
                     self._ram.popleft()
-                self.spool.append(chunk)
+                spool.append(chunk)
                 destination: Literal["memory", "disk"] = "disk"
             else:
-                if len(self._ram) >= self.max_ram_chunks:
-                    # This branch is defensive: the threshold above normally
-                    # activates disk before RAM reaches its hard capacity.
-                    self.spool.append(chunk)
-                    self._spilling = True
-                    destination = "disk"
-                else:
-                    self._ram.append(chunk)
-                    destination = "memory"
+                if spool is None and len(self._ram) + len(self._inflight) >= self.max_ram_chunks:
+                    raise SpoolCapacityError("In-memory audio buffer is full")
+                self._ram.append(chunk)
+                destination = "memory"
             self._last_sequence = chunk.sequence
             self._queued_seconds += chunk.duration_seconds
-            depth = len(self._ram) + self.spool.count + len(self._inflight)
+            depth = len(self._ram) + (spool.count if spool else 0) + len(self._inflight)
             self._high_watermark = max(self._high_watermark, depth)
             self._condition.notify_all()
             return destination
@@ -366,18 +360,18 @@ class LosslessAudioQueue:
         with self._condition:
             while True:
                 if len(self._inflight) < self._max_inflight:
-                    disk_sequence = self.spool.oldest_available_sequence
+                    disk_sequence = self.spool.oldest_available_sequence if self.spool else None
                     if self._ram and (
                         disk_sequence is None or self._ram[0].sequence < disk_sequence
                     ):
                         memory_chunk = self._ram.popleft()
                         lease = self._new_lease(memory_chunk, "memory")
                         return lease
-                    disk_chunk = self.spool.acquire()
+                    disk_chunk = self.spool.acquire() if self.spool else None
                     if disk_chunk is not None:
                         lease = self._new_lease(disk_chunk, "disk")
                         return lease
-                if self._closed and not self._ram and self.spool.count == 0:
+                if self._closed and not self._ram and (self.spool is None or self.spool.count == 0):
                     return None
                 if deadline is not None:
                     remaining = deadline - monotonic()
@@ -399,13 +393,13 @@ class LosslessAudioQueue:
             current = self._inflight.get(lease.token)
             if current != lease:
                 raise ValueError("unknown or already completed audio lease")
-            if lease.source == "disk":
+            if lease.source == "disk" and self.spool is not None:
                 self.spool.ack(lease.chunk.sequence)
             del self._inflight[lease.token]
             duration = lease.chunk.duration_seconds
             self._queued_seconds = max(0.0, self._queued_seconds - duration)
             self._processed_seconds += duration
-            if self.spool.count == 0 and not any(
+            if self.spool is not None and self.spool.count == 0 and not any(
                 item.source == "disk" for item in self._inflight.values()
             ):
                 self._spilling = False
@@ -416,7 +410,7 @@ class LosslessAudioQueue:
             current = self._inflight.get(lease.token)
             if current != lease:
                 raise ValueError("unknown or already completed audio lease")
-            if lease.source == "disk":
+            if lease.source == "disk" and self.spool is not None:
                 self.spool.release(lease.chunk.sequence)
             else:
                 self._ram.appendleft(lease.chunk)
@@ -459,15 +453,15 @@ class LosslessAudioQueue:
                 current_input_rms=self._current_rms,
                 clipping_percentage=self._clipping,
                 ram_chunks=len(self._ram),
-                spooled_chunks=self.spool.count,
-                spooled_bytes=self.spool.bytes_on_disk,
+                spooled_chunks=self.spool.count if self.spool else 0,
+                spooled_bytes=self.spool.bytes_on_disk if self.spool else 0,
                 spilling_to_disk=self._spilling,
             )
 
     def wait_until_empty(self, timeout: float | None = None) -> bool:
         deadline = None if timeout is None else monotonic() + max(timeout, 0.0)
         with self._condition:
-            while self._ram or self.spool.count or self._inflight:
+            while self._ram or (self.spool is not None and self.spool.count) or self._inflight:
                 if deadline is None:
                     self._condition.wait()
                     continue

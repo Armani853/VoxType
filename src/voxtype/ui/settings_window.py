@@ -351,6 +351,14 @@ if PYSIDE6_AVAILABLE:
             form.addRow("Срок хранения", self.retention_spin)
             form.addRow("Данные", data_actions)
 
+        def set_privacy_policy(self, *, history_disabled: bool, audio_disabled: bool) -> None:
+            self._history_policy_disabled = history_disabled
+            self._audio_policy_disabled = audio_disabled
+            self.save_history_check.setEnabled(not history_disabled)
+            self.save_audio_check.setEnabled(not audio_disabled)
+            self.save_history_check.setToolTip("Отключено политикой организации" if history_disabled else "")
+            self.save_audio_check.setToolTip("Отключено политикой организации" if audio_disabled else "")
+
         def _build_hotkeys_page(self) -> None:
             page, form = self._page(
                 "Горячие клавиши", "Глобальные сочетания; конфликты проверяются при применении."
@@ -643,10 +651,12 @@ if PYSIDE6_AVAILABLE:
                     bool(_setting(model, "experimental_gpu", default=False))
                 )
                 self.save_history_check.setChecked(
-                    bool(_setting(privacy, "save_history", default=True))
+                    not getattr(self, "_history_policy_disabled", False)
+                    and bool(_setting(privacy, "save_history", default=False))
                 )
                 self.save_audio_check.setChecked(
-                    bool(_setting(privacy, "save_audio", default=False))
+                    not getattr(self, "_audio_policy_disabled", False)
+                    and bool(_setting(privacy, "save_audio", default=False))
                 )
                 self.retention_spin.setValue(
                     int(str(_setting(privacy, "retention_days", default=30)))
