@@ -1,5 +1,25 @@
 # Release acceptance state
 
+## Candidate `a9bc57c`, 2026-11-21
+
+Build commit `a9bc57c988c2dd80a50d85e4582bbf4c5ca63eab`. Packaged self-test, local inference smoke and visible UI smoke exited successfully. The smoke log also records first content paint at 1934.8 ms from main-window construction and watchdog gaps of 1390 ms and 2015 ms. These observations are above the product targets. The stack sample includes logging flush, which alone does not establish the cause of the entire stall.
+
+| Artifact | SHA-256 |
+|---|---|
+| `dist/VoxType/VoxType.exe` | `056d704a559f67549bd6ede415e9d28051907d18bb995d3586325283dfe7ac52` |
+| `release/VoxType-0.2.4-a9bc57c-win64-portable.zip` | `1a657a59c93a34abf1450c98288e30ee8ec5e07695a86cda3c75f9fa8330155b` |
+| `release/VoxType-0.2.4-a9bc57c-win64-setup.exe` | `6e73a2e2ce9e147cb79526a1eddff56350280bd1d9640d7ef1d405dfd8f38475` |
+
+Nuitka wall time 637.544 s. The timestamp log puts C generation/composer at 41.993 s, Scons startup/compile up to the linker announcement at 401.567 s, and linking plus final standalone work at 7.100 s combined. clcache reports 582 hits and 16 misses. Smoke took 38.514 s, ZIP 30.050 s and Inno 95.428 s. Archive and installer hashes were recomputed against their sidecars.
+
+Installer execution was skipped on the working profile to preserve the current installation. Installed hotkeys, insertion and uninstall remain open. The source speech results apply to Stereo Mix with synthetic reference audio. The compiler displayed “Non-commercial use only”. The candidate is not approved for production or sale.
+
+## Pending interactive release check
+
+Use a clean Windows profile or VM for the production installer. The current Windows profile already has VoxType registered under the production AppId. Run the installer and launch the installed executable. Open an empty Notepad document, place the caret in it, and copy a distinct clipboard marker. With insertion enabled and automatic full-result copying disabled, start and stop dictation with the configured hotkey (default Ctrl+Alt+Space). Hold the shortcut through the recording start to check that one press does not immediately stop the recording. Dictate a short phrase, then verify that the exact text appears once in Notepad and the clipboard marker is restored. Repeat with a new Notepad document and a different phrase. Close the original target before submitting another result and verify that VoxType retains the text and leaves other windows untouched.
+
+Repeat with a long RU and EN input, then cancel processing in the overlay and start a fresh dictation after native processing releases the model. Confirm that no cancelled tail is pasted. Close and relaunch VoxType, verify the shortcuts still register, then uninstall the candidate in the clean environment. Record the installer and installed EXE hashes with the results.
+
 ## Candidate `8681888`, 2026-11-15 — INSTALLED, NOT COMMERCIALLY APPROVED
 
 Source commit `868188869a2ec95f7611a292c456f406d7fa1ef7` includes the Nuitka autostart fix. Ruff/mypy and `scripts/test.ps1` passed (281 passed, 5 deselected). One Nuitka build: 505.085 s; packaged self/inference/UI smoke: 31.417 s; ZIP: 26.839 s; Inno compile: 100.811 s. Installed program EXE SHA-256 `7E6488B6E74A50557437D79488EEB9BBAD2772A826B1E83217B41CA9F61850A2`; portable ZIP `8DF50171E6191153B491B0B4192A15C99147D241F3C7BC00CE5E777A7EE3FB4A`; installer `6BFCC7BC883A659D22358C38FC11BE52384302BB55BF570E4E4C3A2A2492365B`.

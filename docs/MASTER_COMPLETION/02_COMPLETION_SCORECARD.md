@@ -11,7 +11,7 @@ Snapshot 2026-11-07. Formula: 100 × VERIFIED / applicable rows. This is a **low
 | PROMPT-05 | 1 | 5 | 20.0% | 2 | 1 | 1 | 0 | 0 | 0 | No measured cleanup or full runtime comparison |
 | PROMPT-06 | 2 | 7 | 28.6% | 0 | 2 | 2 | 1 | 0 | Startup/ASR targets and separately timed build stages |
 | PROMPT-07 | 1 | 5 | 20.0% | 1 | 0 | 3 | 0 | 0 | 0 | Full controls and insertion |
-| PROMPT-08 | 8 | 12 | 66.7% | 0 | 2 | 2 | 0 | 0 | 0 | 8 narrow source capture cases verified on 2026-11-19. EN-60/90 and installed insertion remain open. |
+| PROMPT-08 | 10 | 12 | 83.3% | 1 | 0 | 1 | 0 | 0 | 0 | All ten source capture cases verified on 2026-11-20. Installed insertion and complete transcript evidence remain open. |
 | PROMPT-09 | 3 | 8 | 37.5% | 0 | 1 | 4 | 0 | 0 | 0 | End-to-end buyer journey |
 | PROMPT-10 | 0 | 3 | 0.0% | 0 | 0 | 0 | 3 | 0 | 0 | Deferred until acceptance |
 

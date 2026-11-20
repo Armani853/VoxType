@@ -1,5 +1,24 @@
 # Audio results and route feasibility
 
+## 2026-11-20 capture regression
+
+All ten SAPI inputs reached the completed state through Stereo Mix, PortAudio, VAD and ASR in the isolated source profile. No output underflows were reported. Source capture/ASR corresponds to `3f3e694`. A subsequent source change guarded only explicit insertion retry, which the runner disables. This was one run per fixture with balanced small. The WAVs contain synthesized voices. Results do not establish physical microphone accuracy or installed Windows insertion.
+
+| Case | WAV, s | WER | CER | Playback end to completed, s | Peak backlog, s |
+|---|---:|---:|---:|---:|---:|
+| EN-60 | 55.67 | 5.4% | 5.2% | 4.84 | 11.58 |
+| EN-90 | 85.38 | 4.1% | 3.4% | 5.23 | 14.67 |
+| EN-05 | 5.08 | 0.0% | 0.0% | 5.16 | 5.01 |
+| EN-20 | 18.37 | 2.2% | 1.4% | 9.55 | 11.07 |
+| EN-40 | 41.07 | 1.0% | 0.4% | 5.73 | 10.20 |
+| RU-05 | 4.95 | 0.0% | 0.0% | 5.28 | 4.92 |
+| RU-20 | 19.75 | 2.6% | 4.6% | 6.73 | 17.97 |
+| RU-40 | 42.39 | 8.6% | 7.7% | 5.58 | 21.42 |
+| RU-60 | 62.28 | 1.7% | 0.3% | 5.20 | 21.42 |
+| RU-90 | 91.23 | 3.1% | 3.9% | 6.44 | 24.03 |
+
+Raw metrics: `build/qa-capture-direct-20261120/capture-results.json`. Previous empty EN outcomes and the 60-second deadline failure remain recorded below. This pass does not establish the cause of the earlier missing signal.
+
 ## 2026-11-19 source capture
 
 Local SAPI Irina and Zira → Realtek output 11 → Stereo Mix input 19 → PortAudio → Silero VAD → faster-whisper small, balanced. References and normalization are in `tests/real_world_audio/`. The two short tests ran from `5848661` source. The longer series started before the delivery-only changes in `dbb2bd0`. One sample per case. These runs used an isolated source profile with insertion disabled. The longer series overlapped an automated test run, so its timing is diagnostic and cannot establish a performance SLO.
