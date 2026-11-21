@@ -246,16 +246,23 @@ class SendInputController:
             raise SendInputError(sent, len(events), last_error())
         return sent
 
-    def send_unicode(self, text: str) -> int:
+    def send_unicode(self, text: str, *, validate: Callable[[], bool] | None = None) -> int:
         """Send text in bounded batches; return the number of input records."""
 
         if not text:
             return 0
         chunks = iter_utf16_chunks(text, self._max_chunk_units)
         total = 0
+        expected = sum(len(chunk) * 2 for chunk in chunks)
         with self._lock:
             for index, chunk in enumerate(chunks):
-                total += self._send_exact(build_unicode_events(chunk))
+                if validate is not None and not validate():
+                    raise SendInputError(total, expected)
+                try:
+                    sent = self._send_exact(build_unicode_events(chunk))
+                except SendInputError as exc:
+                    raise SendInputError(total + exc.sent, expected, exc.error_code) from exc
+                total += sent
                 if index + 1 < len(chunks) and self._inter_chunk_delay:
                     self._sleep(self._inter_chunk_delay)
         return total

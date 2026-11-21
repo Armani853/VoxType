@@ -6,23 +6,42 @@ import ctypes
 import sys
 from collections.abc import Callable
 from ctypes import wintypes
+from time import monotonic
 
 
 class ForegroundEvents:
-    def __init__(self, notify: Callable[[int], None]) -> None:
+    def __init__(
+        self,
+        notify: Callable[[int], None],
+        *,
+        focus_notify: Callable[[], None] | None = None,
+    ) -> None:
         self._hook = None
+        self._focus_hook = None
+        self._last_focus_event = 0.0
         if sys.platform != "win32":
             return
 
         callback_type = ctypes.WINFUNCTYPE(
-            None, wintypes.HANDLE, wintypes.DWORD, wintypes.HWND,
-            wintypes.LONG, wintypes.LONG, wintypes.DWORD, wintypes.DWORD,
+            None,
+            wintypes.HANDLE,
+            wintypes.DWORD,
+            wintypes.HWND,
+            wintypes.LONG,
+            wintypes.LONG,
+            wintypes.DWORD,
+            wintypes.DWORD,
         )
         user32 = ctypes.WinDLL("user32", use_last_error=True)
         install = user32.SetWinEventHook
         install.argtypes = (
-            wintypes.DWORD, wintypes.DWORD, wintypes.HMODULE, callback_type,
-            wintypes.DWORD, wintypes.DWORD, wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.HMODULE,
+            callback_type,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.DWORD,
         )
         install.restype = wintypes.HANDLE
         self._remove = user32.UnhookWinEvent
@@ -30,19 +49,31 @@ class ForegroundEvents:
         self._remove.restype = wintypes.BOOL
 
         @callback_type
-        def callback(_hook, _event, hwnd, _object, _child, _thread, _time):
-            if hwnd:
+        def callback(_hook, event, hwnd, _object, _child, _thread, _time):
+            if not hwnd:
+                return
+            if event == 0x0003:
                 notify(int(hwnd))
+            elif focus_notify is not None:
+                now = monotonic()
+                if now - self._last_focus_event >= 0.35:
+                    self._last_focus_event = now
+                    focus_notify()
 
         self._callback = callback
         foreground_event = 0x0003
         # Out-of-context events are delivered to the installing thread.
         self._hook = install(foreground_event, foreground_event, None, callback, 0, 0, 0)
+        if focus_notify is not None:
+            focus_event = 0x8005  # EVENT_OBJECT_FOCUS
+            self._focus_hook = install(focus_event, focus_event, None, callback, 0, 0, 0)
 
     @property
     def active(self) -> bool:
         return bool(self._hook)
 
     def close(self) -> None:
+        if self._focus_hook and self._remove(self._focus_hook):
+            self._focus_hook = None
         if self._hook and self._remove(self._hook):
             self._hook = None

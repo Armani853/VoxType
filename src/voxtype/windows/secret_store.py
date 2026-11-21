@@ -36,8 +36,13 @@ class WindowsSecretStore:
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
         function = crypt32.CryptUnprotectData if decrypt else crypt32.CryptProtectData
         function.argtypes = (
-            ctypes.POINTER(_Blob), ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
-            ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(_Blob),
+            ctypes.POINTER(_Blob),
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+            ctypes.POINTER(_Blob),
         )
         function.restype = wintypes.BOOL
         kernel32.LocalFree.argtypes = (ctypes.c_void_p,)

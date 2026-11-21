@@ -6,6 +6,7 @@ import ntpath
 import threading
 import time
 from dataclasses import asdict, dataclass, replace
+from enum import StrEnum
 from fnmatch import fnmatchcase
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
@@ -22,16 +23,48 @@ class AppRule:
     title_glob: str = ""
     priority: int = 0
     enabled: bool = True
+    input_strategy: str = "auto"
+    strict_focus: bool = True
+    multiline_requires_confirmation: bool = False
+    unicode_preference: bool = False
+    clipboard_restore_policy: str = "preserve"
+    allow_auto_insert: bool = True
+    formatting_policy: str = "profile"
 
     def __post_init__(self) -> None:
-        if (not isinstance(self.executable, str) or not isinstance(self.title_glob, str)
-                or type(self.priority) is not int or not -10_000 <= self.priority <= 10_000
-                or type(self.enabled) is not bool):
+        if (
+            not isinstance(self.executable, str)
+            or not isinstance(self.title_glob, str)
+            or type(self.priority) is not int
+            or not -10_000 <= self.priority <= 10_000
+            or type(self.enabled) is not bool
+        ):
             raise ValueError("Неверное правило приложения")
+        if (
+            self.input_strategy
+            not in {"auto", "clipboard_paste", "unicode_input", "local_preview", "safe_clipboard"}
+            or self.clipboard_restore_policy not in {"preserve", "avoid_clipboard"}
+            or self.formatting_policy not in {"profile", "preserve"}
+            or any(
+                type(value) is not bool
+                for value in (
+                    self.strict_focus,
+                    self.multiline_requires_confirmation,
+                    self.unicode_preference,
+                    self.allow_auto_insert,
+                )
+            )
+        ):
+            raise ValueError("Invalid application compatibility options")
         if not self.executable.strip() or len(self.executable) > 1024:
             raise ValueError("Укажите имя или путь EXE")
         if len(self.title_glob) > 128 or sum(self.title_glob.count(i) for i in "*?[") > 8:
             raise ValueError("Шаблон заголовка слишком сложен")
+
+
+class OutputLanguagePolicy(StrEnum):
+    STANDARD = "standard"
+    PRESERVE_SPOKEN_LANGUAGE = "preserve_spoken_language"
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,12 +80,20 @@ class DictationProfile:
     insertion_mode: str = ""
     app_rules: tuple[AppRule, ...] = ()
     enabled: bool = True
+    output_language: OutputLanguagePolicy = OutputLanguagePolicy.STANDARD
 
 
 BUILTIN_PROFILES = (
     DictationProfile("general", "General"),
     DictationProfile("business", "Business", formatting_mode="business", vocabulary_id="business"),
     DictationProfile("developer", "Developer", formatting_mode="code", vocabulary_id="developer"),
+    DictationProfile(
+        "ru_en_technical",
+        "RU/EN Technical",
+        formatting_mode="code",
+        vocabulary_id="developer",
+        output_language=OutputLanguagePolicy.PRESERVE_SPOKEN_LANGUAGE,
+    ),
     DictationProfile("legal", "Legal", vocabulary_id="legal"),
     DictationProfile("medical", "Medical", vocabulary_id="medical"),
     DictationProfile("verbatim", "Verbatim", formatting_mode="verbatim"),
@@ -109,7 +150,8 @@ class AppProfileResolver:
         if matches:
             return min(matches, key=lambda match: match[:3])[3]
         return next(
-            (item for item in profiles if item.id == default_id and item.enabled), BUILTIN_PROFILES[0]
+            (item for item in profiles if item.id == default_id and item.enabled),
+            BUILTIN_PROFILES[0],
         )
 
 
@@ -138,9 +180,35 @@ class ProfileManager:
         if not isinstance(rules, (list, tuple)) or len(rules) > 100:
             raise ValueError("Допускается до ста правил приложения на профиль")
         item["app_rules"] = tuple(AppRule(**rule) for rule in rules)
+        item["output_language"] = OutputLanguagePolicy(item.get("output_language", "standard"))
         profile = DictationProfile(**item)
         cls._validate(profile)
         return profile
+
+    def compatibility_rule(
+        self, profile: DictationProfile, context: DictationContext
+    ) -> AppRule | None:
+        path, name = (
+            normalized_executable(context.process_path or ""),
+            normalized_executable(context.executable_name),
+        )
+        rules = [
+            rule
+            for rule in profile.app_rules
+            if rule.enabled
+            and (normalized_executable(rule.executable) in {path, name})
+            and (
+                not rule.title_glob
+                or fnmatchcase(
+                    (context.window_title or "")[:1024].casefold(), rule.title_glob.casefold()
+                )
+            )
+        ]
+        return max(
+            rules,
+            key=lambda rule: (bool(ntpath.dirname(rule.executable)), rule.priority),
+            default=None,
+        )
 
     @property
     def default_id(self) -> str:
@@ -187,32 +255,51 @@ class ProfileManager:
 
     def _commit(self, custom: dict[str, DictationProfile], default_id: str) -> None:
         if not any(
-            item.id == default_id and item.enabled
-            for item in (*BUILTIN_PROFILES, *custom.values())
+            item.id == default_id and item.enabled for item in (*BUILTIN_PROFILES, *custom.values())
         ):
             default_id = "general"
         self._repository.update(
-            {"professional": {
-                "schema_version": 1,
-                "profiles": [asdict(item) for item in custom.values()],
-                "default_profile": default_id,
-            }}
+            {
+                "professional": {
+                    "schema_version": 1,
+                    "profiles": [asdict(item) for item in custom.values()],
+                    "default_profile": default_id,
+                }
+            }
         )
         self._custom, self._default_id = custom, default_id
 
     @staticmethod
     def _validate(profile: DictationProfile) -> None:
-        strings = (profile.id, profile.name, profile.language, profile.model_id, profile.formatting_mode,
-                   profile.vocabulary_id, profile.command_set_id, profile.snippet_set_id, profile.insertion_mode)
+        strings = (
+            profile.id,
+            profile.name,
+            profile.language,
+            profile.model_id,
+            profile.formatting_mode,
+            profile.vocabulary_id,
+            profile.command_set_id,
+            profile.snippet_set_id,
+            profile.insertion_mode,
+        )
         if any(not isinstance(value, str) or len(value) > 128 for value in strings):
             raise ValueError("Недопустимый тип или длина поля профиля")
         if profile.id in BUILTIN_IDS or not profile.id.isalnum() or not profile.name.strip():
             raise ValueError("Встроенные профили неизменяемы, имя обязательно")
         if type(profile.enabled) is not bool:
             raise ValueError("Неверный признак активности профиля")
-        if profile.language not in ("", "ru", "en") or profile.formatting_mode not in FORMATTING_MODES:
+        if (
+            profile.language not in ("", "ru", "en")
+            or profile.formatting_mode not in FORMATTING_MODES
+        ):
             raise ValueError("Язык или форматирование не поддерживается")
         if profile.model_id not in ("", "small", "large-v3-turbo"):
             raise ValueError("Модель не поддерживается")
-        if profile.insertion_mode not in ("", "auto", "clipboard_paste", "unicode_input", "safe_clipboard"):
+        if profile.insertion_mode not in (
+            "",
+            "auto",
+            "clipboard_paste",
+            "unicode_input",
+            "safe_clipboard",
+        ):
             raise ValueError("Режим вставки не поддерживается")

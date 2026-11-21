@@ -2,18 +2,24 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import tempfile
 import threading
 import time
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Protocol
+from uuid import uuid4
 
+from voxtype.core.profiles import AppRule
+
+from .adaptive_input import FocusIdentityGuard, InputPlan, InputStrategy, InputStrategyResolver
 from .clipboard import ClipboardError, ClipboardManager
 from .foreground import WindowMetadata
+from .input_context import ForegroundContext, ForegroundContextProvider
 from .send_input import ModifierStillPressedError, SendInputController, SendInputError
 from .target_window import TargetDecision, TargetStatus, TargetWindowManager
 
@@ -47,6 +53,14 @@ class DeliveryStatus(StrEnum):
     UNKNOWN = "unknown"
 
 
+class InsertionAttemptStatus(StrEnum):
+    NOT_ATTEMPTED = "not_attempted"
+    DISPATCHED = "dispatched"
+    CONFIRMED = "confirmed"
+    FAILED = "failed"
+    TARGET_LOST = "target_lost"
+
+
 @dataclass(frozen=True, slots=True)
 class InjectionResult:
     status: InjectionStatus
@@ -58,6 +72,40 @@ class InjectionResult:
     target_status: TargetStatus | None
     clipboard_restored: bool | None = None
     detail: str = ""
+    attempt_id: str = field(default_factory=lambda: uuid4().hex, compare=False)
+
+    @property
+    def attempt_status(self) -> InsertionAttemptStatus:
+        if self.status in {InjectionStatus.INSERTED, InjectionStatus.UNKNOWN}:
+            return InsertionAttemptStatus.DISPATCHED
+        if (
+            self.status in {InjectionStatus.QUEUED, InjectionStatus.BLOCKED}
+            and self.target_status is not TargetStatus.READY
+        ):
+            return InsertionAttemptStatus.TARGET_LOST
+        if self.status is InjectionStatus.FAILED:
+            return InsertionAttemptStatus.FAILED
+        return InsertionAttemptStatus.NOT_ATTEMPTED
+
+    @property
+    def retry_available(self) -> bool:
+        return self.pending_fragments > 0 and self.attempt_status in {
+            InsertionAttemptStatus.FAILED,
+            InsertionAttemptStatus.TARGET_LOST,
+        }
+
+    @property
+    def error_code(self) -> str:
+        if self.attempt_status in {
+            InsertionAttemptStatus.FAILED,
+            InsertionAttemptStatus.TARGET_LOST,
+        }:
+            return (
+                self.target_status.value
+                if self.target_status is not None and self.target_status is not TargetStatus.READY
+                else "insertion_failed"
+            )
+        return "delivery_uncertain" if self.status is InjectionStatus.UNKNOWN else ""
 
     @property
     def accepted(self) -> bool:
@@ -135,7 +183,10 @@ class PendingTextQueue:
         record = json.dumps(payload, ensure_ascii=False).encode("utf-8") + b"\n"
         with self._lock:
             self._stream.seek(0, 2)
-            if not self._allow_disk and self._stream.tell() + len(record) > self._memory_limit_bytes:
+            if (
+                not self._allow_disk
+                and self._stream.tell() + len(record) > self._memory_limit_bytes
+            ):
                 self._compact_memory()
                 if self._stream.tell() + len(record) > self._memory_limit_bytes:
                     raise BufferError("Pending text reached the memory limit")
@@ -161,8 +212,11 @@ class PendingTextQueue:
         else:
             raise RuntimeError("pending-text spool contains an invalid target identity")
         return PendingFragment(
-            value["text"], target, str(value.get("fragment_id", "")),
-            bool(value.get("exact_text")), str(value.get("strategy", "")),
+            value["text"],
+            target,
+            str(value.get("fragment_id", "")),
+            bool(value.get("exact_text")),
+            str(value.get("strategy", "")),
         )
 
     def peek_record(self) -> PendingFragment | None:
@@ -282,6 +336,16 @@ class _TargetChanged(RuntimeError):
     """The verified target changed before the synthetic input was emitted."""
 
 
+@dataclass(frozen=True, slots=True)
+class ClipboardTransaction:
+    attempt_id: str
+    clipboard_sequence_before: int
+    clipboard_sequence_after_write: int
+    target: tuple[int, int]
+    written_text_hash: str
+    restore_policy: str
+
+
 class TextInjectionService:
     """Retain committed fragments until a verified target accepts them."""
 
@@ -295,11 +359,16 @@ class TextInjectionService:
         paste_delay: float = 0.35,
         pending_memory_bytes: int = 256 * 1024,
         persist_pending: bool = True,
+        context_provider: ForegroundContextProvider | None = None,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         if paste_delay < 0:
             raise ValueError("paste_delay cannot be negative")
         self._targets = target_manager
+        self.context_provider = context_provider
+        self._focus_anchor: ForegroundContext | None = None
+        self._compatibility_rule: AppRule | None = None
+        self._terminal_safe = True
         self._clipboard = clipboard or ClipboardManager()
         self._sender = sender or SendInputController()
         self._strategy = InjectionStrategy(strategy)
@@ -312,11 +381,70 @@ class TextInjectionService:
         self._known_fragment_ids: set[str] = set()
         self._delivered_fragment_ids: set[str] = set()
         self._delivery_statuses: dict[str, DeliveryStatus] = {}
+        self._awaiting_explicit_retry = False
         self._lock = threading.RLock()
 
     def _make_pending(self, persist: bool) -> PendingTextQueue:
-        limit = self._pending_memory_bytes if persist else max(4 * 1024 * 1024, self._pending_memory_bytes)
+        limit = (
+            self._pending_memory_bytes
+            if persist
+            else max(4 * 1024 * 1024, self._pending_memory_bytes)
+        )
         return PendingTextQueue(memory_limit_bytes=limit, allow_disk=persist)
+
+    def begin_adaptive_input(
+        self,
+        context: ForegroundContext | None,
+        rule: AppRule | None,
+        *,
+        terminal_safe: bool,
+    ) -> None:
+        with self._lock:
+            if not len(self._pending):
+                self._focus_anchor = context
+                self._compatibility_rule = rule
+                self._terminal_safe = terminal_safe
+
+    def _adaptive_plan(
+        self,
+        target: WindowMetadata,
+        text: str,
+        strategy: InjectionStrategy,
+        *,
+        manual: bool,
+        multiline_confirmed: bool = False,
+        fresh: bool = False,
+    ) -> tuple[InputPlan | None, ForegroundContext | None]:
+        provider = self.context_provider
+        if provider is None:
+            return None, None
+        anchor = self._focus_anchor
+        current = provider.capture(target, mode=anchor.target_mode if anchor else "locked")
+        if current is None:
+            return InputPlan(
+                InputStrategy.LOCAL_PREVIEW,
+                target.identity,
+                "text",
+                False,
+                "preserve",
+                False,
+                "Активное поле не подтверждено. Выберите цель или скопируйте текст.",
+            ), None
+        rule = (
+            self._compatibility_rule
+            if not fresh and anchor and anchor.identity == current.identity
+            else None
+        )
+        return InputStrategyResolver.resolve(
+            current,
+            text,
+            rule,
+            anchor=current if fresh else anchor,
+            preferred=strategy.value,
+            manual=manual,
+            terminal_safe=self._terminal_safe,
+            multiline_confirmed=multiline_confirmed,
+        ), current
 
     def configure_pending_storage(self, persist: bool) -> bool:
         with self._lock:
@@ -327,6 +455,45 @@ class TextInjectionService:
             self._pending.close()
             self._pending = self._make_pending(persist)
             self._persist_pending = persist
+            return True
+
+    def bind_pending_to_target(
+        self, target: WindowMetadata, *, rule: AppRule | None = None
+    ) -> bool:
+        """Rebind the undelivered FIFO after an explicit user target selection."""
+        with self._lock:
+            context = self.context_provider.capture(target) if self.context_provider else None
+            if self.context_provider and (
+                context is None
+                or not context.same_session
+                or context.is_password
+                or context.is_read_only is True
+            ):
+                return False
+            records = self._pending.records()
+            if not records:
+                self._focus_anchor = context
+                self._compatibility_rule = rule
+                return True
+            if len({item.target_identity for item in records}) > 1:
+                return False
+            replacement = self._make_pending(self._persist_pending)
+            try:
+                for item in records:
+                    replacement.append(
+                        item.text,
+                        target_identity=target.identity,
+                        fragment_id=item.fragment_id,
+                        exact_text=item.exact_text,
+                        strategy=item.strategy,
+                    )
+            except (OSError, BufferError):
+                replacement.close()
+                return False
+            previous, self._pending = self._pending, replacement
+            self._focus_anchor = context
+            self._compatibility_rule = rule
+            previous.close()
             return True
 
     @property
@@ -379,8 +546,18 @@ class TextInjectionService:
         )
 
     def _clipboard_paste(
-        self, text: str, target: WindowMetadata
+        self,
+        text: str,
+        target: WindowMetadata,
+        *,
+        verify: Callable[[], bool],
+        attempt_id: str,
     ) -> tuple[bool, SendInputError | None]:
+        if (
+            isinstance(self._sender, SendInputController)
+            and not self._sender.wait_for_modifiers_released()
+        ):
+            raise ModifierStillPressedError
         snapshot = self._clipboard.snapshot()
         if not snapshot.complete:
             raise ClipboardError("Clipboard contains formats that cannot be restored safely")
@@ -389,10 +566,19 @@ class TextInjectionService:
             expected_sequence_number=snapshot.sequence_number,
             rollback_snapshot=snapshot,
         )
+        transaction = ClipboardTransaction(
+            attempt_id,
+            snapshot.sequence_number,
+            temporary_sequence,
+            target.identity,
+            hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            "preserve",
+        )
+
         def check_delivery() -> None:
-            if not self._same_target_is_ready(target):
+            if not verify():
                 raise _TargetChanged("Target changed while preparing clipboard paste")
-            if not self._clipboard.owns_sequence(temporary_sequence):
+            if not self._clipboard.owns_sequence(transaction.clipboard_sequence_after_write):
                 raise ClipboardError("Clipboard changed before the paste shortcut")
 
         send_error: SendInputError | None = None
@@ -412,7 +598,7 @@ class TextInjectionService:
         finally:
             try:
                 restored = self._clipboard.restore(
-                    snapshot, expected_sequence_number=temporary_sequence
+                    snapshot, expected_sequence_number=transaction.clipboard_sequence_after_write
                 )
             except (ClipboardError, OSError):
                 restored = False
@@ -423,10 +609,39 @@ class TextInjectionService:
         text: str,
         target: WindowMetadata,
         strategy: InjectionStrategy,
+        *,
+        context: ForegroundContext | None = None,
+        attempt_id: str = "",
     ) -> tuple[InjectionStrategy, bool | None, str]:
+        def verify_native() -> bool:
+            if context is None:
+                return self._same_target_is_ready(target)
+            latest = ForegroundContextProvider.native(target, context.target_mode)
+            return (
+                not latest.is_password
+                and latest.is_read_only is not True
+                and FocusIdentityGuard.matches(context, latest, strict=False)
+            )
+
+        def verify_paste() -> bool:
+            if not self._same_target_is_ready(target) or not verify_native():
+                return False
+            if context is None or not context.runtime_id or self.context_provider is None:
+                return True
+            latest = self.context_provider.capture(target, mode=context.target_mode)
+            return bool(
+                latest
+                and not latest.is_password
+                and latest.is_read_only is not True
+                and latest.password_checked
+                and FocusIdentityGuard.matches(context, latest, strict=True)
+            )
+
         if strategy in {InjectionStrategy.AUTO, InjectionStrategy.CLIPBOARD}:
             try:
-                restored, send_error = self._clipboard_paste(text, target)
+                restored, send_error = self._clipboard_paste(
+                    text, target, verify=verify_paste, attempt_id=attempt_id
+                )
                 if send_error is None:
                     detail = ""
                     if not restored:
@@ -450,9 +665,9 @@ class TextInjectionService:
                 ):
                     raise
 
-        if not self._same_target_is_ready(target):
+        if not verify_paste():
             raise _TargetChanged("Target changed before Unicode fallback")
-        if target.process_name.casefold() == "winword.exe":
+        if context is None and target.process_name.casefold() == "winword.exe":
             self._sleep(0.2)
             word_sender = SendInputController(
                 self._sender.backend,
@@ -464,8 +679,20 @@ class TextInjectionService:
             self._sleep(0.05)
             word_sender.send_unicode(text)
         else:
-            self._sender.send_unicode(text)
-        return InjectionStrategy.UNICODE, None, "Clipboard paste failed; Unicode fallback was used"
+            if context is None:
+                self._sender.send_unicode(text)
+            else:
+                if not self._sender.wait_for_modifiers_released():
+                    raise ModifierStillPressedError
+                self._sender.send_unicode(
+                    text, validate=verify_paste if context.runtime_id else verify_native
+                )
+        detail = (
+            "Clipboard paste failed; Unicode fallback was used"
+            if strategy is InjectionStrategy.AUTO
+            else ""
+        )
+        return InjectionStrategy.UNICODE, None, detail
 
     @staticmethod
     def _status_for_decision(decision: TargetDecision) -> InjectionStatus:
@@ -478,6 +705,8 @@ class TextInjectionService:
         strategy: InjectionStrategy | str | None = None,
         fragment_id: str = "",
         exact_text: bool = False,
+        manual: bool = False,
+        multiline_confirmed: bool = False,
     ) -> InjectionResult:
         """Accept a committed fragment, retaining it until delivery succeeds."""
 
@@ -533,9 +762,14 @@ class TextInjectionService:
                 self._known_fragment_ids.add(fragment_id)
                 self._delivery_statuses[fragment_id] = DeliveryStatus.PENDING
             selected = self._strategy if strategy is None else InjectionStrategy(strategy)
-            if selected is InjectionStrategy.SAFE_COPY:
+            if selected is InjectionStrategy.SAFE_COPY and self.context_provider is None:
                 return self.copy_pending_to_clipboard(consume=True, submitted_text=text)
-            return self.flush(strategy=selected, submitted_text=text)
+            return self.flush(
+                strategy=selected,
+                submitted_text=text,
+                retry=manual,
+                multiline_confirmed=multiline_confirmed,
+            )
 
     inject = submit
 
@@ -550,7 +784,12 @@ class TextInjectionService:
                 strategy = self._strategy
                 if strategy is InjectionStrategy.SAFE_COPY:
                     return False
-                self._inject_once(text, target, strategy)
+                plan, context = self._adaptive_plan(target, text, strategy, manual=True, fresh=True)
+                if plan is not None:
+                    if plan.strategy in {InputStrategy.LOCAL_PREVIEW, InputStrategy.COPY_ONLY}:
+                        return False
+                    strategy = InjectionStrategy(plan.strategy.value)
+                self._inject_once(text, target, strategy, context=context, attempt_id=uuid4().hex)
             except (_TargetChanged, SendInputError, ClipboardError, OSError):
                 return False
             return True
@@ -560,11 +799,45 @@ class TextInjectionService:
         *,
         strategy: InjectionStrategy | str | None = None,
         submitted_text: str = "",
+        retry: bool = False,
+        multiline_confirmed: bool = False,
+    ) -> InjectionResult:
+        attempt_id = uuid4().hex
+        return replace(
+            self._flush(
+                strategy=strategy,
+                submitted_text=submitted_text,
+                retry=retry,
+                multiline_confirmed=multiline_confirmed,
+                attempt_id=attempt_id,
+            ),
+            attempt_id=attempt_id,
+        )
+
+    def _flush(
+        self,
+        *,
+        strategy: InjectionStrategy | str | None,
+        submitted_text: str,
+        retry: bool,
+        multiline_confirmed: bool,
+        attempt_id: str,
     ) -> InjectionResult:
         with self._lock:
             selected = self._strategy if strategy is None else InjectionStrategy(strategy)
-            if selected is InjectionStrategy.SAFE_COPY:
+            if selected is InjectionStrategy.SAFE_COPY and self.context_provider is None:
                 return self.copy_pending_to_clipboard(consume=True, submitted_text=submitted_text)
+            if self._awaiting_explicit_retry and len(self._pending) and not retry:
+                return InjectionResult(
+                    InjectionStatus.FAILED,
+                    submitted_text,
+                    "",
+                    selected,
+                    len(self._pending),
+                    None,
+                    None,
+                    detail="Pending delivery requires an explicit retry",
+                )
             delivered_parts: list[str] = []
             used_strategy: InjectionStrategy | None = None
             restored: bool | None = None
@@ -614,13 +887,46 @@ class TextInjectionService:
                         "use safe copy instead",
                     )
                 raw = pending.text
-                prepared = raw if pending.exact_text else prepare_fragment(self._tail_for(decision.target), raw)
+                preferred = InjectionStrategy(pending.strategy) if pending.strategy else selected
+                plan, context = self._adaptive_plan(
+                    decision.target,
+                    raw,
+                    preferred,
+                    manual=retry,
+                    multiline_confirmed=multiline_confirmed,
+                )
+                if plan is not None and plan.strategy in {
+                    InputStrategy.COPY_ONLY,
+                    InputStrategy.LOCAL_PREVIEW,
+                }:
+                    self._awaiting_explicit_retry = True
+                    return InjectionResult(
+                        InjectionStatus.BLOCKED,
+                        submitted_text,
+                        "".join(delivered_parts),
+                        None,
+                        len(self._pending),
+                        decision.target,
+                        decision.status,
+                        restored,
+                        plan.reason,
+                    )
+                if plan is not None:
+                    preferred = InjectionStrategy(plan.strategy.value)
+                    if plan.fallback_allowed and plan.strategy is InputStrategy.CLIPBOARD_PASTE:
+                        preferred = InjectionStrategy.AUTO
+                exact = pending.exact_text or (plan is not None and plan.expected_format == "exact")
+                prepared = raw if exact else prepare_fragment(self._tail_for(decision.target), raw)
                 if not prepared:
                     self._pending.popleft()
                     continue
                 try:
                     used_strategy, restored, injection_detail = self._inject_once(
-                        prepared, decision.target, InjectionStrategy(pending.strategy) if pending.strategy else selected
+                        prepared,
+                        decision.target,
+                        preferred,
+                        context=context,
+                        attempt_id=attempt_id,
                     )
                 except _TargetChanged as exc:
                     return InjectionResult(
@@ -637,6 +943,7 @@ class TextInjectionService:
                 except (ClipboardError, OSError, SendInputError) as exc:
                     if isinstance(exc, SendInputError) and exc.sent:
                         uncertain = self._pending.popleft_record()
+                        self._awaiting_explicit_retry = True
                         if uncertain.fragment_id:
                             self._delivered_fragment_ids.add(uncertain.fragment_id)
                             self._delivery_statuses[uncertain.fragment_id] = DeliveryStatus.UNKNOWN
@@ -652,6 +959,7 @@ class TextInjectionService:
                             "Input may have reached the target; automatic retry was suppressed",
                         )
                     failed = self._pending.peek_record()
+                    self._awaiting_explicit_retry = True
                     if failed is not None and failed.fragment_id:
                         self._delivery_statuses[failed.fragment_id] = DeliveryStatus.FAILED
                     return InjectionResult(
@@ -673,6 +981,7 @@ class TextInjectionService:
                 delivered_parts.append(prepared)
                 detail = injection_detail or detail
 
+            self._awaiting_explicit_retry = False
             return InjectionResult(
                 InjectionStatus.INSERTED,
                 submitted_text,
@@ -695,7 +1004,9 @@ class TextInjectionService:
             prepared: list[str] = []
             tail = ""
             for fragment in fragments:
-                piece = fragment.text if fragment.exact_text else prepare_fragment(tail, fragment.text)
+                piece = (
+                    fragment.text if fragment.exact_text else prepare_fragment(tail, fragment.text)
+                )
                 prepared.append(piece)
                 tail = (tail + piece)[-128:]
             text = "".join(prepared)
@@ -729,6 +1040,7 @@ class TextInjectionService:
                     if consumed.fragment_id:
                         self._delivered_fragment_ids.add(consumed.fragment_id)
                         self._delivery_statuses[consumed.fragment_id] = DeliveryStatus.DELIVERED
+                self._awaiting_explicit_retry = False
             return InjectionResult(
                 InjectionStatus.COPIED,
                 submitted_text,

@@ -51,8 +51,13 @@ class Win32SingleInstanceBackend:
         find_window.restype = ctypes.c_void_p
         send = user32.SendMessageTimeoutW
         send.argtypes = (
-            ctypes.c_void_p, ctypes.c_uint, ctypes.c_size_t, ctypes.c_ssize_t,
-            ctypes.c_uint, ctypes.c_uint, ctypes.POINTER(ctypes.c_size_t),
+            ctypes.c_void_p,
+            ctypes.c_uint,
+            ctypes.c_size_t,
+            ctypes.c_ssize_t,
+            ctypes.c_uint,
+            ctypes.c_uint,
+            ctypes.POINTER(ctypes.c_size_t),
         )
         send.restype = ctypes.c_ssize_t
         deadline = time.monotonic() + max(0.0, timeout_s)
@@ -62,7 +67,10 @@ class Win32SingleInstanceBackend:
             if hwnd:
                 reply = ctypes.c_size_t()
                 budget_ms = max(1, min(250, round(remaining * 1000)))
-                if send(hwnd, WM_VOXTYPE_RESTORE, 0, 0, 0x0002, budget_ms, ctypes.byref(reply)) and reply.value == 1:
+                if (
+                    send(hwnd, WM_VOXTYPE_RESTORE, 0, 0, 0x0002, budget_ms, ctypes.byref(reply))
+                    and reply.value == 1
+                ):
                     return True
             if remaining == 0:
                 return False

@@ -9,6 +9,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from time import monotonic
+from typing import Any, ClassVar
 
 
 class DeviceEventType(StrEnum):
@@ -54,7 +55,9 @@ class WindowsSystemEventBridge:
         try:
             self._core_audio = self._register_core_audio()
         except (ImportError, OSError, RuntimeError, ValueError, TypeError, AttributeError) as exc:
-            logging.getLogger(__name__).debug("core_audio_notification_unavailable kind=%s", type(exc).__name__)
+            logging.getLogger(__name__).debug(
+                "core_audio_notification_unavailable kind=%s", type(exc).__name__
+            )
 
     def handle_message(self, msg: int, wparam: int) -> None:
         if msg == 0x02B1 and wparam in (7, 8):  # WM_WTSSESSION_CHANGE
@@ -77,35 +80,93 @@ class WindowsSystemEventBridge:
 
     def _register_core_audio(self):
         from ctypes import POINTER, c_int, c_ulong, c_void_p, c_wchar_p
-        from comtypes import CLSCTX_INPROC_SERVER, COMMETHOD, COMObject, CoCreateInstance, GUID, HRESULT, IUnknown
+
+        from comtypes import (
+            CLSCTX_INPROC_SERVER,
+            COMMETHOD,
+            GUID,
+            HRESULT,
+            CoCreateInstance,
+            COMObject,
+            IUnknown,
+        )
 
         class PropertyKey(ctypes.Structure):
             _fields_ = (("fmtid", GUID), ("pid", c_ulong))
 
         class NotificationClient(IUnknown):
             _iid_ = GUID("{7991EEC9-7E89-4D85-8390-6C703CEC60C0}")
-            _methods_ = [
-                COMMETHOD([], HRESULT, "OnDeviceStateChanged", (["in"], c_wchar_p, "device"), (["in"], c_ulong, "state")),
+            _methods_: ClassVar[list[Any]] = [
+                COMMETHOD(
+                    [],
+                    HRESULT,
+                    "OnDeviceStateChanged",
+                    (["in"], c_wchar_p, "device"),
+                    (["in"], c_ulong, "state"),
+                ),
                 COMMETHOD([], HRESULT, "OnDeviceAdded", (["in"], c_wchar_p, "device")),
                 COMMETHOD([], HRESULT, "OnDeviceRemoved", (["in"], c_wchar_p, "device")),
-                COMMETHOD([], HRESULT, "OnDefaultDeviceChanged", (["in"], c_int, "flow"), (["in"], c_int, "role"), (["in"], c_wchar_p, "device")),
-                COMMETHOD([], HRESULT, "OnPropertyValueChanged", (["in"], c_wchar_p, "device"), (["in"], PropertyKey, "key")),
+                COMMETHOD(
+                    [],
+                    HRESULT,
+                    "OnDefaultDeviceChanged",
+                    (["in"], c_int, "flow"),
+                    (["in"], c_int, "role"),
+                    (["in"], c_wchar_p, "device"),
+                ),
+                COMMETHOD(
+                    [],
+                    HRESULT,
+                    "OnPropertyValueChanged",
+                    (["in"], c_wchar_p, "device"),
+                    (["in"], PropertyKey, "key"),
+                ),
             ]
 
         class DeviceEnumerator(IUnknown):
             _iid_ = GUID("{A95664D2-9614-4F35-A746-DE8DB63617E6}")
-            _methods_ = [
-                COMMETHOD([], HRESULT, "EnumAudioEndpoints", (["in"], c_int, "flow"), (["in"], c_ulong, "mask"), (["out"], POINTER(c_void_p), "devices")),
-                COMMETHOD([], HRESULT, "GetDefaultAudioEndpoint", (["in"], c_int, "flow"), (["in"], c_int, "role"), (["out"], POINTER(c_void_p), "device")),
-                COMMETHOD([], HRESULT, "GetDevice", (["in"], c_wchar_p, "id"), (["out"], POINTER(c_void_p), "device")),
-                COMMETHOD([], HRESULT, "RegisterEndpointNotificationCallback", (["in"], POINTER(NotificationClient), "client")),
-                COMMETHOD([], HRESULT, "UnregisterEndpointNotificationCallback", (["in"], POINTER(NotificationClient), "client")),
+            _methods_: ClassVar[list[Any]] = [
+                COMMETHOD(
+                    [],
+                    HRESULT,
+                    "EnumAudioEndpoints",
+                    (["in"], c_int, "flow"),
+                    (["in"], c_ulong, "mask"),
+                    (["out"], POINTER(c_void_p), "devices"),
+                ),
+                COMMETHOD(
+                    [],
+                    HRESULT,
+                    "GetDefaultAudioEndpoint",
+                    (["in"], c_int, "flow"),
+                    (["in"], c_int, "role"),
+                    (["out"], POINTER(c_void_p), "device"),
+                ),
+                COMMETHOD(
+                    [],
+                    HRESULT,
+                    "GetDevice",
+                    (["in"], c_wchar_p, "id"),
+                    (["out"], POINTER(c_void_p), "device"),
+                ),
+                COMMETHOD(
+                    [],
+                    HRESULT,
+                    "RegisterEndpointNotificationCallback",
+                    (["in"], POINTER(NotificationClient), "client"),
+                ),
+                COMMETHOD(
+                    [],
+                    HRESULT,
+                    "UnregisterEndpointNotificationCallback",
+                    (["in"], POINTER(NotificationClient), "client"),
+                ),
             ]
 
         notify = self._notify
 
         class Client(COMObject):
-            _com_interfaces_ = [NotificationClient]
+            _com_interfaces_: ClassVar[list[Any]] = [NotificationClient]
 
             @staticmethod
             def _emit(kind, device, role=None):
@@ -129,7 +190,8 @@ class WindowsSystemEventBridge:
 
         enumerator = CoCreateInstance(
             GUID("{BCDE0395-E52F-467C-8E3D-C4579291692E}"),
-            interface=DeviceEnumerator, clsctx=CLSCTX_INPROC_SERVER,
+            interface=DeviceEnumerator,
+            clsctx=CLSCTX_INPROC_SERVER,
         )
         client = Client().QueryInterface(NotificationClient)
         enumerator.RegisterEndpointNotificationCallback(client)

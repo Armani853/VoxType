@@ -221,6 +221,8 @@ class GlobalHotkeyManager:
     def __init__(self, hwnd: int = 0, backend: HotkeyBackend | None = None) -> None:
         self._hwnd = int(hwnd)
         self._backend = backend or NativeHotkeyBackend()
+        self._hold = None
+        self._hold_spec: Hotkey | None = None
         self._registered: dict[int, Hotkey] = {}
         self._callbacks: dict[int, HotkeyCallback] = {}
         self._lock = threading.RLock()
@@ -279,7 +281,9 @@ class GlobalHotkeyManager:
             raise
 
     def replace_all(
-        self, hotkeys: Iterable[Hotkey], callbacks: dict[str, HotkeyCallback],
+        self,
+        hotkeys: Iterable[Hotkey],
+        callbacks: dict[str, HotkeyCallback],
     ) -> None:
         """Acquire new combinations before moving callbacks off the old ones."""
 
@@ -300,8 +304,14 @@ class GlobalHotkeyManager:
                 for item in requested:
                     validate_hotkey(item)
                     old = existing.get(key(item))
-                    identifier = old.identifier if old is not None else next(
-                        number for number in range(0x100, 0xBFFF) if number not in self._registered
+                    identifier = (
+                        old.identifier
+                        if old is not None
+                        else next(
+                            number
+                            for number in range(0x100, 0xBFFF)
+                            if number not in self._registered
+                        )
                     )
                     bound = replace(item, identifier=identifier)
                     if old is None:
@@ -321,7 +331,9 @@ class GlobalHotkeyManager:
                     self.register(old, previous_callbacks.get(old.identifier))
                 raise
             self._registered.update({item.identifier: item for item in selected})
-            self._callbacks = {item.identifier: callbacks[item.name] for item in selected}
+            self._callbacks = {
+                item.identifier: callbacks[item.name] for item in selected if item.name in callbacks
+            }
 
     def unregister(self, identifier: int) -> bool:
         with self._lock:
@@ -353,7 +365,64 @@ class GlobalHotkeyManager:
             callback(hotkey)
         return hotkey
 
+    def replace_gestures(
+        self,
+        hotkeys: Iterable[Hotkey],
+        callbacks: dict[str, HotkeyCallback],
+        hold: Hotkey | None,
+        changed: Callable[[bool], None],
+    ) -> None:
+        with self._lock:
+            old = tuple(self._registered.values())
+            old_callbacks = {
+                item.name: self._callbacks[item.identifier]
+                for item in old
+                if item.identifier in self._callbacks
+            }
+            self.replace_all(hotkeys, callbacks)
+            try:
+                self.configure_hold(hold, changed)
+            except (ValueError, OSError, RuntimeError):
+                self.replace_all(old, old_callbacks)
+                raise
+
+    @property
+    def hold_active(self) -> bool:
+        return self._hold is not None
+
+    def release_hold_state(self) -> None:
+        if self._hold is not None:
+            self._hold.reset()
+
+    def configure_hold(self, hotkey: Hotkey | None, changed: Callable[[bool], None]) -> None:
+        if hotkey is not None:
+            validate_hotkey(hotkey)
+            if any(
+                item.virtual_key == hotkey.virtual_key and item.modifiers == hotkey.modifiers
+                for item in self.registered
+            ):
+                raise ValueError("Push-to-talk conflicts with a registered VoxType hotkey")
+        if self._hold_spec == hotkey:
+            return
+        replacement = None
+        if hotkey is not None:
+            from voxtype.windows.keyboard_hold import KeyboardHold
+
+            replacement = KeyboardHold(hotkey.virtual_key, hotkey.native_modifiers, changed)
+        try:
+            if self._hold is not None:
+                self._hold.close()
+        except OSError:
+            if replacement is not None:
+                replacement.close()
+            raise
+        self._hold = replacement
+        self._hold_spec = hotkey
+
     def close(self) -> tuple[int, ...]:
+        if self._hold is not None:
+            self._hold.close()
+            self._hold = None
         return self.unregister_all()
 
     def __enter__(self) -> GlobalHotkeyManager:

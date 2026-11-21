@@ -89,10 +89,14 @@ class _TOKEN_MANDATORY_LABEL(ctypes.Structure):
 
 class _GUI_THREAD_INFO(ctypes.Structure):
     _fields_ = [
-        ("size", wintypes.DWORD), ("flags", wintypes.DWORD),
-        ("active", wintypes.HWND), ("focus", wintypes.HWND),
-        ("capture", wintypes.HWND), ("menu_owner", wintypes.HWND),
-        ("move_size", wintypes.HWND), ("caret", wintypes.HWND),
+        ("size", wintypes.DWORD),
+        ("flags", wintypes.DWORD),
+        ("active", wintypes.HWND),
+        ("focus", wintypes.HWND),
+        ("capture", wintypes.HWND),
+        ("menu_owner", wintypes.HWND),
+        ("move_size", wintypes.HWND),
+        ("caret", wintypes.HWND),
         ("caret_rect", wintypes.RECT),
     ]
 

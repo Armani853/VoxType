@@ -23,17 +23,24 @@ class SelectedText:
 class SelectionProvider:
     @staticmethod
     def read(target: WindowMetadata) -> SelectedText:
-        if get_foreground_hwnd() != target.hwnd or get_window_process_id(target.hwnd) != target.process_id:
+        if (
+            get_foreground_hwnd() != target.hwnd
+            or get_window_process_id(target.hwnd) != target.process_id
+        ):
             raise SelectionUnavailable("Вернитесь в исходное окно и выделите текст")
         try:
             import comtypes
             from comtypes.client import CreateObject, GetModule
         except ImportError as exc:
-            raise SelectionUnavailable("UI Automation недоступна. Вставьте выделение вручную.") from exc
+            raise SelectionUnavailable(
+                "UI Automation недоступна. Вставьте выделение вручную."
+            ) from exc
         try:
             comtypes.CoInitialize()
             try:
-                types = GetModule(str(Path(os.environ["SystemRoot"]) / "System32/UIAutomationCore.dll"))
+                types = GetModule(
+                    str(Path(os.environ["SYSTEMROOT"]) / "System32/UIAutomationCore.dll")
+                )
                 automation = CreateObject(types.CUIAutomation, interface=types.IUIAutomation)
                 control = automation.GetFocusedElement()
                 if control.CurrentProcessId != target.process_id or control.CurrentIsPassword:
@@ -58,4 +65,6 @@ class SelectionProvider:
         except SelectionUnavailable:
             raise
         except (OSError, ValueError, AttributeError, KeyError, TypeError, ImportError) as exc:
-            raise SelectionUnavailable("Редактор не предоставил выделение через UI Automation") from exc
+            raise SelectionUnavailable(
+                "Редактор не предоставил выделение через UI Automation"
+            ) from exc
