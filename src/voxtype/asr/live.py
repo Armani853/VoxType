@@ -100,10 +100,11 @@ class LiveSpeechSession:
         self._interval = min(4.0, self._interval + 0.75) if elapsed > 0.8 else max(1.5, self._interval - 0.15)
         self._next = max(self._next, now + self._interval)
         start = round(request.start_offset_seconds * self.sample_rate)
+        end = start + request.audio.size
         words = result.words
         stable_count = 0
         if start == self._previous_start:
-            safe_end = self.processed_offset / self.sample_rate - 0.6
+            safe_end = end / self.sample_rate - 0.6
             for word, (old_text, old_start, old_end) in zip(words, self._previous_words):
                 if (
                     not self._token(word.word) or self._token(word.word) != old_text
@@ -138,7 +139,7 @@ class LiveSpeechSession:
             tail = result.text
         partial = SpeechSegment(
             f"{self.session_id}:partial:{self.revision}", self.session_id,
-            max(0, start, last_stable), self.processed_offset,
+            max(0, start, last_stable), end,
             tail, SpeechKind.PARTIAL, self.revision,
         ) if tail else None
         self.snapshot = LiveTranscript(

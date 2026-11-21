@@ -348,6 +348,9 @@ if PYSIDE6_AVAILABLE:
             form.addRow("Режим питания", self.power_mode_combo)
             form.addRow(self.gpu_experimental_check)
 
+        def open_general(self) -> None:
+            self.navigation.setCurrentRow(0)
+
         def open_models(self) -> None:
             self.navigation.setCurrentRow(self._models_index)
 

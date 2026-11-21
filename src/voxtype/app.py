@@ -939,10 +939,13 @@ class DesktopApplication:
         if not self.main.isVisible():
             self._show_main()
         first = self._settings_window is None
+        from_models = self.main.shell.current == "models"
         window = self.settings_window
-        self._embed_page(page, window)
         if page == "models":
             window.open_models()
+        elif from_models:
+            window.open_general()
+        self._embed_page(page, window)
         if not first:
             return
         window.accepted.connect(lambda: self._navigate_desktop("home"))
