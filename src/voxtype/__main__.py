@@ -126,10 +126,22 @@ def main(argv: list[str] | None = None) -> int:
     if not guard.acquire():
         guard.activate_existing()
         return 0
+    staged_updates = []
     try:
-        return run_desktop(build_runtime(verbose=arguments.verbose))
+        exit_code = run_desktop(verbose=arguments.verbose, on_installer=staged_updates.append)
     finally:
         guard.close()
+    if not exit_code and staged_updates:
+        try:
+            staged_updates[0].launch_verified()
+        except (OSError, ValueError) as exc:
+            import logging
+
+            logging.getLogger(__name__).error(
+                "installer_handoff_failed kind=%s", type(exc).__name__
+            )
+            return 1
+    return exit_code
 
 
 if __name__ == "__main__":

@@ -23,7 +23,8 @@ def measure_owned_paths(roots: tuple[Path, ...], *, entry_limit: int = 100_000) 
             info = path.lstat()
             # Windows junctions are reparse points and may not report as symlinks.
             if stat.S_ISLNK(info.st_mode) or (
-                getattr(info, "st_file_attributes", 0) & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+                getattr(info, "st_file_attributes", 0)
+                & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
             ):
                 return
             if stat.S_ISREG(info.st_mode):

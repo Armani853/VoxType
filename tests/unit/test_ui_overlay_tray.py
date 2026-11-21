@@ -53,7 +53,7 @@ def test_overlay_is_nonactivating_and_has_both_modes(qtbot) -> None:  # type: ig
             input_rms=0.4,
         )
     )
-    assert overlay.status_label.text() == "Обработка"
+    assert overlay.status_label.full_text() == "Обработка"
     assert overlay.language_label.text() == "EN"
     assert overlay.timer_label.text() == "00:00:12"
     assert overlay.processing_label.text() == "LOCAL"
@@ -104,14 +104,15 @@ def test_completed_overlay_persists_full_result_and_exposes_actions(qtbot) -> No
     )
     overlay.show_without_activating()
     qtbot.waitUntil(overlay.isVisible)
-    assert overlay.status_label.text() == "Ожидает вставки"
+    assert overlay.status_label.full_text() == "Ожидает вставки"
     assert overlay.result_text.toPlainText() == "полный подтверждённый результат"
     assert overlay.result_buttons.isVisible()
     assert overlay.copy_all_button.isEnabled()
-    assert overlay.copy_all_button.property("primary") is True
+    assert overlay.copy_all_button.accessibleName() == "Копировать результат"
     assert overlay.insert_button.isEnabled()
-    assert overlay.result_text.minimumHeight() >= 110
-    assert overlay.processing_label.text() == "Вернитесь в целевое окно"
+    assert (overlay.width(), overlay.height()) == (320, 100)
+    assert overlay.provisional_label.full_text() == "полный подтверждённый результат"
+    assert overlay.processing_label.full_text() == "Вернитесь в целевое окно"
     assert not overlay.pause_button.isVisible()
     assert not overlay.stop_button.isVisible()
 
@@ -131,5 +132,5 @@ def test_overlay_visual_state_matrix_is_complete(qtbot) -> None:  # type: ignore
                 full_transcript="Сохранённый результат" if status is AppStatus.COMPLETED else "",
             )
         )
-        assert overlay.status_label.text()
+        assert overlay.status_label.full_text()
         assert overlay.processing_label.text()

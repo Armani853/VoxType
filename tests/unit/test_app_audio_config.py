@@ -1,6 +1,7 @@
 """The settings UI must use completed discovery rather than query PortAudio."""
 
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 from voxtype.app import DesktopApplication
 from voxtype.audio.devices import InputDevice, choose_capture_channels
@@ -18,7 +19,10 @@ def test_capture_reconfiguration_uses_cached_devices(monkeypatch) -> None:  # ty
         is_default=True,
     )
     runtime = SimpleNamespace(settings=AppSettings(), devices=(device,), device=device)
-    controller = SimpleNamespace(capture_factory=None, microphone_name="")
+    availability = Mock()
+    controller = SimpleNamespace(
+        capture_factory=None, microphone_name="", set_recording_availability=availability
+    )
     app = object.__new__(DesktopApplication)
     app.runtime = runtime
     app.controller = controller
@@ -32,6 +36,7 @@ def test_capture_reconfiguration_uses_cached_devices(monkeypatch) -> None:  # ty
     assert controller.capture_factory is not None
     assert controller.microphone_name == "Microphone (WASAPI)"
     assert runtime.device is device
+    availability.assert_called_once_with(microphone=True)
 
 
 def test_wdm_ks_stereo_pin_is_used_for_capture() -> None:

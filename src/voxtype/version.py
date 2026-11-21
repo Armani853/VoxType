@@ -25,6 +25,9 @@ class VersionInfo:
 
 def version_info(channel: ReleaseChannel = ReleaseChannel.STABLE) -> VersionInfo:
     return VersionInfo(
-        __version__, os.environ.get("VOXTYPE_BUILD_ID", "unknown"),
-        ReleaseChannel(channel), SETTINGS_SCHEMA_VERSION, (10, 0, 0),
+        __version__,
+        os.environ.get("VOXTYPE_BUILD_ID", "unknown"),
+        ReleaseChannel(channel),
+        SETTINGS_SCHEMA_VERSION,
+        (10, 0, 0),
     )

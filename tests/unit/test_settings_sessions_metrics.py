@@ -9,6 +9,7 @@ import pytest
 from voxtype.asr.model_manager import DEFAULT_MODEL_SPECS
 from voxtype.asr.profiles import ASRProfile, get_profile
 from voxtype.core.models import InjectionMode, Language, ModelProfile, PreprocessingProfile
+from voxtype.core.profiles import DictationContext, ProfileManager
 from voxtype.monitoring.metrics import PerformanceMonitor
 from voxtype.runtime import (
     cache_directory_path,
@@ -21,8 +22,86 @@ from voxtype.sessions.recovery import mark_recovered, recoverable_sessions
 from voxtype.sessions.repository import SessionRepository
 from voxtype.sessions.retention import cleanup_retention
 from voxtype.settings.migration import migrate_settings
+from voxtype.settings.organization_pack import OrganizationPackService, OrganizationProfilePack
 from voxtype.settings.repository import SettingsRepository
 from voxtype.settings.schema import AppSettings
+from voxtype.transcript.professional import ProfessionalContent
+
+
+def test_organization_vocabulary_is_scoped_and_keeps_its_prompt_priority(tmp_path: Path) -> None:
+    repository = SettingsRepository(tmp_path / "settings.json")
+    profiles = ProfileManager(repository, {})
+    content = ProfessionalContent(repository, {})
+    content.save(
+        "dictionary",
+        json.dumps(
+            {
+                "schema_version": 1,
+                "dictionary": [
+                    {"canonical_text": "cafe\u0301"},
+                    {"canonical_text": "Local Editor", "executable": "editor.exe"},
+                ],
+            }
+        ),
+    )
+    pack = OrganizationProfilePack(
+        1,
+        "Example",
+        [],
+        [
+            {"canonical_text": "Internal Name", "priority": 100},
+            {"canonical_text": "Private Tool", "executable": "other.exe"},
+        ],
+        [],
+        [],
+        [],
+        {},
+    )
+    OrganizationPackService(repository, profiles, content).merge(pack, apply=True)
+
+    restored = ProfessionalContent(repository, repository.load().professional)
+    context = DictationContext(executable_name="EDITOR.EXE")
+    request = restored.snapshot().request(
+        1,
+        "en",
+        "small",
+        profiles.resolve(context),
+        context,
+        ("CAFÉ", "Personal Hint"),
+    )
+
+    assert request.hotwords == ("café", "Personal Hint", "Local Editor", "Internal Name")
+    assert "organization" in restored.dictionary_to_csv()
+
+
+def test_outbox_claim_is_idempotent_and_reuses_saved_unicode_text(tmp_path: Path) -> None:
+    repository = SessionRepository(tmp_path / "sessions.sqlite3")
+    session_id = repository.create(Language.RU, "small", ModelProfile.BALANCED, "editor.exe")
+    journal = SessionJournal(repository, session_id)
+    journal.commit_text("Начало")
+    fragment = " 👋 финал"
+    journal.commit_text(fragment)
+
+    assert repository.queue_delivery("job", session_id, fragment, "auto", whole_result=False)
+    assert not repository.queue_delivery("job", session_id, fragment, "auto", whole_result=False)
+    assert repository.claim_delivery("job")
+    assert not repository.claim_delivery("job", explicit=True)
+    repository.finish_delivery("job", "submitted_unconfirmed")
+    assert not repository.claim_delivery("job")
+    (item,) = repository.pending_deliveries()
+    assert item.text == fragment
+    assert item.status == "submitted_unconfirmed"
+    repository.finish_delivery("job", "confirmed")
+    assert repository.pending_deliveries() == ()
+    assert repository.delete(session_id)
+
+
+def test_outbox_without_text_permission_cannot_persist_a_payload(tmp_path: Path) -> None:
+    repository = SessionRepository(tmp_path / "sessions.sqlite3")
+    session_id = repository.create(Language.RU, "small", ModelProfile.BALANCED, "editor.exe")
+    SessionJournal(repository, session_id, persist_text=False).commit_text("temporary")
+    assert not repository.queue_delivery("job", session_id, "temporary", "auto", whole_result=True)
+    assert repository.pending_deliveries() == ()
 
 
 def test_settings_round_trip_and_atomic_temp_cleanup(tmp_path: Path) -> None:
@@ -41,13 +120,15 @@ def test_settings_round_trip_and_atomic_temp_cleanup(tmp_path: Path) -> None:
 def test_power_modes_change_effective_cpu_budget(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     monkeypatch.setattr("voxtype.runtime.os.cpu_count", lambda: 12)
     settings = AppSettings()
-    settings.model.cpu_threads = 8
+    settings.model.cpu_threads = 0
     settings.model.power_mode = "energy"
-    assert effective_cpu_threads(settings) == 4
+    assert effective_cpu_threads(settings) == 2
     settings.model.power_mode = "balanced"
-    assert effective_cpu_threads(settings) == 8
+    assert effective_cpu_threads(settings) == 4
     settings.model.power_mode = "maximum"
-    assert effective_cpu_threads(settings) == 12
+    assert effective_cpu_threads(settings) == 6
+    settings.model.cpu_threads = 8
+    assert effective_cpu_threads(settings) == 8
 
 
 def test_default_injection_uses_clipboard_with_unicode_fallback() -> None:

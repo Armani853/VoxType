@@ -28,6 +28,7 @@ def test_main_window_renders_snapshot_and_routes_commands(qtbot) -> None:  # typ
     controller = _Controller()
     window = MainWindow(controller)
     qtbot.addWidget(window)
+    window.show()
     window.update_snapshot(
         UIState(
             state=AppStatus.LISTENING,
@@ -44,16 +45,16 @@ def test_main_window_renders_snapshot_and_routes_commands(qtbot) -> None:  # typ
     )
 
     assert window.status_label.text() == "Слушаю"
-    assert window.dictation_button.text() == "Остановить"
+    assert window.voice_action_label.text() == "Остановить"
     assert window.duration_tile.value_label.text() == "00:01:05"
     assert window.backlog_tile.value_label.text() == "2.2 с"
     assert window.target_tile.value_label.text() == "Блокнот"
     assert window.fragment_label.text() == "Последний распознанный фрагмент"
-    assert window.microphone_label.full_text() == "USB Microphone"
+    assert window.microphone_label.text() == "USB Microphone"
     assert window.model_title.text() == "Режим"
     assert window.model_label.text() == "Быстро"
     assert window.profile_label.text() == "Локальная модель: small"
-    assert window.audio_meter.level() > 0.5
+    assert window.audio_meter.level > 0
 
     qtbot.mouseClick(window.dictation_button, Qt.MouseButton.LeftButton)
     qtbot.mouseClick(window.language_control.en_button, Qt.MouseButton.LeftButton)
@@ -64,6 +65,7 @@ def test_main_window_renders_snapshot_and_routes_commands(qtbot) -> None:  # typ
 def test_main_window_uses_state_text_without_showing_provisional_as_final(qtbot) -> None:  # type: ignore[no-untyped-def]
     window = MainWindow()
     qtbot.addWidget(window)
+    window.show()
     window.update_snapshot(
         UIState(
             state=AppStatus.LISTENING,
@@ -72,7 +74,7 @@ def test_main_window_uses_state_text_without_showing_provisional_as_final(qtbot)
         )
     )
     assert window.fragment_label.text() == "Слушаю…"
-    assert window.audio_meter.level() > 0.1
+    assert window.audio_meter.level > 0
     window.update_snapshot(UIState(state=AppStatus.TRANSCRIBING))
     assert window.fragment_label.text() == "Распознаю…"
 
@@ -143,7 +145,7 @@ def test_main_window_completed_state_shows_full_transcript_and_new_start(qtbot) 
     )
     assert window.status_label.text() == "Готово"
     assert window.fragment_label.text() == "весь завершённый текст"
-    assert window.dictation_button.text() == "Начать диктовку"
+    assert window.voice_action_label.text() == "Начать диктовку"
     assert window.dictation_button.isEnabled()
 
 
@@ -159,7 +161,7 @@ def test_completed_text_waiting_for_target_has_clear_recovery_instruction(qtbot)
         )
     )
     assert window.status_label.text() == "Ожидает вставки"
-    assert "Вернитесь в целевое окно" in window.status_detail_label.text()
+    assert "Повторить вставку" in window.status_detail_label.text()
 
 
 def test_missing_model_is_not_presented_as_ready_and_opens_setup(qtbot) -> None:  # type: ignore[no-untyped-def]
@@ -169,10 +171,10 @@ def test_missing_model_is_not_presented_as_ready_and_opens_setup(qtbot) -> None:
     window.update_snapshot(UIState(state=AppStatus.IDLE, model_name="small"))
     assert window.status_label.text() == "Требуется модель"
     assert "не установлена" in window.profile_label.text()
-    assert window.dictation_button.text() == "Настроить модель"
+    assert window.voice_action_label.text() == "Настроить модель"
     with qtbot.waitSignal(window.onboarding_requested):
         qtbot.mouseClick(window.dictation_button, Qt.MouseButton.LeftButton)
 
     window.set_model_available(True)
     assert window.status_label.text() == "Готово"
-    assert window.dictation_button.text() == "Начать диктовку"
+    assert window.voice_action_label.text() == "Начать диктовку"

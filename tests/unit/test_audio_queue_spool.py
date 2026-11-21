@@ -127,7 +127,8 @@ def test_spill_migrates_ram_prefix_so_crash_recovery_has_no_fifo_gap(tmp_path: P
 def test_startup_preroll_keeps_latest_350ms_before_session_boundary() -> None:
     queue = LosslessAudioQueue(max_ram_chunks=32, spool=None, session_id=17)
     service = AudioCaptureService(
-        queue, AudioCaptureConfig(input_sample_rate=1_000, target_sample_rate=1_000),
+        queue,
+        AudioCaptureConfig(input_sample_rate=1_000, target_sample_rate=1_000),
     )
     service.arm_pre_roll()
     service.start_dispatcher_for_tests()
@@ -148,7 +149,11 @@ def test_startup_preroll_keeps_latest_350ms_before_session_boundary() -> None:
     assert [chunk.session_id for chunk in chunks] == [17, 17, 17]
     final = service.finalization
     assert final is not None and final.complete
-    assert (final.last_accepted_sample, final.last_consumed_sample, final.last_published_sample) == (520, 520, 470)
+    assert (
+        final.last_accepted_sample,
+        final.last_consumed_sample,
+        final.last_published_sample,
+    ) == (520, 520, 470)
 
 
 def test_callback_ingress_is_bounded_and_turns_exhaustion_into_fatal_error(tmp_path: Path) -> None:

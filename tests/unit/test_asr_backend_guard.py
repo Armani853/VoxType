@@ -170,10 +170,13 @@ def test_faster_whisper_passes_optional_hotwords(tmp_path: Path, supports_hotwor
             return super().transcribe(_audio, **options)
 
     backend = FasterWhisperBackend(
-        tmp_path, get_profile(ASRProfile.BALANCED),
+        tmp_path,
+        get_profile(ASRProfile.BALANCED),
         model_factory=lambda *_args, **_kwargs: Current() if supports_hotwords else Legacy(),
     )
-    backend.transcribe(replace(_request(), initial_prompt="VoxType", hotwords=("VoxType", "PostgreSQL")))
+    backend.transcribe(
+        replace(_request(), initial_prompt="VoxType", hotwords=("VoxType", "PostgreSQL"))
+    )
     assert received["initial_prompt"] == "VoxType"
     if supports_hotwords:
         assert received["hotwords"] == "VoxType, PostgreSQL"

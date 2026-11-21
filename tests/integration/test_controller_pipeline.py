@@ -14,6 +14,7 @@ from voxtype.asr.base import (
     TranscriptionSegment,
     WordTimestamp,
 )
+from voxtype.asr.live import LiveSpeechSession
 from voxtype.audio.models import AudioChunk, AudioQueueStats
 from voxtype.audio.spool import LosslessAudioQueue
 from voxtype.core.controller import ApplicationController
@@ -279,11 +280,18 @@ def wait_for_state(
     assert controller.state is expected
 
 
+def _settings_with_recovery(tmp_path: Path) -> SettingsRepository:
+    repository = SettingsRepository(tmp_path / "settings.json")
+    # This suite exercises durable history and PCM recovery with explicit consent.
+    repository.update({"privacy": {"save_history": True, "save_audio": True}})
+    return repository
+
+
 def test_prompt_context_resets_for_sentence_pause_uncertainty_and_language(
     tmp_path: Path,
 ) -> None:
     controller = ApplicationController(
-        settings_repository=SettingsRepository(tmp_path / "settings.json"),
+        settings_repository=_settings_with_recovery(tmp_path),
         session_repository=SessionRepository(tmp_path / "sessions.sqlite3"),
         backend=DeterministicBackend(),
         capture_factory=lambda queue: FixtureCapture(queue),  # type: ignore[arg-type,return-value]
@@ -318,7 +326,7 @@ def test_prompt_context_resets_for_sentence_pause_uncertainty_and_language(
 
 
 def test_controller_journals_before_ordered_injection_and_drains(tmp_path: Path) -> None:
-    settings_repository = SettingsRepository(tmp_path / "settings.json")
+    settings_repository = _settings_with_recovery(tmp_path)
     session_repository = SessionRepository(tmp_path / "sessions.sqlite3")
     backend = DeterministicBackend()
     target = FixtureTargetManager()
@@ -357,7 +365,7 @@ def test_inactive_target_completion_is_not_history_error_and_can_retry(tmp_path:
     target = FixtureTargetManager()
     injection = QueuedInjection()
     controller = ApplicationController(
-        settings_repository=SettingsRepository(tmp_path / "settings.json"),
+        settings_repository=_settings_with_recovery(tmp_path),
         session_repository=repository,
         backend=DeterministicBackend(),
         capture_factory=lambda queue: FixtureCapture(queue),  # type: ignore[arg-type,return-value]
@@ -386,7 +394,7 @@ def test_model_loading_accepts_only_one_queued_start(tmp_path: Path) -> None:
     repository = SessionRepository(tmp_path / "sessions.sqlite3")
     backend = DelayedLoadBackend()
     controller = ApplicationController(
-        settings_repository=SettingsRepository(tmp_path / "settings.json"),
+        settings_repository=_settings_with_recovery(tmp_path),
         session_repository=repository,
         backend=backend,
         capture_factory=lambda queue: FixtureCapture(queue),  # type: ignore[arg-type,return-value]
@@ -412,7 +420,7 @@ def test_shutdown_waits_for_model_loader_before_disposing_resources(tmp_path: Pa
     repository = SessionRepository(tmp_path / "sessions.sqlite3")
     backend = DelayedLoadBackend()
     controller = ApplicationController(
-        settings_repository=SettingsRepository(tmp_path / "settings.json"),
+        settings_repository=_settings_with_recovery(tmp_path),
         session_repository=repository,
         backend=backend,
         capture_factory=lambda queue: FixtureCapture(queue),  # type: ignore[arg-type,return-value]
@@ -438,7 +446,7 @@ def test_capture_creation_error_is_recoverable_from_starting(tmp_path: Path) -> 
         raise OSError("audio device disconnected")
 
     controller = ApplicationController(
-        settings_repository=SettingsRepository(tmp_path / "settings.json"),
+        settings_repository=_settings_with_recovery(tmp_path),
         session_repository=repository,
         backend=DeterministicBackend(),
         capture_factory=disconnected_capture,  # type: ignore[arg-type]
@@ -464,7 +472,7 @@ def test_input_overflow_warns_and_continues_capture(tmp_path: Path) -> None:
         return capture
 
     controller = ApplicationController(
-        settings_repository=SettingsRepository(tmp_path / "settings.json"),
+        settings_repository=_settings_with_recovery(tmp_path),
         session_repository=repository,
         backend=DeterministicBackend(),
         capture_factory=make_capture,  # type: ignore[arg-type]
@@ -497,7 +505,7 @@ def test_input_overflow_warns_and_continues_capture(tmp_path: Path) -> None:
 def test_shutdown_waits_for_inflight_inference(tmp_path: Path) -> None:
     repository = SessionRepository(tmp_path / "sessions.sqlite3")
     controller = ApplicationController(
-        settings_repository=SettingsRepository(tmp_path / "settings.json"),
+        settings_repository=_settings_with_recovery(tmp_path),
         session_repository=repository,
         backend=HangingBackend(),
         capture_factory=lambda queue: FixtureCapture(queue),  # type: ignore[arg-type,return-value]
@@ -521,7 +529,7 @@ def test_start_command_returns_before_slow_runtime_preparation(tmp_path: Path) -
 
     repository = SessionRepository(tmp_path / "sessions.sqlite3")
     controller = ApplicationController(
-        settings_repository=SettingsRepository(tmp_path / "settings.json"),
+        settings_repository=_settings_with_recovery(tmp_path),
         session_repository=repository,
         backend=DeterministicBackend(),
         capture_factory=lambda queue: EmptyCapture(queue),  # type: ignore[arg-type,return-value]
@@ -548,7 +556,7 @@ def test_snapshot_remains_responsive_while_audio_driver_start_blocks(tmp_path: P
     release = threading.Event()
     repository = SessionRepository(tmp_path / "sessions.sqlite3")
     controller = ApplicationController(
-        settings_repository=SettingsRepository(tmp_path / "settings.json"),
+        settings_repository=_settings_with_recovery(tmp_path),
         session_repository=repository,
         backend=DeterministicBackend(),
         capture_factory=lambda queue: BlockingStartCapture(queue, entered, release),  # type: ignore[arg-type,return-value]
@@ -586,7 +594,7 @@ def test_stop_during_blocked_audio_start_closes_capture_without_listening(tmp_pa
         return capture
 
     controller = ApplicationController(
-        settings_repository=SettingsRepository(tmp_path / "settings.json"),
+        settings_repository=_settings_with_recovery(tmp_path),
         session_repository=repository,
         backend=DeterministicBackend(),
         capture_factory=capture_factory,  # type: ignore[arg-type]
@@ -620,7 +628,7 @@ def test_snapshot_remains_responsive_while_audio_resume_blocks(tmp_path: Path) -
         return BlockingStartCapture(queue, entered, release)
 
     controller = ApplicationController(
-        settings_repository=SettingsRepository(tmp_path / "settings.json"),
+        settings_repository=_settings_with_recovery(tmp_path),
         session_repository=repository,
         backend=DeterministicBackend(),
         capture_factory=capture_factory,  # type: ignore[arg-type]
@@ -653,7 +661,7 @@ def test_snapshot_remains_responsive_while_audio_resume_blocks(tmp_path: Path) -
 def test_stop_during_model_loading_is_immediate_and_finishes_once(tmp_path: Path) -> None:
     repository = SessionRepository(tmp_path / "sessions.sqlite3")
     controller = ApplicationController(
-        settings_repository=SettingsRepository(tmp_path / "settings.json"),
+        settings_repository=_settings_with_recovery(tmp_path),
         session_repository=repository,
         backend=DelayedLoadBackend(),
         capture_factory=lambda queue: EmptyCapture(queue),  # type: ignore[arg-type,return-value]
@@ -685,7 +693,7 @@ def test_pause_resume_captures_no_text_while_paused(tmp_path: Path) -> None:
         return capture
 
     controller = ApplicationController(
-        settings_repository=SettingsRepository(tmp_path / "settings.json"),
+        settings_repository=_settings_with_recovery(tmp_path),
         session_repository=repository,
         backend=DeterministicBackend(),
         capture_factory=capture_factory,  # type: ignore[arg-type]
@@ -715,7 +723,7 @@ def test_pause_resume_captures_no_text_while_paused(tmp_path: Path) -> None:
 def test_stop_freezes_timer_before_slow_capture_drain(tmp_path: Path) -> None:
     repository = SessionRepository(tmp_path / "sessions.sqlite3")
     controller = ApplicationController(
-        settings_repository=SettingsRepository(tmp_path / "settings.json"),
+        settings_repository=_settings_with_recovery(tmp_path),
         session_repository=repository,
         backend=DeterministicBackend(),
         capture_factory=lambda queue: SlowStopCapture(queue),  # type: ignore[arg-type,return-value]
@@ -743,7 +751,7 @@ def test_stop_freezes_timer_before_slow_capture_drain(tmp_path: Path) -> None:
 def test_controller_never_finalizes_completed_when_audio_dispatcher_does_not_stop(
     tmp_path: Path,
 ) -> None:
-    settings_repository = SettingsRepository(tmp_path / "settings.json")
+    settings_repository = _settings_with_recovery(tmp_path)
     session_repository = SessionRepository(tmp_path / "sessions.sqlite3")
     controller = ApplicationController(
         settings_repository=settings_repository,
@@ -766,7 +774,7 @@ def test_controller_never_finalizes_completed_when_audio_dispatcher_does_not_sto
 
 
 def test_inference_watchdog_allows_retry_once_native_call_exits(tmp_path: Path) -> None:
-    settings_repository = SettingsRepository(tmp_path / "settings.json")
+    settings_repository = _settings_with_recovery(tmp_path)
     session_repository = SessionRepository(tmp_path / "sessions.sqlite3")
     controller = ApplicationController(
         settings_repository=settings_repository,
@@ -793,6 +801,75 @@ def test_inference_watchdog_allows_retry_once_native_call_exits(tmp_path: Path) 
     session_repository.close()
 
 
+def test_live_preview_keeps_vad_draining_and_yields_to_final(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    preview_started = threading.Event()
+    preview_release = threading.Event()
+    second_block_analyzed = threading.Event()
+    calls: list[str] = []
+
+    class ImmediateLiveSession(LiveSpeechSession):
+        def request(self, speech_samples: int, now: float) -> TranscriptionRequest | None:
+            if not preview_started.is_set():
+                self._next = 0
+            return super().request(speech_samples, now)
+
+    class BlockingPreviewBackend(DeterministicBackend):
+        def transcribe(self, request: TranscriptionRequest) -> TranscriptionResult:
+            kind = request.metadata["kind"]
+            calls.append(kind)
+            if kind == "preview":
+                preview_started.set()
+                if not preview_release.wait(5):
+                    raise TimeoutError("test did not release preview")
+            return super().transcribe(request)
+
+    class ObservedSpeech(AlwaysSpeech):
+        samples_seen = 0
+
+        def speech_probability(self, samples: object, sample_rate: int) -> float:
+            self.samples_seen += np.asarray(samples).size
+            if self.samples_seen > 16_000:
+                second_block_analyzed.set()
+            return super().speech_probability(samples, sample_rate)
+
+    monkeypatch.setattr("voxtype.core.controller.LiveSpeechSession", ImmediateLiveSession)
+    settings = _settings_with_recovery(tmp_path)
+    settings.update({"dictation": {"live_preview": True}})
+    injection = FixtureInjection()
+    controller = ApplicationController(
+        settings_repository=settings,
+        session_repository=SessionRepository(tmp_path / "sessions.sqlite3"),
+        backend=BlockingPreviewBackend(),
+        capture_factory=lambda queue: FixtureCapture(queue),  # type: ignore[arg-type,return-value]
+        segmenter_factory=lambda: StreamingSegmenter(ObservedSpeech()),
+        target_manager=FixtureTargetManager(),  # type: ignore[arg-type]
+        injection_service=injection,  # type: ignore[arg-type]
+        spool_root=tmp_path / "spool",
+    )
+    try:
+        controller.initialize()
+        assert controller.start_dictation()
+        assert preview_started.wait(5)
+        capture = controller._capture
+        assert isinstance(capture, FixtureCapture)
+        capture.feed(1)
+        assert second_block_analyzed.wait(2)
+        assert controller.stop_dictation()
+        assert calls == ["preview"]
+        assert injection.fragments == []
+        preview_release.set()
+        wait_for_state(controller, AppState.COMPLETED)
+        assert calls == ["preview", "final"]
+        assert controller.snapshot().live_transcript is None
+        assert injection.fragments == ["Привет мир"]
+    finally:
+        preview_release.set()
+        controller.shutdown()
+
+
 def test_cancel_processing_drops_late_result_and_next_dictation_works(tmp_path: Path) -> None:
     entered = threading.Event()
     release = threading.Event()
@@ -808,7 +885,7 @@ def test_cancel_processing_drops_late_result_and_next_dictation_works(tmp_path: 
     repository = SessionRepository(tmp_path / "sessions.sqlite3")
     injection = FixtureInjection()
     controller = ApplicationController(
-        settings_repository=SettingsRepository(tmp_path / "settings.json"),
+        settings_repository=_settings_with_recovery(tmp_path),
         session_repository=repository,
         backend=SlowFirstCall(),
         capture_factory=lambda queue: FixtureCapture(queue),  # type: ignore[arg-type,return-value]
@@ -835,7 +912,7 @@ def test_cancel_processing_drops_late_result_and_next_dictation_works(tmp_path: 
                 assert not worker.is_alive()
         assert not injection.fragments
         assert repository.recent()[0].status == "recovery_required"
-        assert controller.start_dictation()
+        assert controller.restart_dictation()
         wait_for_state(controller, AppState.LISTENING)
         assert controller.stop_dictation()
         wait_for_state(controller, AppState.COMPLETED)
@@ -849,7 +926,7 @@ def test_cancel_processing_drops_late_result_and_next_dictation_works(tmp_path: 
 def test_long_silence_does_not_exhaust_durable_inflight_leases(
     tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:
-    settings_repository = SettingsRepository(tmp_path / "settings.json")
+    settings_repository = _settings_with_recovery(tmp_path)
     session_repository = SessionRepository(tmp_path / "sessions.sqlite3")
     detector = CountingSilence()
 
@@ -888,7 +965,7 @@ def test_long_silence_does_not_exhaust_durable_inflight_leases(
 
 
 def test_runtime_error_preserves_pcm_then_recovers_tail_before_retry(tmp_path: Path) -> None:
-    settings_repository = SettingsRepository(tmp_path / "settings.json")
+    settings_repository = _settings_with_recovery(tmp_path)
     session_repository = SessionRepository(tmp_path / "sessions.sqlite3")
     controller = ApplicationController(
         settings_repository=settings_repository,
@@ -926,10 +1003,10 @@ def test_runtime_error_preserves_pcm_then_recovers_tail_before_retry(tmp_path: P
     session_repository.close()
 
 
-def test_language_switch_preserves_segment_sequence_and_commits_both_languages(
+def test_language_switch_applies_on_next_session(
     tmp_path: Path,
 ) -> None:
-    settings_repository = SettingsRepository(tmp_path / "settings.json")
+    settings_repository = _settings_with_recovery(tmp_path)
     session_repository = SessionRepository(tmp_path / "sessions.sqlite3")
     backend = LanguageBackend()
     captures: list[FixtureCapture] = []
@@ -961,7 +1038,12 @@ def test_language_switch_preserves_segment_sequence_and_commits_both_languages(
 
     record = session_repository.recent()[0]
     assert "Русский" in record.committed_text
-    assert "english" in record.committed_text.casefold()
+    assert backend.languages == ["ru"]
+    assert controller.start_dictation()
+    wait_for_state(controller, AppState.LISTENING)
+    assert controller.stop_dictation()
+    wait_for_state(controller, AppState.COMPLETED)
+    assert "english" in session_repository.recent()[0].committed_text.casefold()
     assert backend.languages == ["ru", "en"]
     assert backend.prompts == ["", ""]
     controller.shutdown()

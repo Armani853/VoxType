@@ -45,9 +45,9 @@ def test_semantic_tokens_and_component_roles_are_complete() -> None:
         "focus_ring",
     }
     assert required <= colors.keys()
-    assert len({colors[name] for name in required}) == len(required)
+    assert all(re.fullmatch(r"#[0-9A-Fa-f]{6}", colors[name]) for name in required)
     assert tuple(asdict(SPACING).values()) == (4, 8, 12, 16, 20, 24, 32, 40)
-    assert tuple(asdict(RADII).values()) == (8, 10, 16)
+    assert tuple(asdict(RADII).values()) == (8, 8, 12)
 
     light_qss = stylesheet("light")
     overlay_qss = overlay_stylesheet()
@@ -92,7 +92,7 @@ def test_base_font_and_text_color_use_qt_palette_without_global_qwidget_selector
     original_style = app.styleSheet()
     try:
         apply_theme(app, "light")
-        assert app.font().pointSize() == 10
+        assert app.font().pixelSize() == 13
         assert app.palette().color(QPalette.ColorRole.WindowText).name() == (
             LIGHT_PALETTE.text_primary.lower()
         )

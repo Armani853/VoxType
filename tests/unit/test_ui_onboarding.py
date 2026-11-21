@@ -8,10 +8,10 @@ from voxtype.audio.calibration import CalibrationStatus, analyze_calibration
 from voxtype.ui.onboarding import OnboardingWizard
 
 
-def test_onboarding_has_eight_real_steps_and_collects_choices(qtbot) -> None:  # type: ignore[no-untyped-def]
+def test_onboarding_has_ten_real_steps_and_collects_choices(qtbot) -> None:  # type: ignore[no-untyped-def]
     wizard = OnboardingWizard()
     qtbot.addWidget(wizard)
-    assert len(wizard.pageIds()) == 8
+    assert len(wizard.pageIds()) == 10
 
     wizard.set_microphones([("USB Microphone", "mic-1")], "mic-1")
     assert wizard.microphone_page.isComplete()
@@ -28,7 +28,7 @@ def test_onboarding_has_eight_real_steps_and_collects_choices(qtbot) -> None:  #
     assert wizard.calibration_progress.value() == 100
     assert wizard.calibration_button.property("primary") is False
     assert wizard.findChild(type(wizard.calibration_status), "onboardingStep1").text() == (
-        "Шаг 1 из 8"
+        "Шаг 1 из 10"
     )
     wizard.set_hardware_recommendation("balanced", "CPU и RAM подходят")
     assert wizard.hardware_page.isComplete()

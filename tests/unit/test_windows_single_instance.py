@@ -88,17 +88,20 @@ def test_existing_activation_asks_qt_to_restore_hidden_window(monkeypatch) -> No
             calls.append(args)
             return self.callback(*args)
 
+    def acknowledge(_hwnd, _message, _wparam, _lparam, _flags, _timeout, response):
+        response._obj.value = 1
+        return 1
+
     user32 = SimpleNamespace(
         FindWindowW=FakeFunction(lambda _class, _title: 4321),
-        PostMessageW=FakeFunction(lambda _hwnd, _message, _wparam, _lparam: 1),
+        SendMessageTimeoutW=FakeFunction(acknowledge),
     )
     monkeypatch.setattr(single_instance, "load_library", lambda _name: user32)
 
     assert Win32SingleInstanceBackend().activate_window("VoxType — локальная диктовка", 0)
-    assert calls == [
-        (None, "VoxType — локальная диктовка"),
-        (4321, WM_VOXTYPE_RESTORE, 0, 0),
-    ]
+    assert len(calls) == 2
+    assert calls[0] == (None, "VoxType — локальная диктовка")
+    assert calls[1][:6] == (4321, WM_VOXTYPE_RESTORE, 0, 0, 0x0002, 1)
 
 
 def test_real_win32_mutex_has_exactly_one_owner() -> None:

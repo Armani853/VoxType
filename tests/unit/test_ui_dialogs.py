@@ -131,14 +131,13 @@ def test_history_filters_displays_and_copies(qtbot, monkeypatch) -> None:  # typ
             ),
         ]
     )
-    assert window.table.rowCount() == 2
+    assert window.table.model().rowCount() == 2
     assert window.selected_entry() is not None
     qtbot.mouseClick(window.copy_button, Qt.MouseButton.LeftButton)
     assert clipboard.text() == "Русский текст"
 
     window.search_edit.setText("English")
-    hidden = [window.table.isRowHidden(row) for row in range(window.table.rowCount())]
-    assert hidden.count(False) == 1
+    assert window.table.model().rowCount() == 1
     assert window.selected_session_id() == "two"
     assert window.detail_session_id == "two"
     assert window.visible_session_ids == {"two"}
@@ -151,7 +150,7 @@ def test_history_filters_displays_and_copies(qtbot, monkeypatch) -> None:  # typ
     assert window.detail_session_id is None
     assert window.text_edit.toPlainText() == ""
     assert window.metadata_label.text() == "Выберите запись в истории"
-    assert window.empty_label.text() == "Записей не найдено"
+    assert window._history_left_stack.currentWidget() is window._history_empty_panel
 
 
 def test_history_language_filter_never_keeps_stale_detail_and_delete_selects_next(

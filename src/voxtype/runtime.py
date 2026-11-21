@@ -21,8 +21,8 @@ from urllib.request import Request, urlopen
 
 from platformdirs import user_cache_path, user_data_path
 
-from voxtype.asr.faster_whisper_backend import FasterWhisperBackend, WhisperEngineSlot
 from voxtype.asr.base import ASRModelUnavailable
+from voxtype.asr.faster_whisper_backend import FasterWhisperBackend, WhisperEngineSlot
 from voxtype.asr.model_manager import DEFAULT_MODEL_SPECS, ModelManager
 from voxtype.asr.profiles import ASRProfile, ASRProfileConfig, get_profile
 from voxtype.audio.capture import AudioCaptureConfig, AudioCaptureService
@@ -32,12 +32,13 @@ from voxtype.audio.devices import (
     choose_capture_channels,
     choose_capture_rate,
     list_input_devices,
+    match_input_device,
     resolve_recording_device,
 )
 from voxtype.audio.preprocessing import (
     PreprocessingProfile as AudioPreprocessingProfile,
 )
-from voxtype.audio.preprocessing import PreprocessorSettings
+from voxtype.audio.preprocessing import select_preprocessing
 from voxtype.audio.spool import LosslessAudioQueue
 from voxtype.constants import APP_AUTHOR, APP_NAME
 from voxtype.core.compute_budget import ComputeBudget, DecodingPreset
@@ -53,6 +54,7 @@ from voxtype.vad.segmenter import SegmentationSettings, StreamingSegmenter
 from voxtype.vad.silero import SileroVAD
 from voxtype.version import __version__
 from voxtype.windows.injection import InjectionStrategy, TextInjectionService
+from voxtype.windows.input_context import ForegroundContextProvider
 from voxtype.windows.startup import MemoryStartupRegistryBackend, StartupManager
 from voxtype.windows.target_window import TargetPolicy, TargetWindowManager
 
@@ -80,7 +82,8 @@ def domain_profile(profile: ASRProfile | str) -> ModelProfile:
 
 
 def configured_profile(
-    settings: AppSettings, selection: ASRProfile | None = None,
+    settings: AppSettings,
+    selection: ASRProfile | None = None,
 ) -> ASRProfileConfig:
     profile = get_profile(selection or asr_profile(settings.dictation.model_profile))
     profile = replace(profile, cpu_threads=effective_cpu_threads(settings))
@@ -120,7 +123,7 @@ def select_input_device(
     return ranked[0]
 
 
-def install_silero_vad(data_directory: Path) -> Path:
+def install_silero_vad(data_directory: Path, *, allow_download: bool = True) -> Path | None:
     """Install the pinned official ONNX VAD atomically during explicit setup."""
 
     destination = data_directory / "models" / "silero-vad" / "silero_vad.onnx"
@@ -133,6 +136,8 @@ def install_silero_vad(data_directory: Path) -> Path:
         shutil.copy2(bundled, temporary)
         os.replace(temporary, destination)
         return destination
+    if not allow_download:
+        return None
     destination.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(
         prefix=".silero-vad-", suffix=".onnx", dir=destination.parent
@@ -202,6 +207,12 @@ class RuntimeBundle:
     engine_slot: WhisperEngineSlot | None = None
     restore_status: str = ""
 
+    @property
+    def secret_store(self):
+        from voxtype.windows.secret_store import WindowsSecretStore
+
+        return WindowsSecretStore(self.data_directory / "credentials")
+
     def backend_for(self, profile: ASRProfile | str) -> FasterWhisperBackend:
         selected = asr_profile(domain_profile(profile))
         config = configured_profile(self.settings, selected)
@@ -227,7 +238,9 @@ class RuntimeBundle:
     def backend_for_model(self, model_id: str) -> FasterWhisperBackend:
         if not self.model_manager.is_installed(model_id):
             raise ASRModelUnavailable("Selected profile model is not installed")
-        profile = ASRProfile.MAXIMUM_ACCURACY if model_id == "large-v3-turbo" else ASRProfile.BALANCED
+        profile = (
+            ASRProfile.MAXIMUM_ACCURACY if model_id == "large-v3-turbo" else ASRProfile.BALANCED
+        )
         return self.backend_for(profile)
 
     def close(self) -> bool:
@@ -313,11 +326,10 @@ def build_runtime(*, verbose: bool = False) -> RuntimeBundle:
     except AudioBackendUnavailable:
         logging.getLogger("voxtype.runtime").warning("audio_device_discovery_unavailable")
         devices = ()
-    device = (
-        select_input_device(devices, settings.audio.device_id)
-        if devices
-        else InputDevice(-1, "Микрофон не найден", "", 0, 0, (), False)
+    matched_device = match_input_device(
+        devices, settings.audio.device_id, settings.audio.device_fingerprint
     )
+    device = matched_device or InputDevice(-1, "Микрофон недоступен", "", 0, 0, (), False)
     stage("audio_devices_enumerated")
 
     profile = configured_profile(settings)
@@ -326,7 +338,9 @@ def build_runtime(*, verbose: bool = False) -> RuntimeBundle:
         settings_repository.save(settings)
     engine_slot = WhisperEngineSlot()
     backend = FasterWhisperBackend(
-        model_manager.path_for(profile.model_name), profile, engine_slot=engine_slot,
+        model_manager.path_for(profile.model_name),
+        profile,
+        engine_slot=engine_slot,
     )
     retry_backend: FasterWhisperBackend | None = None
     if profile.profile is ASRProfile.BALANCED and model_manager.is_installed("large-v3-turbo"):
@@ -345,17 +359,26 @@ def build_runtime(*, verbose: bool = False) -> RuntimeBundle:
         strategy=InjectionStrategy(settings.dictation.injection_mode.value),
         paste_delay=max(350, settings.dictation.insertion_delay_ms) / 1_000.0,
         persist_pending=settings.privacy.save_history,
+        context_provider=ForegroundContextProvider() if os.name == "nt" else None,
     )
 
     audio_profile = AudioPreprocessingProfile(settings.audio.preprocessing_profile.value)
-    preprocessing = replace(
-        PreprocessorSettings.for_profile(audio_profile),
-        normalization_enabled=settings.audio.normalization,
-        noise_suppression_enabled=settings.audio.noise_suppression,
+    preprocessing = select_preprocessing(
+        settings.audio.preprocessing_mode,
+        audio_profile,
+        normalize=settings.audio.normalization,
+        noise_gate=settings.audio.noise_suppression,
     )
 
     def capture_factory(queue: LosslessAudioQueue) -> AudioCaptureService:
-        selected = resolve_recording_device(settings.audio.device_id, devices)
+        current = (
+            list_input_devices(candidate_sample_rates=(16_000, 48_000))
+            if settings.audio.device_id is not None
+            else ()
+        )
+        selected = resolve_recording_device(
+            settings.audio.device_id, current, settings.audio.device_fingerprint
+        )
         return AudioCaptureService(
             queue,
             AudioCaptureConfig(
@@ -388,11 +411,7 @@ def build_runtime(*, verbose: bool = False) -> RuntimeBundle:
     )
     installed = model_manager.is_installed(profile.model_name)
     controller.set_recording_availability(
-        microphone=any(
-            item.is_default if settings.audio.device_id is None
-            else item.index == settings.audio.device_id
-            for item in devices
-        ),
+        microphone=matched_device is not None,
         model=installed,
     )
     controller.initialize(preload_model=False)
