@@ -143,7 +143,7 @@ class _HotkeyEventFilter(QAbstractNativeEventFilter):
             native = wintypes.MSG.from_address(int(message))
             if int(native.message) == WM_VOXTYPE_RESTORE:
                 self.restore_request()
-                return True, 0
+                return True, 1
             if int(native.message) == 0x0011:  # WM_QUERYENDSESSION
                 accepted = bool(self.shutdown_query())
                 return True, 1 if accepted else 0

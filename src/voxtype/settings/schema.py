@@ -11,6 +11,7 @@ from voxtype.constants import (
     DEFAULT_PAUSE_HOTKEY,
     SETTINGS_SCHEMA_VERSION,
 )
+from voxtype.version import ReleaseChannel
 from voxtype.core.compute_budget import DecodingPreset, MemoryPolicy
 from voxtype.core.models import (
     InjectionMode,
@@ -28,6 +29,7 @@ class GeneralSettings:
     show_overlay: bool = True
     play_sounds: bool = False
     theme: str = "system"
+    release_channel: ReleaseChannel = ReleaseChannel.STABLE
     ui_language: str = "ru"
     onboarding_completed: bool = False
 
@@ -39,6 +41,7 @@ class DictationSettings:
     # only adds the lazy turbo retry when that optional model is installed.
     model_profile: ModelProfile = ModelProfile.BALANCED
     voice_commands: bool = False
+    live_preview: bool = False
     auto_insert: bool = True
     copy_full_text_on_complete: bool = True
     auto_hide_completed_result: bool = False
@@ -76,6 +79,7 @@ class ModelSettings:
 class PrivacySettings:
     save_history: bool = False
     save_audio: bool = False
+    recover_unsaved_drafts: bool = False
     retention_days: int = 30
 
 

@@ -11,6 +11,7 @@ import logging
 import os
 import platform
 import shutil
+import sqlite3
 import sys
 import tempfile
 import time
@@ -43,6 +44,7 @@ from voxtype.core.compute_budget import ComputeBudget, DecodingPreset
 from voxtype.core.controller import ApplicationController
 from voxtype.core.models import ModelProfile
 from voxtype.monitoring.logging import configure_logging
+from voxtype.sessions.backup import BackupManager
 from voxtype.sessions.repository import SessionRepository
 from voxtype.sessions.retention import cleanup_retention
 from voxtype.settings.repository import SettingsRepository
@@ -198,6 +200,7 @@ class RuntimeBundle:
     log_path: Path
     selected_model_installed: bool
     engine_slot: WhisperEngineSlot | None = None
+    restore_status: str = ""
 
     def backend_for(self, profile: ASRProfile | str) -> FasterWhisperBackend:
         selected = asr_profile(domain_profile(profile))
@@ -283,11 +286,19 @@ def build_runtime(*, verbose: bool = False) -> RuntimeBundle:
     )
     settings = settings_repository.load()
     stage("settings_loaded")
-    session_repository = (
-        SessionRepository(data_directory / "sessions.sqlite3")
-        if isolated_profile
-        else SessionRepository()
-    )
+    database_path = data_directory / "sessions.sqlite3"
+    backups = BackupManager(database_path, data_directory / "backups")
+    restore_status = ""
+    try:
+        if backups.apply_pending_restore():
+            restore_status = "restored"
+            logging.getLogger(__name__).info("confirmed_database_restore_applied")
+    except (OSError, ValueError, sqlite3.Error) as exc:
+        restore_status = "failed"
+        logging.getLogger(__name__).warning("database_restore_failed kind=%s", type(exc).__name__)
+        if not database_path.exists():
+            raise
+    session_repository = SessionRepository(database_path)
     stage("session_repository_open")
     cleanup_retention(
         session_repository,
@@ -399,6 +410,7 @@ def build_runtime(*, verbose: bool = False) -> RuntimeBundle:
         log_path,
         installed,
         engine_slot,
+        restore_status,
     )
     controller.profile_backend_factory = bundle.backend_for_model
     return bundle
