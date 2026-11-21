@@ -6,7 +6,7 @@ import ctypes
 import threading
 from collections.abc import Callable, Iterable
 from ctypes import wintypes
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import IntFlag
 from functools import lru_cache
 from typing import Any, Protocol
@@ -277,6 +277,51 @@ class GlobalHotkeyManager:
             for identifier in reversed(newly_registered):
                 self.unregister(identifier)
             raise
+
+    def replace_all(
+        self, hotkeys: Iterable[Hotkey], callbacks: dict[str, HotkeyCallback],
+    ) -> None:
+        """Acquire new combinations before moving callbacks off the old ones."""
+
+        requested = tuple(hotkeys)
+
+        def key(item: Hotkey) -> tuple[int, int]:
+            return int(item.modifiers & ~HotkeyModifiers.NO_REPEAT), item.virtual_key
+
+        if len({key(item) for item in requested}) != len(requested):
+            raise ValueError("Одна комбинация назначена нескольким действиям")
+        with self._lock:
+            existing = {key(item): item for item in self._registered.values()}
+            previous_callbacks = dict(self._callbacks)
+            selected: list[Hotkey] = []
+            acquired: list[int] = []
+            released: list[Hotkey] = []
+            try:
+                for item in requested:
+                    validate_hotkey(item)
+                    old = existing.get(key(item))
+                    identifier = old.identifier if old is not None else next(
+                        number for number in range(0x100, 0xBFFF) if number not in self._registered
+                    )
+                    bound = replace(item, identifier=identifier)
+                    if old is None:
+                        self.register(bound)
+                        acquired.append(identifier)
+                    selected.append(bound)
+                used = {item.identifier for item in selected}
+                for old in existing.values():
+                    if old.identifier not in used:
+                        if not self.unregister(old.identifier):
+                            raise RuntimeError("Не удалось освободить прежнее сочетание")
+                        released.append(old)
+            except (ValueError, OSError, RuntimeError):
+                for identifier in reversed(acquired):
+                    self.unregister(identifier)
+                for old in released:
+                    self.register(old, previous_callbacks.get(old.identifier))
+                raise
+            self._registered.update({item.identifier: item for item in selected})
+            self._callbacks = {item.identifier: callbacks[item.name] for item in selected}
 
     def unregister(self, identifier: int) -> bool:
         with self._lock:

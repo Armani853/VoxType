@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from voxtype.core.feedback import FAILURES, FailureCode
+
 _FAILURES = {
     "session_recovery": (
         "Не удалось восстановить незавершённую диктовку. "
@@ -32,6 +34,8 @@ _FAILURES = {
 
 
 def failure_message(operation: str) -> str:
+    if operation in FailureCode._value2member_map_:
+        return FAILURES[FailureCode(operation)].text()
     try:
         return _FAILURES[operation]
     except KeyError as exc:

@@ -74,6 +74,7 @@ class AudioSegment:
     reason: SegmentReason
     leading_overlap_seconds: float
     speech_seconds: float
+    session_id: int | None = None
 
     def __post_init__(self) -> None:
         audio = mono_float32(self.samples, copy=True)

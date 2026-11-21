@@ -44,6 +44,11 @@ class AudioChunk:
     sample_rate: int = 16_000
     captured_at: float = field(default_factory=time)
     input_overflow: bool = False
+    session_id: int | None = None
+
+    @property
+    def channels(self) -> int:
+        return 1
 
     def __post_init__(self) -> None:
         if self.sequence < 0:

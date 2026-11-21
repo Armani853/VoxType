@@ -294,12 +294,14 @@ class LosslessAudioQueue:
         spill_threshold: float = 0.75,
         max_inflight: int | None = None,
         durable: bool = False,
+        session_id: int | None = None,
     ) -> None:
         if max_ram_chunks <= 0:
             raise ValueError("max_ram_chunks must be positive")
         if not 0.0 < spill_threshold <= 1.0:
             raise ValueError("spill_threshold must be in (0, 1]")
         self.max_ram_chunks = max_ram_chunks
+        self.session_id = session_id
         self.spool = spool
         self._spill_at = max(1, min(max_ram_chunks, int(max_ram_chunks * spill_threshold + 0.999)))
         self._max_inflight = max_inflight or max_ram_chunks

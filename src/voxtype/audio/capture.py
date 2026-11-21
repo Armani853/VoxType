@@ -282,6 +282,7 @@ class AudioCaptureService:
                             self.config.target_sample_rate,
                             block.captured_at,
                             block.input_overflow,
+                            self.output_queue.session_id,
                         )
                         if self._put_with_backpressure(chunk):
                             self._next_sequence += 1
@@ -295,7 +296,8 @@ class AudioCaptureService:
             if tail.size:
                 processed = self.preprocessor.process(tail)
                 chunk = AudioChunk(
-                    self._next_sequence, processed.samples, self.config.target_sample_rate, time()
+                    self._next_sequence, processed.samples, self.config.target_sample_rate, time(),
+                    session_id=self.output_queue.session_id,
                 )
                 if self._put_with_backpressure(chunk):
                     self._next_sequence += 1
