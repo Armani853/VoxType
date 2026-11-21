@@ -124,9 +124,14 @@ class DesktopShell(QWidget):
         self._labels()
 
     def install_page(self, key: str, widget: QWidget) -> None:
+        previous = self.pages.get(key)
         self.pages[key] = widget
         if self.stack.indexOf(widget) == -1:
             self.stack.addWidget(widget)
+        if previous is not None and previous is not widget and previous not in self.pages.values():
+            self.stack.removeWidget(previous)
+            if previous.property("voxtypeUnavailable"):
+                previous.deleteLater()
 
     def show_page(self, key: str) -> None:
         widget = self.pages.get(key)
@@ -142,7 +147,9 @@ class DesktopShell(QWidget):
 
     def unavailable(self, key: str, title: str, detail: str) -> None:
         if key not in self.pages:
-            self.install_page(key, VoxEmptyState(PAGES[key][4], title, detail, self.stack))
+            placeholder = VoxEmptyState(PAGES[key][4], title, detail, self.stack)
+            placeholder.setProperty("voxtypeUnavailable", True)
+            self.install_page(key, placeholder)
         self.show_page(key)
 
     def set_locale(self, locale: str) -> None:

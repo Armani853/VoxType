@@ -549,7 +549,7 @@ class DesktopApplication:
         active = state in {"STARTING", "MODEL_LOADING", "LISTENING", "SPEECH_DETECTED",
                            "TRANSCRIBING", "PAUSED", "PAUSED_TARGET_LOST", "FINISHING"}
         profile_id = active_profile.id if active and active_profile is not None else profiles.default_id
-        if profile_id != self._header_profile_id or snapshot != self._last_rendered_snapshot:
+        if profile_id != self._header_profile_id:
             chosen = active_profile if active and active_profile is not None else next(
                 (profile for profile in profiles.profiles() if profile.id == profile_id), None,
             )
