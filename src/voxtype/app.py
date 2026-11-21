@@ -112,7 +112,7 @@ class _WorkerSignals(QObject):
     hardware_ready = Signal(str, str)
     devices_ready = Signal(object)
     models_ready = Signal(object)
-    shutdown_ready = Signal(bool)
+    shutdown_ready = Signal(object)
 
 
 class _HotkeyEventFilter(QAbstractNativeEventFilter):
@@ -1780,6 +1780,9 @@ class DesktopApplication:
         if self._closing:
             return False
         self._closing = True
+        self.controller.begin_shutdown()
+        if self.main.isVisible():
+            self.main.setWindowTitle("VoxType — завершение работы")
         self.timer.stop()
         self._professional_timer.stop()
         if self._file_queue is not None:
@@ -1788,6 +1791,10 @@ class DesktopApplication:
         self._heartbeat_stop.set()
         self.tray.show_message("VoxType", "Безопасно завершаю работу в фоне")
 
+        self._finish_shutdown_in_background()
+        return False
+
+    def _finish_shutdown_in_background(self) -> None:
         def worker() -> None:
             try:
                 if self._file_queue is not None:
@@ -1795,23 +1802,19 @@ class DesktopApplication:
                 closed = self.runtime.close()
             except Exception:
                 _LOGGER.exception("shutdown_worker_failed")
-                closed = False
+                closed = None
             self.signals.shutdown_ready.emit(closed)
 
         threading.Thread(target=worker, name="voxtype-shutdown", daemon=True).start()
-        return False
 
-    def _on_shutdown_ready(self, closed: bool) -> None:
-        if not closed:
+    def _on_shutdown_ready(self, closed: bool | None) -> None:
+        if closed is False:
+            QTimer.singleShot(1000, self.main, self._finish_shutdown_in_background)
+            return
+        if closed is None:
             self._closing = False
-            self.timer.start()
-            self._heartbeat_stop.clear()
-            self._heartbeat_timer.start()
-            threading.Thread(
-                target=self._heartbeat_monitor, name="voxtype-ui-watchdog", daemon=True
-            ).start()
             self.tray.show_message(
-                "VoxType", "Не удалось завершить работу; подробности в журнале. Повторите выход"
+                "VoxType", "Ошибка завершения. Подробности в журнале, повторите выход"
             )
             return
         self._closed = True

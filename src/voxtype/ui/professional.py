@@ -129,7 +129,10 @@ class ProfessionalWindow(QDialog):
             if ((key == "commands" and not self.controller.policy.allow_voice_commands)
                     or (key == "snippets" and not self.controller.policy.allow_user_snippets)):
                 continue
-            self._add_collection(key, label)
+            page = QWidget(self.tabs)
+            self.collection_pages[key] = page
+            self.tabs.addTab(page, label)
+        self.tabs.currentChanged.connect(self._load_visible_collection)
         self._add_text_editor()
         self._add_workflows()
         self._add_organization()
@@ -736,10 +739,14 @@ class ProfessionalWindow(QDialog):
             return "Добавить файлы", self.transcription_panel.add_button.click
         return None
 
-    def _add_collection(self, key: str, label: str) -> None:
-        page = QWidget(self)
-        self.tabs.addTab(page, label)
-        self.collection_pages[key] = page
+    def _load_visible_collection(self, index: int) -> None:
+        page = self.tabs.widget(index)
+        for key, candidate in self.collection_pages.items():
+            if page is candidate and key not in self.collection_editors:
+                self._build_collection(key, candidate)
+                return
+
+    def _build_collection(self, key: str, page: QWidget) -> None:
         layout = QVBoxLayout(page)
         editor = QPlainTextEdit(page)
         editor.setPlainText(self.controller.professional_content.export_json(key))

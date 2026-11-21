@@ -181,6 +181,8 @@ class ApplicationController:
         self._last_prompt_result_uncertain = False
         self._audio_archive: wave.Wave_write | None = None
         self._shutdown_requested = threading.Event()
+        self._shutdown_complete = False
+        self._delivery_stop_sent = False
         self._start_cancelled = threading.Event()
         self._processing_cancelled = threading.Event()
         self._delivery_busy = False
@@ -1942,23 +1944,24 @@ class ApplicationController:
                     else:
                         self._error_message = "Текст сохранён, но буфер обмена недоступен"
 
-    def shutdown(self) -> bool:
+    def begin_shutdown(self) -> None:
+        """Close the admission gate without waiting for a worker."""
         self._shutdown_requested.set()
+        self._start_cancelled.set()
+        self._file_recognition_cancel.set()
+
+    def shutdown(self) -> bool:
+        self.begin_shutdown()
+        if self._shutdown_complete:
+            return True
+        deadline = time.monotonic() + 2.0
         with self._lock:
             if self._file_recognition_active:
                 self._file_recognition_cancel.set()
                 return False
             if self._recovery_active:
-                self.logger.info("shutdown_deferred recovery_still_running=true")
+                self.logger.debug("shutdown_deferred recovery_still_running=true")
                 return False
-        if self.state in {AppState.STARTING, AppState.MODEL_LOADING}:
-            self._start_cancelled.set()
-        if self.state is AppState.MODEL_LOADING and self._session_id is not None:
-            with self._lock:
-                audio_queue = self._audio_queue
-            if audio_queue is not None:
-                audio_queue.close()
-            self._finalize_session("interrupted")
         if self.state in {
             AppState.LISTENING,
             AppState.SPEECH_DETECTED,
@@ -1973,29 +1976,32 @@ class ApplicationController:
             starter = self._start_thread
             preloader = self._preload_thread
             stopper = self._stop_thread
-        for worker in (starter, preloader):
+            pauser = self._pause_thread
+        for worker in (starter, preloader, pauser):
             if worker is not None and worker is not threading.current_thread():
-                worker.join(timeout=30.0)
+                worker.join(timeout=max(0.0, deadline - time.monotonic()))
                 if worker.is_alive():
                     self.logger.error("shutdown_deferred worker_still_running=%s", worker.name)
                     return False
         if stopper is not None and stopper is not threading.current_thread():
-            stopper.join(timeout=12.0)
+            stopper.join(timeout=max(0.0, deadline - time.monotonic()))
             if stopper.is_alive():
                 self.logger.error("shutdown_deferred worker_still_running=%s", stopper.name)
                 return False
         with self._lock:
             finisher = self._finish_thread
         if finisher is not None and finisher is not threading.current_thread():
-            finisher.join(timeout=30.0)
+            finisher.join(timeout=max(0.0, deadline - time.monotonic()))
             if finisher.is_alive():
                 self.logger.error("shutdown_deferred worker_still_running=%s", finisher.name)
                 return False
         pipeline_alive = False
         with self._lock:
             pipeline_alive = self._pipeline_thread is not None and self._pipeline_thread.is_alive()
+            if self._delivery_busy:
+                return False
             if self._inference_thread is not None:
-                self.logger.info("shutdown_deferred native_inference_still_running=true")
+                self.logger.debug("shutdown_deferred native_inference_still_running=true")
                 return False
         if self.state is not AppState.SHUTTING_DOWN:
             if self.state is AppState.FINISHING:
@@ -2007,13 +2013,14 @@ class ApplicationController:
         if pipeline_alive:
             self.logger.error("shutdown_deferred pipeline_still_running=true")
             return False
-        try:
-            self._delivery_queue.put(None, timeout=1.0)
-        except Full:
-            self.logger.error("shutdown_deferred delivery_queue_full=true")
-            return False
+        if self._delivery_thread.is_alive() and not self._delivery_stop_sent:
+            try:
+                self._delivery_queue.put_nowait(None)
+            except Full:
+                return False
+            self._delivery_stop_sent = True
         if self._delivery_thread is not threading.current_thread():
-            self._delivery_thread.join(timeout=2.0)
+            self._delivery_thread.join(timeout=max(0.0, deadline - time.monotonic()))
         if self._delivery_thread.is_alive():
             self.logger.error("shutdown_deferred delivery_worker_alive=true")
             return False
@@ -2021,6 +2028,7 @@ class ApplicationController:
         if self._file_backend is not None:
             self._file_backend.unload()
             self._file_backend = None
+        self._shutdown_complete = True
         return True
 
     @staticmethod
