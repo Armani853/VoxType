@@ -12,7 +12,11 @@ from threading import Event, Lock, Thread
 from uuid import uuid4
 
 from voxtype.asr.file_transcription import (
-    EXPORT_EXTENSIONS, FileTranscript, TranscriptionCanceled, export_transcript, validate_media,
+    EXPORT_EXTENSIONS,
+    FileTranscript,
+    TranscriptionCanceled,
+    export_transcript,
+    validate_media,
 )
 from voxtype.windows.local_paths import is_local_path
 
@@ -34,7 +38,11 @@ class TranscriptionJob:
 
 class FileTranscriptionQueue:
     def __init__(
-        self, path: Path, controller, *, changed: Callable[[], None] | None = None,
+        self,
+        path: Path,
+        controller,
+        *,
+        changed: Callable[[], None] | None = None,
     ) -> None:
         self.path = path
         self.controller = controller
@@ -61,10 +69,15 @@ class FileTranscriptionQueue:
                 UPDATE transcription_jobs SET status = 'QUEUED', started_at = NULL
                     WHERE status = 'RUNNING';
             """)
-            self.paused = bool(db.execute("SELECT paused FROM transcription_queue_state").fetchone()[0])
-            self._has_pending = db.execute(
-                "SELECT 1 FROM transcription_jobs WHERE status = 'QUEUED' LIMIT 1"
-            ).fetchone() is not None
+            self.paused = bool(
+                db.execute("SELECT paused FROM transcription_queue_state").fetchone()[0]
+            )
+            self._has_pending = (
+                db.execute(
+                    "SELECT 1 FROM transcription_jobs WHERE status = 'QUEUED' LIMIT 1"
+                ).fetchone()
+                is not None
+            )
 
     @contextmanager
     def _connect(self):
@@ -77,7 +90,12 @@ class FileTranscriptionQueue:
             db.close()
 
     def enqueue(
-        self, source: Path, destination: Path | None, language: str, profile_id: str, priority: int,
+        self,
+        source: Path,
+        destination: Path | None,
+        language: str,
+        profile_id: str,
+        priority: int,
     ) -> None:
         self._check_policy_paths(source, destination)
         source = validate_media(source)
@@ -92,8 +110,15 @@ class FileTranscriptionQueue:
                 """INSERT INTO transcription_jobs
                     (id, input_path, output_path, language, profile_id, priority, status, created_at)
                     VALUES (?, ?, ?, ?, ?, ?, 'QUEUED', ?)""",
-                (uuid4().hex, str(source), str(destination) if destination else "", language,
-                 profile_id, priority, time.time()),
+                (
+                    uuid4().hex,
+                    str(source),
+                    str(destination) if destination else "",
+                    language,
+                    profile_id,
+                    priority,
+                    time.time(),
+                ),
             )
         self._publish_change(pending=True)
 
@@ -117,14 +142,20 @@ class FileTranscriptionQueue:
             cancel.set()
             return
         with self._connect() as db:
-            db.execute("""UPDATE transcription_jobs SET status = 'CANCELED', finished_at = ?
-                          WHERE id = ? AND status = 'QUEUED'""", (time.time(), job_id))
+            db.execute(
+                """UPDATE transcription_jobs SET status = 'CANCELED', finished_at = ?
+                          WHERE id = ? AND status = 'QUEUED'""",
+                (time.time(), job_id),
+            )
         self._publish_change()
 
     def cancel_pending(self) -> None:
         with self._connect() as db:
-            db.execute("""UPDATE transcription_jobs SET status = 'CANCELED', finished_at = ?
-                          WHERE status = 'QUEUED'""", (time.time(),))
+            db.execute(
+                """UPDATE transcription_jobs SET status = 'CANCELED', finished_at = ?
+                          WHERE status = 'QUEUED'""",
+                (time.time(),),
+            )
         self._publish_change()
 
     def begin_shutdown(self) -> None:
@@ -143,26 +174,34 @@ class FileTranscriptionQueue:
 
     @staticmethod
     def _job(row: sqlite3.Row) -> TranscriptionJob:
-        return TranscriptionJob(**{key: row[key] for key in row.keys() if key != "result"})
+        return TranscriptionJob(**{key: row[key] for key in row.keys() if key != "result"})  # noqa: SIM118 (sqlite3.Row iterates values)
 
     def recent(self) -> tuple[TranscriptionJob, ...]:
         with self._connect() as db:
-            return tuple(self._job(row) for row in db.execute(
-                """SELECT id, input_path, output_path, language, profile_id, priority,
+            return tuple(
+                self._job(row)
+                for row in db.execute(
+                    """SELECT id, input_path, output_path, language, profile_id, priority,
                           status, created_at, started_at, finished_at, error FROM transcription_jobs
                    ORDER BY CASE status WHEN 'RUNNING' THEN 0 WHEN 'QUEUED' THEN 1 ELSE 2 END,
                             priority DESC, created_at DESC LIMIT 100"""
-            ))
+                )
+            )
 
     def get_result(self, job_id: str) -> FileTranscript | None:
         with self._connect() as db:
-            row = db.execute("SELECT result FROM transcription_jobs WHERE id = ?", (job_id,)).fetchone()
+            row = db.execute(
+                "SELECT result FROM transcription_jobs WHERE id = ?", (job_id,)
+            ).fetchone()
         return FileTranscript.from_json(row["result"]) if row and row["result"] else None
 
     def save_result(self, job_id: str, transcript: FileTranscript) -> None:
         with self._connect() as db:
-            db.execute("""UPDATE transcription_jobs SET result = ?
-                          WHERE id = ? AND result IS NOT NULL""", (transcript.json(), job_id))
+            db.execute(
+                """UPDATE transcription_jobs SET result = ?
+                          WHERE id = ? AND result IS NOT NULL""",
+                (transcript.json(), job_id),
+            )
 
     def _publish_change(self, *, pending: bool = False) -> None:
         with self._revision_lock:
@@ -183,8 +222,9 @@ class FileTranscriptionQueue:
         if cancel is None:
             return
         self._cancel = cancel
-        self._worker = Thread(target=self._claim_and_run, args=(cancel,),
-                              name="voxtype-file-asr", daemon=True)
+        self._worker = Thread(
+            target=self._claim_and_run, args=(cancel,), name="voxtype-file-asr", daemon=True
+        )
         try:
             self._worker.start()
         except BaseException:
@@ -205,8 +245,10 @@ class FileTranscriptionQueue:
                                     ORDER BY priority DESC, created_at, rowid LIMIT 1""").fetchone()
                 if row is not None:
                     job = self._job(row)
-                    db.execute("UPDATE transcription_jobs SET status = 'RUNNING', started_at = ? WHERE id = ?",
-                               (time.time(), job.id))
+                    db.execute(
+                        "UPDATE transcription_jobs SET status = 'RUNNING', started_at = ? WHERE id = ?",
+                        (time.time(), job.id),
+                    )
             if row is None:
                 with self._revision_lock:
                     if self.revision == revision:
@@ -229,18 +271,29 @@ class FileTranscriptionQueue:
         error = ""
         try:
             try:
-                self._check_policy_paths(Path(job.input_path), Path(job.output_path) if job.output_path else None)
+                self._check_policy_paths(
+                    Path(job.input_path), Path(job.output_path) if job.output_path else None
+                )
                 transcript = self.controller.transcribe_professional_file(
-                    Path(job.input_path), job.profile_id, job.language, job.id,
+                    Path(job.input_path),
+                    job.profile_id,
+                    job.language,
+                    job.id,
                 )
                 if cancel.is_set():
                     raise TranscriptionCanceled()
                 result = transcript.json()
                 self.controller.journal_file_result(
-                    job.id, job.profile_id, transcript.language, transcript.duration, transcript.text,
+                    job.id,
+                    job.profile_id,
+                    transcript.language,
+                    transcript.duration,
+                    transcript.text,
                 )
                 if job.output_path:
-                    export_transcript(transcript, Path(job.output_path), source=Path(job.input_path))
+                    export_transcript(
+                        transcript, Path(job.output_path), source=Path(job.input_path)
+                    )
                 workflow = getattr(self.controller, "workflows", None)
                 if workflow is not None:
                     workflow.dispatch("file", job.profile_id, transcript.text)

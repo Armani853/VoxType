@@ -52,9 +52,7 @@ class ComputeBudget:
     vad_inter_threads: int = 1
 
     @classmethod
-    def from_settings(
-        cls, power_mode: str, requested_threads: int = 0
-    ) -> ComputeBudget:
+    def from_settings(cls, power_mode: str, requested_threads: int = 0) -> ComputeBudget:
         profile = PerformanceProfile.resolve(power_mode)
         default_threads = {
             PerformanceProfile.ECO: 2,
@@ -62,4 +60,6 @@ class ComputeBudget:
             PerformanceProfile.PERFORMANCE: 6,
         }[profile]
         logical_threads = os.cpu_count() or 2
-        return cls(min(logical_threads, requested_threads if requested_threads > 0 else default_threads))
+        return cls(
+            min(logical_threads, requested_threads if requested_threads > 0 else default_threads)
+        )

@@ -12,8 +12,9 @@ from threading import Event
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from voxtype.asr.base import ASRBackend, LanguageCode
     from collections.abc import Callable
+
+    from voxtype.asr.base import ASRBackend, LanguageCode
 
 MEDIA_EXTENSIONS = {".wav", ".mp3", ".m4a", ".flac"}
 EXPORT_EXTENSIONS = {".txt", ".json", ".srt", ".vtt", ".docx"}
@@ -45,16 +46,20 @@ class FileTranscript:
         return "\n".join(segment.text for segment in self.segments)
 
     def json(self) -> str:
-        return json.dumps({"schema_version": 1, **asdict(self), "text": self.text},
-                          ensure_ascii=False, indent=2)
+        return json.dumps(
+            {"schema_version": 1, **asdict(self), "text": self.text}, ensure_ascii=False, indent=2
+        )
 
     @classmethod
     def from_json(cls, text: str) -> FileTranscript:
         data = json.loads(text)
         if data["schema_version"] != 1:
             raise ValueError("Неподдерживаемая версия транскрипта")
-        return cls(data["language"], data["duration"],
-                   tuple(FileSegment(**item) for item in data["segments"]))
+        return cls(
+            data["language"],
+            data["duration"],
+            tuple(FileSegment(**item) for item in data["segments"]),
+        )
 
 
 def validate_media(source: Path) -> Path:
@@ -68,8 +73,14 @@ def validate_media(source: Path) -> Path:
 
 class FileTranscriptionService:
     def transcribe(
-        self, source: Path, backend: ASRBackend, language: LanguageCode,
-        cancel: Event, *, initial_prompt: str = "", hotwords: tuple[str, ...] = (),
+        self,
+        source: Path,
+        backend: ASRBackend,
+        language: LanguageCode,
+        cancel: Event,
+        *,
+        initial_prompt: str = "",
+        hotwords: tuple[str, ...] = (),
         transform: Callable[[str], str] = lambda text: text,
     ) -> FileTranscript:
         import av
@@ -92,10 +103,15 @@ class FileTranscriptionService:
             check_cancel()
             if offset + samples.size > SAMPLE_RATE * MAX_AUDIO_SECONDS:
                 raise ValueError("Длительность аудио превышает 8 часов")
-            result = backend.transcribe(TranscriptionRequest(
-                samples, language=language, start_offset_seconds=offset / SAMPLE_RATE,
-                initial_prompt=initial_prompt, hotwords=hotwords,
-            ))
+            result = backend.transcribe(
+                TranscriptionRequest(
+                    samples,
+                    language=language,
+                    start_offset_seconds=offset / SAMPLE_RATE,
+                    initial_prompt=initial_prompt,
+                    hotwords=hotwords,
+                )
+            )
             check_cancel()
             for segment in result.segments:
                 caption = transform(segment.text).strip()
@@ -110,7 +126,7 @@ class FileTranscriptionService:
                 samples = frame.to_ndarray().reshape(-1)
                 while samples.size:
                     count = min(samples.size, block.size - fill)
-                    block[fill:fill + count] = samples[:count]
+                    block[fill : fill + count] = samples[:count]
                     fill += count
                     samples = samples[count:]
                     if fill == block.size:
@@ -142,7 +158,10 @@ def _subtitle_time(seconds: float, separator: str) -> str:
 
 
 def export_transcript(
-    transcript: FileTranscript, destination: Path, *, source: Path | None = None,
+    transcript: FileTranscript,
+    destination: Path,
+    *,
+    source: Path | None = None,
     overwrite: bool = False,
 ) -> None:
     destination = destination.resolve()

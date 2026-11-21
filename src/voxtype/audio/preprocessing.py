@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
+from typing import Protocol
 
 import numpy as np
 import numpy.typing as npt
+
+from voxtype.core.models import AudioProcessingMode
 
 from .levels import AudioLevels, LevelAnalyzer
 from .models import FloatAudio, mono_float32
@@ -69,16 +72,54 @@ class PreprocessedAudio:
     applied_gain_db: float
 
 
+class NoiseSuppressionBackend(Protocol):
+    supported_sample_rates: tuple[int, ...]
+    frame_length: int
+    latency: float
+    required_native_dependencies: tuple[str, ...]
+
+    def process(self, pcm: FloatAudio, sample_rate: int) -> FloatAudio: ...
+
+
+def select_preprocessing(
+    mode: AudioProcessingMode,
+    legacy: PreprocessingProfile,
+    *,
+    normalize: bool,
+    noise_gate: bool,
+) -> PreprocessorSettings:
+    if mode == AudioProcessingMode.OFF:
+        return PreprocessorSettings.for_profile(PreprocessingProfile.RAW)
+    if mode in {AudioProcessingMode.BASIC, AudioProcessingMode.ENHANCED}:
+        return PreprocessorSettings(high_pass_hz=45.0, normalization_enabled=False)
+    return replace(
+        PreprocessorSettings.for_profile(legacy),
+        normalization_enabled=normalize,
+        noise_suppression_enabled=noise_gate,
+    )
+
+
 class AudioPreprocessor:
     """Improve audibility while refusing to amplify learned room tone."""
 
     def __init__(
-        self, sample_rate: int = 16_000, settings: PreprocessorSettings | None = None
+        self,
+        sample_rate: int = 16_000,
+        settings: PreprocessorSettings | None = None,
+        *,
+        denoiser: NoiseSuppressionBackend | None = None,
     ) -> None:
         if sample_rate <= 0:
             raise ValueError("sample_rate must be positive")
         self.sample_rate = sample_rate
         self.settings = settings or PreprocessorSettings()
+        self._denoiser = (
+            denoiser
+            if denoiser is not None
+            and sample_rate in denoiser.supported_sample_rates
+            and denoiser.frame_length > 0
+            else None
+        )
         self.input_analyzer = LevelAnalyzer()
         self.output_analyzer = LevelAnalyzer()
         self._previous_x = 0.0
@@ -97,6 +138,14 @@ class AudioPreprocessor:
             if self.settings.remove_dc or self.settings.high_pass_hz
             else audio
         )
+        if self._denoiser is not None and processed.size == self._denoiser.frame_length:
+            try:
+                cleaned = self._denoiser.process(processed.copy(), self.sample_rate)
+                if cleaned.shape != processed.shape or not np.isfinite(cleaned).all():
+                    raise ValueError("Denoiser returned invalid audio")
+                processed = mono_float32(cleaned)
+            except (OSError, RuntimeError, ValueError, TypeError):
+                self._denoiser = None
         if self.settings.noise_suppression_enabled:
             processed = self._soft_noise_gate(processed, input_levels.rms)
         gain = self._normalization_gain(input_levels.rms)

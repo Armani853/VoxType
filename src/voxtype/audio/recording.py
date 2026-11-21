@@ -10,6 +10,8 @@ from typing import Any
 import numpy as np
 
 from voxtype.audio.devices import InputDevice, _sounddevice, choose_capture_channels
+from voxtype.audio.models import AudioInputObservation
+from voxtype.audio.quality import AudioQualityMonitor
 
 
 def record_input(
@@ -18,6 +20,8 @@ def record_input(
     sample_rate: int,
     *,
     progress: Callable[[float], None] | None = None,
+    cancel: Event | None = None,
+    observe_levels: Callable[[AudioInputObservation], None] | None = None,
 ) -> np.ndarray[Any, np.dtype[np.float32]]:
     """Record mono PCM; the PortAudio callback only copies into a fixed buffer.
 
@@ -58,6 +62,8 @@ def record_input(
         callback=callback,
     ):
         while not completed.is_set():
+            if cancel is not None and cancel.is_set():
+                raise InterruptedError("Microphone check canceled")
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise TimeoutError("microphone delivered no complete recording")
@@ -66,4 +72,6 @@ def record_input(
                 progress(min(offset / sample_rate, seconds))
     if overflowed:
         raise RuntimeError("PortAudio reported an input overflow during microphone test")
+    if observe_levels is not None:
+        observe_levels(AudioQualityMonitor.measure(samples, sample_rate))
     return np.mean(samples, axis=1, dtype=np.float32) if channels == 2 else samples[:, 0].copy()

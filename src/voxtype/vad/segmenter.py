@@ -140,6 +140,8 @@ class StreamingSegmenter:
         self._pending_start = 0
         self._stream_end = 0
         self.speech_samples = 0
+        self.confirmed_speech_samples = 0
+        self._latest_speech_sample: int | None = None
         self._history: deque[_Frame] = deque()
         self._active: deque[_Frame] = deque()
         self._active_start: int | None = None
@@ -152,6 +154,18 @@ class StreamingSegmenter:
         self._leading_overlap = 0
         self._new_content_boundary: int | None = None
         self._segment_sequence = 0
+
+    @property
+    def analyzed_samples(self) -> int:
+        return self._pending_start
+
+    @property
+    def trailing_silence_samples(self) -> int:
+        return (
+            0
+            if self._latest_speech_sample is None
+            else max(0, self._pending_start - self._latest_speech_sample)
+        )
 
     @property
     def active(self) -> bool:
@@ -199,6 +213,8 @@ class StreamingSegmenter:
                     self._speech_run_samples = 0
                 self._speech_run_samples += int(samples.size)
                 if self._speech_run_samples >= self._minimum_speech:
+                    self.confirmed_speech_samples += self._speech_run_samples
+                    self._latest_speech_sample = frame.end
                     self._activate()
             else:
                 self._speech_run_start = None
@@ -207,6 +223,8 @@ class StreamingSegmenter:
 
         self._active.append(frame)
         if is_speech:
+            self.confirmed_speech_samples += samples.size
+            self._latest_speech_sample = frame.end
             self._last_speech_end = frame.end
             self._silence_samples = 0
             self._pause_recorded = False
@@ -394,6 +412,8 @@ class StreamingSegmenter:
         self._pending_start = 0
         self._stream_end = 0
         self.speech_samples = 0
+        self.confirmed_speech_samples = 0
+        self._latest_speech_sample = None
         self._history.clear()
         self._clear_active_state()
         self._speech_run_start = None

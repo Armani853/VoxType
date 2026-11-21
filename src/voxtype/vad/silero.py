@@ -33,9 +33,7 @@ def _load_onnx_session(path: Path, modified_ns: int, size: int) -> Any:
     options.intra_op_num_threads = budget.vad_intra_threads
     options.inter_op_num_threads = budget.vad_inter_threads
     options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
-    return ort.InferenceSession(
-        str(path), sess_options=options, providers=["CPUExecutionProvider"]
-    )
+    return ort.InferenceSession(str(path), sess_options=options, providers=["CPUExecutionProvider"])
 
 
 class SileroVAD:

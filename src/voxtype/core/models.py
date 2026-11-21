@@ -5,7 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from voxtype.asr.base import TranscriptionSegment
+    from voxtype.asr.live import LiveTranscript, SpeechSegment
+    from voxtype.audio.quality import AudioQualitySnapshot
 
 
 class Language(StrEnum):
@@ -32,6 +37,13 @@ class InjectionMode(StrEnum):
     CLIPBOARD_PASTE = "clipboard_paste"
     UNICODE_INPUT = "unicode_input"
     SAFE_CLIPBOARD = "safe_clipboard"
+
+
+class AudioProcessingMode(StrEnum):
+    LEGACY = "legacy"
+    OFF = "off"
+    BASIC = "basic"
+    ENHANCED = "enhanced"
 
 
 class PreprocessingProfile(StrEnum):
@@ -122,6 +134,7 @@ class AppReadiness:
     can_record: bool
     can_cancel: bool
     session_id: int | None = None
+    can_retry: bool = False
 
 
 class AppPhase(StrEnum):
@@ -135,6 +148,25 @@ class AppPhase(StrEnum):
     INSERTING = "inserting"
     ERROR = "error"
     SHUTTING_DOWN = "shutting_down"
+
+
+class RecognitionStatus(StrEnum):
+    COMPLETED = "completed"
+    EMPTY = "empty"
+    FAILED = "failed"
+    CANCELED = "canceled"
+
+
+@dataclass(frozen=True, slots=True)
+class RecognitionResult:
+    session_id: int
+    text: str = field(repr=False)
+    raw_text: str = field(repr=False)
+    language: Language
+    segments: tuple[TranscriptionSegment, ...] = field(repr=False)
+    status: RecognitionStatus
+    error_code: str = ""
+    profile_id: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -157,3 +189,9 @@ class ControllerSnapshot:
     full_transcript: str = ""
     delivery_status: str = "pending"
     readiness: AppReadiness | None = None
+    recognition_result: RecognitionResult | None = field(default=None, compare=False, repr=False)
+    configured_language: Language | None = None
+    live_transcript: LiveTranscript | None = None
+    live_final: SpeechSegment | None = None
+    audio_quality: AudioQualitySnapshot | None = None
+    pending_insertion: bool = False

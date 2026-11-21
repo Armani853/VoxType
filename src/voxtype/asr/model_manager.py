@@ -13,8 +13,9 @@ import zipfile
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from enum import StrEnum
 from pathlib import Path
-from threading import RLock
+from threading import Event, RLock
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
@@ -26,8 +27,20 @@ _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _MARKER = ".voxtype-model.json"
 
 
+class ModelIntegrityState(StrEnum):
+    MISSING = "missing"
+    INCOMPLETE = "incomplete"
+    CORRUPTED = "corrupted"
+    INCOMPATIBLE = "incompatible"
+    READY = "ready"
+
+
 class ModelManagerError(RuntimeError):
     """A model install, integrity check, or lifecycle action failed."""
+
+
+class ModelInstallCancelled(ModelManagerError):
+    """Installation was cancelled before the model was published."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,6 +107,8 @@ class ModelManager:
         self.models_directory = Path(models_directory).resolve()
         self.models_directory.mkdir(parents=True, exist_ok=True)
         self._lock = RLock()
+        self._inventory_signature: tuple[tuple[str, int, int], ...] = ()
+        self._inventory: tuple[InstalledModel, ...] | None = None
         self._remove_stale_temporary_entries()
 
     def _remove_stale_temporary_entries(self, *, minimum_age_seconds: float = 86_400.0) -> None:
@@ -115,9 +130,49 @@ class ModelManager:
         return path
 
     def is_installed(self, model_id: str, *, verify: bool = False) -> bool:
+        return self.integrity_state(model_id, verify=verify) is ModelIntegrityState.READY
+
+    def integrity_state(self, model_id: str, *, verify: bool = False) -> ModelIntegrityState:
         path = self.path_for(model_id)
-        installed = path.is_dir() and (path / _MARKER).is_file()
-        return installed and (not verify or self.verify(model_id))
+        if not path.is_dir():
+            return ModelIntegrityState.MISSING
+        marker_path = path / _MARKER
+        if not marker_path.is_file():
+            return ModelIntegrityState.INCOMPLETE
+        try:
+            with marker_path.open("rb") as stream:
+                raw = stream.read(1_048_577)
+            if len(raw) > 1_048_576:
+                return ModelIntegrityState.CORRUPTED
+            marker = json.loads(raw)
+            if not isinstance(marker, dict) or marker.get("model_id") != model_id:
+                return ModelIntegrityState.CORRUPTED
+            if marker.get("schema") != 1:
+                return ModelIntegrityState.INCOMPATIBLE
+            files = marker.get("files")
+            if not isinstance(files, dict):
+                return ModelIntegrityState.CORRUPTED
+            required = next(
+                (
+                    spec.required_files
+                    for spec in DEFAULT_MODEL_SPECS.values()
+                    if spec.model_id == model_id
+                ),
+                ("config.json", "model.bin"),
+            )
+            for name in required:
+                candidate = (path / name).resolve()
+                if path not in candidate.parents or not candidate.is_file():
+                    return ModelIntegrityState.INCOMPLETE
+                entry = files.get(name)
+                size = candidate.stat().st_size
+                if not isinstance(entry, dict) or not size or entry.get("size") != size:
+                    return ModelIntegrityState.CORRUPTED
+            if verify and not self.verify(model_id):
+                return ModelIntegrityState.CORRUPTED
+        except (OSError, ValueError, TypeError, RecursionError):
+            return ModelIntegrityState.CORRUPTED
+        return ModelIntegrityState.READY
 
     def matches_spec(self, spec: ModelSpec) -> bool:
         marker_path = self.path_for(spec.model_id) / _MARKER
@@ -143,11 +198,23 @@ class ModelManager:
                 f"Недостаточно места для модели {spec.model_id}: нужно {required} байт, доступно {available}."
             )
 
-    def install(self, spec: ModelSpec, *, progress: ProgressCallback | None = None) -> Path:
+    def install(
+        self,
+        spec: ModelSpec,
+        *,
+        progress: ProgressCallback | None = None,
+        cancel: Event | None = None,
+    ) -> Path:
         """Download to staging, verify, then publish with one directory rename."""
 
-        callback = progress or (lambda downloaded, total: None)
+        def callback(downloaded: int, total: int | None) -> None:
+            if cancel is not None and cancel.is_set():
+                raise ModelInstallCancelled("Загрузка отменена")
+            if progress is not None:
+                progress(downloaded, total)
+
         with self._lock:
+            callback(0, spec.expected_size_bytes)
             destination = self.path_for(spec.model_id)
             if self.is_installed(spec.model_id, verify=True) and self.matches_spec(spec):
                 callback(self._directory_size(destination), self._directory_size(destination))
@@ -173,11 +240,15 @@ class ModelManager:
                         shutil.rmtree(staging)
                         staging = flattened
                 elif spec.repository_id is not None:
-                    self._download_snapshot(spec, staging, callback)
+                    if cancel is None:
+                        self._download_snapshot(spec, staging, callback)
+                    else:
+                        self._download_snapshot_http(spec, staging, callback)
                 else:
                     raise ModelManagerError("Для загрузки не указан источник модели.")
                 self._check_required_files(staging, spec.required_files)
                 self._write_marker(staging, spec)
+                callback(self._directory_size(staging), spec.expected_size_bytes)
                 staging.replace(destination)
             except Exception as exc:
                 if staging.exists():
@@ -187,7 +258,9 @@ class ModelManager:
                 raise ModelManagerError(f"Не удалось установить модель {spec.model_id}.") from exc
             finally:
                 archive.unlink(missing_ok=True)
-            callback(self._directory_size(destination), self._directory_size(destination))
+            if progress is not None:
+                size = self._directory_size(destination)
+                progress(size, size)
             return destination
 
     def _download_snapshot(
@@ -400,7 +473,11 @@ class ModelManager:
         marker_path = path / _MARKER
         try:
             marker = json.loads(marker_path.read_text(encoding="utf-8"))
-            if marker.get("schema") != 1 or marker.get("model_id") != model_id:
+            if (
+                not isinstance(marker, dict)
+                or marker.get("schema") != 1
+                or marker.get("model_id") != model_id
+            ):
                 return False
             files = marker.get("files")
             if not isinstance(files, dict) or not files:
@@ -422,16 +499,42 @@ class ModelManager:
         return True
 
     def list_installed(self, *, verify: bool = False) -> tuple[InstalledModel, ...]:
+        with self._lock:
+            markers = []
+            for directory in sorted(self.models_directory.iterdir()):
+                if directory.name.startswith("."):
+                    continue
+                try:
+                    marker = (directory / _MARKER).stat()
+                except OSError:
+                    continue
+                markers.append((directory.name, marker.st_mtime_ns, marker.st_size))
+            signature = tuple(markers)
+            if (
+                not verify
+                and self._inventory is not None
+                and signature == self._inventory_signature
+            ):
+                return self._inventory
+            result = self._scan_installed((item[0] for item in signature), verify=verify)
+            if not verify:
+                self._inventory_signature, self._inventory = signature, result
+            return result
+
+    def _scan_installed(
+        self, model_ids: Iterable[str], *, verify: bool
+    ) -> tuple[InstalledModel, ...]:
         installed: list[InstalledModel] = []
-        for directory in sorted(
-            item
-            for item in self.models_directory.iterdir()
-            if item.is_dir() and not item.name.startswith(".")
-        ):
+        for identifier in model_ids:
+            directory = self.models_directory / identifier
             marker_path = directory / _MARKER
             try:
                 marker = json.loads(marker_path.read_text(encoding="utf-8"))
-            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                if not isinstance(marker, dict) or marker.get("model_id") != identifier:
+                    continue
+                if self.integrity_state(identifier) is not ModelIntegrityState.READY:
+                    continue
+            except (OSError, ValueError, TypeError, ModelManagerError):
                 continue
             valid = self.verify(directory.name) if verify else False
             installed.append(

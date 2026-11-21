@@ -15,7 +15,7 @@ from typing import Literal
 
 import numpy as np
 
-from .models import AudioChunk, AudioQueueStats
+from .models import AudioChunk, AudioInputObservation, AudioQueueStats
 
 
 class SpoolError(RuntimeError):
@@ -48,6 +48,7 @@ class _SpoolEntry:
     bytes_on_disk: int
     session_id: int | None = None
     sample_offset: int | None = None
+    input_quality: AudioInputObservation | None = None
 
     @property
     def duration_seconds(self) -> float:
@@ -168,8 +169,14 @@ class DiskSpool:
                     _ = temp_path
                 raise SpoolError(f"cannot persist PCM chunk {chunk.sequence}") from exc
             entry = _SpoolEntry(
-                chunk.sequence, final_path, chunk.sample_rate, chunk.frames, record_size,
-                chunk.session_id, chunk.sample_offset,
+                chunk.sequence,
+                final_path,
+                chunk.sample_rate,
+                chunk.frames,
+                record_size,
+                chunk.session_id,
+                chunk.sample_offset,
+                chunk.input_quality,
             )
             out_of_order = bool(self._entries) and chunk.sequence < next(reversed(self._entries))
             self._entries[chunk.sequence] = entry
@@ -203,8 +210,14 @@ class DiskSpool:
             raise SpoolCorruptionError(f"PCM checksum mismatch: {entry.path.name}")
         samples = np.frombuffer(payload, dtype="<f4")
         return AudioChunk(
-            sequence, samples, sample_rate, captured_at, bool(flags & 1),
-            entry.session_id, entry.sample_offset,
+            sequence,
+            samples,
+            sample_rate,
+            captured_at,
+            bool(flags & 1),
+            entry.session_id,
+            entry.sample_offset,
+            entry.input_quality,
         )
 
     def ack(self, sequence: int) -> None:
@@ -353,8 +366,12 @@ class LosslessAudioQueue:
             if chunk.sequence <= self._last_sequence:
                 raise ValueError("audio chunk sequences must be strictly increasing")
             spool = self.spool
-            if spool is not None and (self._durable or self._spilling or spool.count > 0
-                                      or len(self._ram) >= self._spill_at):
+            if spool is not None and (
+                self._durable
+                or self._spilling
+                or spool.count > 0
+                or len(self._ram) >= self._spill_at
+            ):
                 self._spilling = True
                 # Once backlog reaches disk, persist the older RAM prefix first.
                 # A process crash can then recover a contiguous FIFO, rather than
@@ -370,7 +387,9 @@ class LosslessAudioQueue:
                 self._ram.append(chunk)
                 destination = "memory"
             self._last_sequence = chunk.sequence
-            offset = self._next_sample_offset if chunk.sample_offset is None else chunk.sample_offset
+            offset = (
+                self._next_sample_offset if chunk.sample_offset is None else chunk.sample_offset
+            )
             self._next_sample_offset = max(self._next_sample_offset, offset + chunk.frames)
             self._queued_seconds += chunk.duration_seconds
             depth = len(self._ram) + (spool.count if spool else 0) + len(self._inflight)
@@ -422,8 +441,10 @@ class LosslessAudioQueue:
             duration = lease.chunk.duration_seconds
             self._queued_seconds = max(0.0, self._queued_seconds - duration)
             self._processed_seconds += duration
-            if self.spool is not None and self.spool.count == 0 and not any(
-                item.source == "disk" for item in self._inflight.values()
+            if (
+                self.spool is not None
+                and self.spool.count == 0
+                and not any(item.source == "disk" for item in self._inflight.values())
             ):
                 self._spilling = False
             self._condition.notify_all()

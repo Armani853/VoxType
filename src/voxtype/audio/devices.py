@@ -20,6 +20,32 @@ class InputDevice:
     supported_sample_rates: tuple[int, ...]
     is_default: bool
 
+    @property
+    def fingerprint(self) -> str:
+        # PortAudio exposes a transient index. Match a saved choice only when
+        # its public hardware characteristics identify one candidate.
+        return "|".join(
+            (
+                self.host_api.casefold(),
+                self.name.casefold(),
+                str(self.max_input_channels),
+                str(self.default_sample_rate),
+            )
+        )
+
+
+def match_input_device(
+    devices: tuple[InputDevice, ...],
+    index: int | None,
+    fingerprint: str = "",
+) -> InputDevice | None:
+    if index is None:
+        return next((device for device in devices if device.is_default), None)
+    if fingerprint:
+        matches = [device for device in devices if device.fingerprint == fingerprint]
+        return matches[0] if len(matches) == 1 else None
+    return next((device for device in devices if device.index == index), None)
+
 
 def _sounddevice() -> Any:
     try:
@@ -96,7 +122,9 @@ def choose_capture_rate(device: InputDevice, target_rate: int = 16_000) -> int:
 
 
 def resolve_recording_device(
-    selected_index: int | None, known_devices: tuple[InputDevice, ...]
+    selected_index: int | None,
+    known_devices: tuple[InputDevice, ...],
+    fingerprint: str = "",
 ) -> InputDevice:
     """Resolve the stream device before choosing its native rate and channel count."""
     if selected_index is None:
@@ -105,9 +133,9 @@ def resolve_recording_device(
             if device.is_default:
                 return device
         raise AudioBackendUnavailable("Windows не назначила устройство записи по умолчанию.")
-    for device in known_devices:
-        if device.index == selected_index:
-            return device
+    selected = match_input_device(known_devices, selected_index, fingerprint)
+    if selected is not None:
+        return selected
     raise AudioBackendUnavailable(f"Выбранное устройство записи недоступно ({selected_index}).")
 
 

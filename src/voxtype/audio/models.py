@@ -40,6 +40,14 @@ def mono_float32(samples: npt.ArrayLike, *, copy: bool = False) -> FloatAudio:
 
 
 @dataclass(frozen=True, slots=True)
+class AudioInputObservation:
+    rms: float
+    peak: float
+    clipping_ratio: float
+    sample_rate: int
+
+
+@dataclass(frozen=True, slots=True)
 class AudioChunk:
     """A monotonically sequenced block captured from one input stream."""
 
@@ -50,6 +58,7 @@ class AudioChunk:
     input_overflow: bool = False
     session_id: int | None = None
     sample_offset: int | None = None
+    input_quality: AudioInputObservation | None = None
 
     @property
     def channels(self) -> int:

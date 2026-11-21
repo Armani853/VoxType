@@ -15,7 +15,8 @@ import numpy.typing as npt
 
 from .devices import _sounddevice
 from .models import AudioChunk, AudioQueueStats, FloatAudio
-from .preprocessing import AudioPreprocessor, PreprocessorSettings
+from .preprocessing import AudioPreprocessor, NoiseSuppressionBackend, PreprocessorSettings
+from .quality import AudioQualityMonitor
 from .resampler import StreamingResampler
 from .spool import (
     AudioQueueClosed,
@@ -82,10 +83,14 @@ class AudioPreRollBuffer:
             trim = min(len(oldest.samples), self._frames - self._limit)
             self._frames -= trim
             if trim < len(oldest.samples):
-                self._blocks.appendleft(_CallbackBlock(
-                    oldest.samples[trim:], oldest.captured_at + trim / self._rate,
-                    oldest.input_overflow, pre_roll=True,
-                ))
+                self._blocks.appendleft(
+                    _CallbackBlock(
+                        oldest.samples[trim:],
+                        oldest.captured_at + trim / self._rate,
+                        oldest.input_overflow,
+                        pre_roll=True,
+                    )
+                )
 
     def take(self) -> tuple[_CallbackBlock, ...]:
         blocks = tuple(self._blocks)
@@ -117,11 +122,16 @@ class AudioCaptureService:
         config: AudioCaptureConfig | None = None,
         *,
         preprocessing: PreprocessorSettings | None = None,
+        denoiser: NoiseSuppressionBackend | None = None,
         stream_factory: Callable[..., Any] | None = None,
     ) -> None:
         self.output_queue = output_queue
         self.config = config or AudioCaptureConfig()
-        self.preprocessor = AudioPreprocessor(self.config.target_sample_rate, preprocessing)
+        self.preprocessor = AudioPreprocessor(
+            self.config.target_sample_rate,
+            preprocessing,
+            denoiser=denoiser,
+        )
         self.resampler = StreamingResampler(
             self.config.input_sample_rate, self.config.target_sample_rate
         )
@@ -384,6 +394,7 @@ class AudioCaptureService:
                 block.input_overflow,
                 self.output_queue.session_id,
                 self._sample_offset,
+                AudioQualityMonitor.measure(block.samples, self.config.input_sample_rate),
             )
             self._sample_offset += chunk.frames
             if self._put_with_backpressure(chunk):
@@ -394,7 +405,10 @@ class AudioCaptureService:
         if tail.size:
             processed = self.preprocessor.process(tail)
             chunk = AudioChunk(
-                self._next_sequence, processed.samples, self.config.target_sample_rate, time(),
+                self._next_sequence,
+                processed.samples,
+                self.config.target_sample_rate,
+                time(),
                 session_id=self.output_queue.session_id,
                 sample_offset=self._sample_offset,
             )
@@ -507,9 +521,14 @@ class AudioCaptureService:
             self._running = not stopped
             error = self._fatal_error
             self.finalization = CaptureFinalization(
-                self._accepted_frames, self._consumed_frames, self.output_queue.next_sample_offset,
-                self._dropped_frames, type(error).__name__ if error is not None else None,
-                stopped and error is None and not self._dropped_frames
+                self._accepted_frames,
+                self._consumed_frames,
+                self.output_queue.next_sample_offset,
+                self._dropped_frames,
+                type(error).__name__ if error is not None else None,
+                stopped
+                and error is None
+                and not self._dropped_frames
                 and self._accepted_frames == self._consumed_frames,
             )
         return stopped

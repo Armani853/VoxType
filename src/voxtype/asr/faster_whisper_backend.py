@@ -67,10 +67,14 @@ class FasterWhisperBackend:
         self._slot = engine_slot if engine_slot is not None else WhisperEngineSlot()
         self._lock = self._slot.lock
         self._engine_key = (
-            self.model, self.device,
+            self.model,
+            self.device,
             tuple(self.device_index) if isinstance(self.device_index, list) else self.device_index,
-            self.profile.compute_type, self.profile.cpu_threads, self.download_root,
-            self.allow_download, self._model_factory,
+            self.profile.compute_type,
+            self.profile.cpu_threads,
+            self.download_root,
+            self.allow_download,
+            self._model_factory,
         )
 
     @property
