@@ -14,7 +14,7 @@ from typing import Any
 
 from platformdirs import user_data_path
 
-from voxtype.constants import APP_AUTHOR, APP_NAME
+from voxtype.constants import APP_AUTHOR, APP_NAME, SESSION_SCHEMA_VERSION
 from voxtype.core.models import Language, ModelProfile
 
 
@@ -38,30 +38,66 @@ class SessionRecord:
     source_type: str = "dictation"
 
 
+@dataclass(frozen=True, slots=True)
+class RecoveryRecord:
+    schema_version: int
+    session_id: str
+    created_at_utc: float
+    updated_at_utc: float
+    session_type: str
+    state: str
+    text_snapshot: str
+    source_reference: str
+    recovery_allowed: bool
+
+
+class UnsupportedDatabaseSchema(RuntimeError):
+    """Newer data should be opened with a compatible application version."""
+
+
 class SessionRepository:
     def __init__(self, path: Path | None = None):
         self.path = path or user_data_path(APP_NAME, APP_AUTHOR) / "sessions.sqlite3"
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
         self.last_recovery_backup: Path | None = None
-        self._connection = sqlite3.connect(self.path, timeout=5.0, check_same_thread=False)
-        self._connection.row_factory = sqlite3.Row
+        self._local = threading.local()
+        self._closed = False
         try:
             self._initialize_schema()
         except sqlite3.DatabaseError as exc:
-            self._connection.close()
+            self._close_thread_connection()
             if not _is_database_corruption(exc):
                 raise
             self.last_recovery_backup = self._quarantine_corrupt_database()
-            self._connection = sqlite3.connect(self.path, timeout=5.0, check_same_thread=False)
-            self._connection.row_factory = sqlite3.Row
             self._initialize_schema()
 
+    @property
+    def _connection(self) -> sqlite3.Connection:
+        if self._closed:
+            raise sqlite3.ProgrammingError("session repository is closed")
+        connection = getattr(self._local, "connection", None)
+        if connection is None:
+            connection = sqlite3.connect(self.path, timeout=3.0)
+            connection.row_factory = sqlite3.Row
+            connection.create_function("unicode_casefold", 1, str.casefold, deterministic=True)
+            connection.execute("PRAGMA busy_timeout=3000")
+            connection.execute("PRAGMA synchronous=FULL")
+            self._local.connection = connection
+        return connection
+
+    def _close_thread_connection(self) -> None:
+        connection = getattr(self._local, "connection", None)
+        if connection is not None:
+            connection.close()
+            self._local.connection = None
+
     def _initialize_schema(self) -> None:
-        self._connection.create_function("unicode_casefold", 1, str.casefold, deterministic=True)
+        version = self._connection.execute("PRAGMA user_version").fetchone()[0]
+        if version > SESSION_SCHEMA_VERSION:
+            raise UnsupportedDatabaseSchema(f"Unsupported database schema {version}; expected at most {SESSION_SCHEMA_VERSION}")
+        self._connection.execute("PRAGMA journal_mode=WAL")
         with self._connection:
-            self._connection.execute("PRAGMA journal_mode=WAL")
-            self._connection.execute("PRAGMA synchronous=FULL")
             self._connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS sessions (
@@ -104,6 +140,7 @@ class SessionRepository:
                 );
                 """
             )
+            self._connection.execute("BEGIN IMMEDIATE")
             columns = {row["name"] for row in self._connection.execute("PRAGMA table_info(sessions)")}
             if "profile_id" not in columns:
                 self._connection.execute(
@@ -116,6 +153,16 @@ class SessionRepository:
             self._connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_sessions_profile ON sessions(profile_id, started_at DESC)"
             )
+            if version < 1:
+                if "recovery_allowed" not in columns:
+                    self._connection.execute("ALTER TABLE sessions ADD COLUMN recovery_allowed INTEGER NOT NULL DEFAULT 0")
+                if "updated_at" not in columns:
+                    self._connection.execute("ALTER TABLE sessions ADD COLUMN updated_at REAL")
+                self._connection.execute(
+                    """UPDATE sessions SET recovery_allowed=1 WHERE status='recovery_required'
+                       OR (finished_at IS NULL AND committed_text!='')"""
+                )
+                self._connection.execute("PRAGMA user_version=1")
             self._initialize_search()
 
     def _initialize_search(self) -> None:
@@ -342,6 +389,62 @@ class SessionRepository:
             ).fetchone()
         return self._record(row) if row is not None else None
 
+    def mark_recoverable(self, session_id: str) -> None:
+        with self._lock, self._connection:
+            self._connection.execute(
+                "UPDATE sessions SET recovery_allowed=1, updated_at=? WHERE session_id=?",
+                (time.time(), session_id),
+            )
+
+    def save_draft(self, session_id: str, text: str, *, limit: int = 20) -> None:
+        with self._lock, self._connection:
+            self._connection.execute(
+                """UPDATE sessions SET committed_text=?, source_type='draft', recovery_allowed=1, updated_at=?
+                   WHERE session_id=?""", (text, time.time(), session_id),
+            )
+            self._prune_drafts(limit)
+
+    def save_editor_draft(self, session_id: str, language: str, text: str, touched: float) -> None:
+        if language not in ("ru", "en") or not text.strip():
+            return
+        with self._lock, self._connection:
+            self._connection.execute(
+                """INSERT INTO sessions(session_id, started_at, finished_at, language, model, profile,
+                target_application, source_type, status, committed_text, recovery_allowed, updated_at)
+                VALUES (?, ?, ?, ?, '', '', '', 'draft', 'draft', ?, 1, ?)
+                ON CONFLICT(session_id) DO UPDATE SET committed_text=excluded.committed_text,
+                    finished_at=excluded.finished_at, updated_at=excluded.updated_at
+                WHERE sessions.source_type='draft' AND sessions.updated_at <= excluded.updated_at""",
+                (session_id, touched, touched, language, text, touched),
+            )
+            self._prune_drafts(20)
+
+    def _prune_drafts(self, limit: int) -> None:
+        self._connection.execute(
+            """DELETE FROM session_events WHERE session_id IN (
+               SELECT session_id FROM sessions WHERE source_type='draft' AND finished_at IS NOT NULL
+               ORDER BY updated_at DESC LIMIT -1 OFFSET ?)""", (limit,),
+        )
+        self._connection.execute(
+            """DELETE FROM sessions WHERE session_id IN (
+               SELECT session_id FROM sessions WHERE source_type='draft' AND finished_at IS NOT NULL
+               ORDER BY updated_at DESC LIMIT -1 OFFSET ?)""", (limit,),
+        )
+
+    def recoverable(self, *, include_drafts: bool, limit: int = 100) -> tuple[RecoveryRecord, ...]:
+        with self._lock:
+            rows = self._connection.execute(
+                """SELECT session_id, started_at, COALESCE(updated_at, finished_at, started_at) AS touched,
+                   source_type, status, committed_text FROM sessions
+                   WHERE recovery_allowed=1 AND (source_type!='draft' OR ?)
+                     AND (finished_at IS NULL OR status IN ('interrupted','recovery_required') OR source_type='draft')
+                   ORDER BY touched DESC LIMIT ?""", (include_drafts, max(1, min(100, limit))),
+            ).fetchall()
+        return tuple(RecoveryRecord(
+            1, row["session_id"], row["started_at"], row["touched"], row["source_type"],
+            row["status"], row["committed_text"], row["session_id"], True,
+        ) for row in rows)
+
     def unfinished(self) -> tuple[SessionRecord, ...]:
         with self._lock:
             rows = self._connection.execute(
@@ -359,9 +462,9 @@ class SessionRepository:
     def search(
         self, *, text: str = "", profile: str = "", application: str = "",
         since: float | None = None, until: float | None = None, page: int = 0,
-        language: str = "", status: str = "",
+        language: str = "", status: str = "", include_drafts: bool = False,
     ) -> tuple[tuple[SessionRecord, ...], bool]:
-        clauses: list[str] = []
+        clauses: list[str] = [] if include_drafts else ["source_type != 'draft'"]
         values: list[str | float | int] = []
         text = text.strip()[:256]
         if text and self._fts and any(char.isalnum() for char in text):
@@ -508,9 +611,14 @@ class SessionRepository:
                 self._connection.execute("UPDATE transcription_queue_state SET paused = 0")
         return total
 
+    def close_current_thread(self) -> None:
+        with self._lock:
+            self._close_thread_connection()
+
     def close(self) -> None:
         with self._lock:
-            self._connection.close()
+            self._close_thread_connection()
+            self._closed = True
 
     def __enter__(self) -> SessionRepository:
         return self

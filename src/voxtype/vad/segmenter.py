@@ -139,6 +139,7 @@ class StreamingSegmenter:
         self._pending: FloatAudio = np.empty(0, dtype=np.float32)
         self._pending_start = 0
         self._stream_end = 0
+        self.speech_samples = 0
         self._history: deque[_Frame] = deque()
         self._active: deque[_Frame] = deque()
         self._active_start: int | None = None
@@ -187,6 +188,8 @@ class StreamingSegmenter:
         probability = self.detector.speech_probability(samples, self.sample_rate)
         frame = _Frame(start, samples, probability)
         is_speech = probability >= self.settings.speech_threshold
+        if is_speech:
+            self.speech_samples += samples.size
         if not self.active:
             self._history.append(frame)
             self._trim_history(frame.end)
@@ -390,6 +393,7 @@ class StreamingSegmenter:
         self._pending = np.empty(0, dtype=np.float32)
         self._pending_start = 0
         self._stream_end = 0
+        self.speech_samples = 0
         self._history.clear()
         self._clear_active_state()
         self._speech_run_start = None
