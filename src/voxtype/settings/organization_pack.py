@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
 
 from voxtype.core.profiles import BUILTIN_IDS, ProfileManager
 from voxtype.settings.enterprise import EnterprisePolicy
 from voxtype.settings.repository import SettingsRepository
-from voxtype.transcript.professional import ProfessionalContent
+from voxtype.transcript.professional import DictionaryEntry, ProfessionalContent
 
 MAX_PACK_BYTES = 1_048_576
 _COLLECTIONS = {
@@ -120,7 +120,7 @@ class OrganizationPackService:
                         preview.append(f"Пропуск записи {collection}: ID уже существует")
                         continue
                     indexed.add(identifier)
-                    new.append(item)
+                    new.append(replace(item, origin="organization") if isinstance(item, DictionaryEntry) else item)
                 combined = (*current, *new)
                 self.content.parse(collection, [asdict(item) for item in combined])
                 preview.append(f"{collection}: +{len(new)}")

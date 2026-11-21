@@ -126,6 +126,8 @@ class ProfileManager:
             except (AttributeError, TypeError, ValueError):
                 continue
             self._custom[profile.id] = profile
+        if not any(item.id == self._default_id and item.enabled for item in self.profiles()):
+            self._default_id = "general"
 
     @classmethod
     def decode_profile(cls, raw: object) -> DictationProfile:
@@ -184,6 +186,11 @@ class ProfileManager:
             self._commit(self._custom, profile_id)
 
     def _commit(self, custom: dict[str, DictationProfile], default_id: str) -> None:
+        if not any(
+            item.id == default_id and item.enabled
+            for item in (*BUILTIN_PROFILES, *custom.values())
+        ):
+            default_id = "general"
         self._repository.update(
             {"professional": {
                 "schema_version": 1,

@@ -1109,6 +1109,8 @@ class ProfessionalWindow(QDialog):
         dialog.setWindowTitle({"dictionary": "Словарь", "snippets": "Шаблон AutoText",
                                "replacements": "Правило замены"}[key])
         form = QFormLayout(dialog)
+        if key == "dictionary" and entry.get("origin") == "organization":
+            form.addRow("Источник", QLabel("Локальный пакет организации", dialog))
         widgets = {}
         for field, label in fields:
             value = entry.get(field, "")

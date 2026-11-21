@@ -55,6 +55,7 @@ class DictionaryEntry:
     enabled: bool = True
     executable: str = ""
     vocabulary_id: str = ""
+    origin: str = "personal"
 
 
 @dataclass(frozen=True, slots=True)
@@ -213,7 +214,7 @@ class VocabularyPromptBuilder:
         result = []
         remaining = max(0, min(int(budget), MAX_HINT_CHARACTERS))
         for term in words:
-            value = " ".join(term.split())
+            value = " ".join(unicodedata.normalize("NFC", term).split())
             key = value.casefold()
             cost = len(value) + (2 if result else 0)
             if value and key not in seen and cost <= remaining:
@@ -398,10 +399,19 @@ class TextPipeline:
         self, session_id: int, language: str, model_id: str, profile: DictationProfile,
         context: DictationContext, personal: Iterable[str],
     ) -> RecognitionRequest:
+        entries = sorted(
+            (item for item in self.dictionary if _applies(item, language, profile, context)),
+            key=lambda item: -item.priority,
+        )
         words = VocabularyPromptBuilder.build(
-            (*_PROFILE_TERMS.get(profile.vocabulary_id, ()), *(
-                item.canonical_text for item in self.dictionary if _applies(item, language, profile, context)
-            ), *personal), self.prompt_budget,
+            (
+                *_PROFILE_TERMS.get(profile.vocabulary_id, ()),
+                *(item.canonical_text for item in entries if item.origin == "personal" and not item.executable),
+                *personal,
+                *(item.canonical_text for item in entries if item.origin == "personal" and item.executable),
+                *(item.canonical_text for item in entries if item.origin == "organization"),
+            ),
+            self.prompt_budget,
         )
         return RecognitionRequest(session_id, language, profile.id, model_id, context, words,
                                   ", ".join(words) or None)
@@ -480,7 +490,8 @@ class ProfessionalContent:
                     raise ValueError("Написание термина обязательно")
                 if (item.language not in {"", "ru", "en"}
                         or item.match_mode not in {"word", "case_sensitive", "literal"}
-                        or item.case_policy not in {"canonical", "preserve"}):
+                        or item.case_policy not in {"canonical", "preserve"}
+                        or item.origin not in {"personal", "organization"}):
                     raise ValueError("Неверный язык, сопоставление или регистр словаря")
                 key = (item.canonical_text.casefold(), item.language, item.profile_id, item.executable, item.vocabulary_id)
             else:
@@ -561,6 +572,7 @@ class ProfessionalContent:
                 "enabled": (row.get("enabled") or "true").casefold() not in {"false", "0"},
                 "executable": row.get("executable") or "",
                 "vocabulary_id": row.get("vocabulary_id") or "",
+                "origin": row.get("origin") or "personal",
             })
         return json.dumps({"schema_version": 1, "dictionary": rows}, ensure_ascii=False, indent=2)
 
