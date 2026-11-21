@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import gc
 import zlib
+from inspect import signature
 from pathlib import Path
 from threading import RLock
 from time import perf_counter
@@ -145,6 +146,13 @@ class FasterWhisperBackend:
                 if request.compression_ratio_threshold is not None
                 else self.profile.compression_ratio_threshold,
             }
+            if request.hotwords:
+                try:
+                    supports_hotwords = "hotwords" in signature(engine.transcribe).parameters
+                except (TypeError, ValueError):
+                    supports_hotwords = False
+                if supports_hotwords:
+                    options["hotwords"] = ", ".join(request.hotwords)[:600]
             started = perf_counter()
             try:
                 raw_segments, info = engine.transcribe(request.audio, **options)

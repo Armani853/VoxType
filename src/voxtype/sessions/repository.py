@@ -79,10 +79,14 @@ class SessionRepository:
         connection = getattr(self._local, "connection", None)
         if connection is None:
             connection = sqlite3.connect(self.path, timeout=3.0)
-            connection.row_factory = sqlite3.Row
-            connection.create_function("unicode_casefold", 1, str.casefold, deterministic=True)
-            connection.execute("PRAGMA busy_timeout=3000")
-            connection.execute("PRAGMA synchronous=FULL")
+            try:
+                connection.row_factory = sqlite3.Row
+                connection.create_function("unicode_casefold", 1, str.casefold, deterministic=True)
+                connection.execute("PRAGMA busy_timeout=3000")
+                connection.execute("PRAGMA synchronous=FULL")
+            except BaseException:
+                connection.close()
+                raise
             self._local.connection = connection
         return connection
 

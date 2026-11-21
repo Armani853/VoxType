@@ -141,9 +141,9 @@ if PYSIDE6_AVAILABLE:
             canvas = QWidget(scroll)
             layout = QVBoxLayout(canvas)
             layout.setContentsMargins(
-                SPACING.space_5,
+                SPACING.space_4,
                 SPACING.space_2,
-                SPACING.space_5,
+                SPACING.space_4,
                 SPACING.space_4,
             )
             layout.setSpacing(SPACING.space_3)
@@ -666,7 +666,7 @@ if PYSIDE6_AVAILABLE:
                     bool(_setting(dictation, "auto_insert", default=True))
                 )
                 self.copy_complete_check.setChecked(
-                    bool(_setting(dictation, "copy_full_text_on_complete", default=True))
+                    bool(_setting(dictation, "copy_full_text_on_complete", default=False))
                 )
                 self.auto_hide_result_check.setChecked(
                     bool(_setting(dictation, "auto_hide_completed_result", default=False))

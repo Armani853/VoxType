@@ -699,6 +699,7 @@ class ApplicationController:
                 self._safe_prompt_context(segment, language, committed),
                 professional_request.hotwords,
             ),
+            hotwords=professional_request.hotwords,
             beam_size=1 if backlog >= 10.0 else None,
             condition_on_previous_text=False,
             metadata={"segment_sequence": str(segment.sequence)},
@@ -1147,6 +1148,7 @@ class ApplicationController:
         return FileTranscriptionService().transcribe(
             source, backend, selected_language, self._file_recognition_cancel,
             initial_prompt=request.initial_prompt or "",
+            hotwords=request.hotwords,
             transform=lambda text: pipeline.process(
                 request, text, profile, allow_commands=False
             ).final_text,
@@ -1786,7 +1788,7 @@ class ApplicationController:
                 self.state is not AppState.COMPLETED
                 or self._delivery_busy
                 or self._shutdown_requested.is_set()
-                or not self.injection_service.pending_fragments
+                or not getattr(self.injection_service, "pending_fragments", 0)
             ):
                 return False
             self._delivery_busy = True
@@ -1924,12 +1926,10 @@ class ApplicationController:
                 )
             elif not self.settings.dictation.auto_insert:
                 self._delivery_status = "pending"
-            elif self._delivery_status not in {"failed", "copied"}:
-                self._delivery_status = (
-                    "delivered"
-                    if int(getattr(self.injection_service, "pending_fragments", 0)) == 0
-                    else "queued_target_inactive"
-                )
+            elif self._delivery_status == "pending" and getattr(
+                self.injection_service, "pending_fragments", 0
+            ):
+                self._delivery_status = "queued_target_inactive"
             self._user_paused = False
         if status == "completed" and completed_text.strip():
             self.workflows.dispatch("dictation", self._session_profile.id, completed_text)

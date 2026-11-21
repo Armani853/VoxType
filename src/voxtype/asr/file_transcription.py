@@ -69,7 +69,8 @@ def validate_media(source: Path) -> Path:
 class FileTranscriptionService:
     def transcribe(
         self, source: Path, backend: ASRBackend, language: LanguageCode,
-        cancel: Event, *, initial_prompt: str = "", transform: Callable[[str], str] = lambda text: text,
+        cancel: Event, *, initial_prompt: str = "", hotwords: tuple[str, ...] = (),
+        transform: Callable[[str], str] = lambda text: text,
     ) -> FileTranscript:
         import av
         import numpy as np
@@ -93,7 +94,7 @@ class FileTranscriptionService:
                 raise ValueError("Длительность аудио превышает 8 часов")
             result = backend.transcribe(TranscriptionRequest(
                 samples, language=language, start_offset_seconds=offset / SAMPLE_RATE,
-                initial_prompt=initial_prompt,
+                initial_prompt=initial_prompt, hotwords=hotwords,
             ))
             check_cancel()
             for segment in result.segments:

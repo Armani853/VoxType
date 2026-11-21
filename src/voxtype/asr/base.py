@@ -68,6 +68,7 @@ class TranscriptionRequest:
     log_probability_threshold: float | None = None
     compression_ratio_threshold: float | None = None
     metadata: Mapping[str, str] = field(default_factory=dict)
+    hotwords: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         audio = mono_float32(self.audio, copy=True)
@@ -94,6 +95,7 @@ class TranscriptionRequest:
         return replace(
             self,
             initial_prompt="",
+            hotwords=(),
             beam_size=max(5, self.beam_size or 1),
             temperature=0.0,
             condition_on_previous_text=False,

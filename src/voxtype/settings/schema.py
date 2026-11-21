@@ -43,7 +43,7 @@ class DictationSettings:
     voice_commands: bool = False
     live_preview: bool = False
     auto_insert: bool = True
-    copy_full_text_on_complete: bool = True
+    copy_full_text_on_complete: bool = False
     auto_hide_completed_result: bool = False
     injection_mode: InjectionMode = InjectionMode.AUTO
     target_mode: TargetMode = TargetMode.LOCKED

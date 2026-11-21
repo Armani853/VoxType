@@ -397,7 +397,11 @@ class TextInjectionService:
 
         send_error: SendInputError | None = None
         try:
-            self._sender.send_paste_shortcut(before_send=check_delivery)
+            if isinstance(self._sender, SendInputController):
+                self._sender.send_paste_shortcut(before_send=check_delivery)
+            else:
+                check_delivery()
+                self._sender.send_paste_shortcut()
             delay = self._paste_delay
             if target.process_name.casefold() in _ASYNC_CLIPBOARD_READERS:
                 delay = max(delay, _ASYNC_PASTE_MIN_DELAY_SECONDS)

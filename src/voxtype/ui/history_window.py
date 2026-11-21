@@ -122,6 +122,7 @@ if PYSIDE6_AVAILABLE:
             left_stack.setContentsMargins(0, 0, 0, 0)
             self.table = RecordsView(("Начало", "Язык", "Приложение", "Текст"), left_panel)
             self.table.setObjectName("historyTable")
+            self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
             self.table.setAccessibleName("Записи истории диктовок")
             empty_panel = VoxEmptyState("history", "Записей не найдено",
                                        "Измените фильтры или включите сохранение истории в настройках.", left_panel)

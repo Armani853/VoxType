@@ -54,7 +54,7 @@ class ClipboardItem:
     format_name: str | None = None
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class _TextLeaseMarker(ClipboardItem):
     unicode_hash: bytes
     allowed_formats: frozenset[int]
@@ -486,8 +486,9 @@ class ClipboardManager:
         if expected_sequence_number is not None:
             marker_format = self._backend.register_format(_LEASE_FORMAT)
             lease_marker = _TextLeaseMarker(
-                marker_format, secrets.token_bytes(16), _unicode_hash(items[0].data),
-                frozenset((marker_format, 1, 7, 16, *(item.format_id for item in items))),
+                marker_format, secrets.token_bytes(16),
+                unicode_hash=_unicode_hash(items[0].data),
+                allowed_formats=frozenset((marker_format, 1, 7, 16, *(item.format_id for item in items))),
             )
             items += (lease_marker,)
         with self._lock:

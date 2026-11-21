@@ -155,6 +155,32 @@ def test_faster_whisper_backend_loads_lazily_and_maps_word_timestamps(tmp_path: 
     assert not backend.loaded
 
 
+@pytest.mark.parametrize("supports_hotwords", [False, True])
+def test_faster_whisper_passes_optional_hotwords(tmp_path: Path, supports_hotwords: bool) -> None:
+    received = {}
+
+    class Legacy:
+        def transcribe(self, _audio, **options):
+            received.update(options)
+            return iter(()), None
+
+    class Current(Legacy):
+        def transcribe(self, _audio, *, hotwords=None, **options):
+            received["hotwords"] = hotwords
+            return super().transcribe(_audio, **options)
+
+    backend = FasterWhisperBackend(
+        tmp_path, get_profile(ASRProfile.BALANCED),
+        model_factory=lambda *_args, **_kwargs: Current() if supports_hotwords else Legacy(),
+    )
+    backend.transcribe(replace(_request(), initial_prompt="VoxType", hotwords=("VoxType", "PostgreSQL")))
+    assert received["initial_prompt"] == "VoxType"
+    if supports_hotwords:
+        assert received["hotwords"] == "VoxType, PostgreSQL"
+    else:
+        assert "hotwords" not in received
+
+
 def test_faster_whisper_refuses_implicit_download(tmp_path: Path) -> None:
     backend = FasterWhisperBackend(tmp_path / "missing", get_profile(ASRProfile.FAST))
     with pytest.raises(ASRModelUnavailable, match="не установлена"):

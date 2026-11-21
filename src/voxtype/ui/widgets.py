@@ -77,6 +77,7 @@ if PYSIDE6_AVAILABLE:
                 available,
             )
             super().setText(visible)
+            self.setAccessibleName(self._full_text)
             self.setToolTip(self._full_text if visible != self._full_text else "")
 
     class AudioLevelMeter(QWidget):
