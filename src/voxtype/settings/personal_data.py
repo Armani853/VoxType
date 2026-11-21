@@ -34,8 +34,15 @@ def _profile_for_export(row: dict) -> dict:
 def export_configuration(repository: SettingsRepository, path: Path) -> None:
     settings = repository.load()
     professional = settings.professional
-    content = {key: professional.get(key, []) for key in (*_COLLECTIONS, "workflows")}
-    content["profiles"] = [_profile_for_export(row) for row in professional.get("profiles", ())]
+    content = {
+        key: [asdict(item) for item in ProfessionalContent.parse(key, professional.get(key, []))]
+        for key in _COLLECTIONS
+    }
+    content["workflows"] = [asdict(item) for item in parse_workflows(professional.get("workflows", []))]
+    content["profiles"] = [
+        _profile_for_export(asdict(ProfileManager.decode_profile(row)))
+        for row in professional.get("profiles", ())
+    ]
     content["dictionary"] = [
         {**row, "executable": ntpath.basename(row.get("executable", ""))}
         for row in content["dictionary"]
@@ -91,7 +98,9 @@ def export_archive(database: Path, category: str, path: Path) -> None:
                     stream.write(",")
                 record = dict(row)
                 if category == "transcripts":
-                    record["result"] = json.loads(record["result"])
+                    from voxtype.asr.file_transcription import FileTranscript
+
+                    record["result"] = json.loads(FileTranscript.from_json(record["result"]).json())
                 json.dump(record, stream, ensure_ascii=False)
             stream.write("]}")
         os.replace(temp, path)
