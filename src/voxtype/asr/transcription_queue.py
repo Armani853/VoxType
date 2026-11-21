@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import sqlite3
 import time
+from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from threading import Event, Thread
+from threading import Event, Lock, Thread
 from uuid import uuid4
 
 from voxtype.asr.file_transcription import (
@@ -32,12 +33,17 @@ class TranscriptionJob:
 
 
 class FileTranscriptionQueue:
-    def __init__(self, path: Path, controller) -> None:
+    def __init__(
+        self, path: Path, controller, *, changed: Callable[[], None] | None = None,
+    ) -> None:
         self.path = path
         self.controller = controller
         self._worker: Thread | None = None
         self._cancel: Event | None = None
         self._request_shutdown = False
+        self._changed = changed
+        self._revision_lock = Lock()
+        self.active_id: str | None = None
         self.revision = time.monotonic_ns()
         with self._connect() as db:
             db.executescript("""
@@ -89,8 +95,7 @@ class FileTranscriptionQueue:
                 (uuid4().hex, str(source), str(destination) if destination else "", language,
                  profile_id, priority, time.time()),
             )
-        self._has_pending = True
-        self.revision = time.monotonic_ns()
+        self._publish_change(pending=True)
 
     def _check_policy_paths(self, source: Path, destination: Path | None) -> None:
         if self.controller.policy.enforce_offline_only:
@@ -104,7 +109,7 @@ class FileTranscriptionQueue:
         with self._connect() as db:
             db.execute("UPDATE transcription_queue_state SET paused = ?", (int(paused),))
         self.paused = paused
-        self.revision = time.monotonic_ns()
+        self._publish_change()
 
     def cancel(self, job_id: str, *, active: bool = False) -> None:
         if active and self._cancel is not None and job_id == self.active_id:
@@ -113,13 +118,13 @@ class FileTranscriptionQueue:
         with self._connect() as db:
             db.execute("""UPDATE transcription_jobs SET status = 'CANCELED', finished_at = ?
                           WHERE id = ? AND status = 'QUEUED'""", (time.time(), job_id))
-        self.revision = time.monotonic_ns()
+        self._publish_change()
 
     def cancel_pending(self) -> None:
         with self._connect() as db:
             db.execute("""UPDATE transcription_jobs SET status = 'CANCELED', finished_at = ?
                           WHERE status = 'QUEUED'""", (time.time(),))
-        self.revision = time.monotonic_ns()
+        self._publish_change()
 
     def begin_shutdown(self) -> None:
         self._request_shutdown = True
@@ -157,33 +162,65 @@ class FileTranscriptionQueue:
             db.execute("""UPDATE transcription_jobs SET result = ?
                           WHERE id = ? AND result IS NOT NULL""", (transcript.json(), job_id))
 
+    def _publish_change(self, *, pending: bool = False) -> None:
+        with self._revision_lock:
+            if pending:
+                self._has_pending = True
+            self.revision = time.monotonic_ns()
+        if self._changed is not None:
+            self._changed()
+
+    @property
+    def needs_tick(self) -> bool:
+        return not self._request_shutdown and (self.busy or (self._has_pending and not self.paused))
+
     def tick(self) -> None:
         if self.paused or self._request_shutdown or self.busy or not self._has_pending:
             return
         cancel = self.controller.reserve_file_recognition()
         if cancel is None:
             return
+        self._cancel = cancel
+        self._worker = Thread(target=self._claim_and_run, args=(cancel,),
+                              name="voxtype-file-asr", daemon=True)
         try:
-            with self._connect() as db:
-                row = db.execute("""SELECT * FROM transcription_jobs WHERE status = 'QUEUED'
-                                    ORDER BY priority DESC, created_at, rowid LIMIT 1""").fetchone()
-                if row:
-                    job = self._job(row)
-                    db.execute("UPDATE transcription_jobs SET status = 'RUNNING', started_at = ? WHERE id = ?",
-                               (time.time(), job.id))
-            if row:
-                self.active_id = job.id
-                self.revision = time.monotonic_ns()
-                self._cancel = cancel
-                self._worker = Thread(target=self._run, args=(job, cancel),
-                                      name="voxtype-file-asr", daemon=True)
-                self._worker.start()
-                return
-            self._has_pending = False
+            self._worker.start()
         except BaseException:
             self.controller.release_file_recognition()
             raise
-        self.controller.release_file_recognition()
+
+    def _claim_and_run(self, cancel: Event) -> None:
+        try:
+            with self._revision_lock:
+                revision = self.revision
+            if self.paused or cancel.is_set():
+                return
+            with self._connect() as db:
+                # Atomically claim a queued row. Pause/cancel from the UI may
+                # have changed its status between the initial check and now.
+                db.execute("BEGIN IMMEDIATE")
+                row = db.execute("""SELECT * FROM transcription_jobs WHERE status = 'QUEUED'
+                                    ORDER BY priority DESC, created_at, rowid LIMIT 1""").fetchone()
+                if row is not None:
+                    job = self._job(row)
+                    db.execute("UPDATE transcription_jobs SET status = 'RUNNING', started_at = ? WHERE id = ?",
+                               (time.time(), job.id))
+            if row is None:
+                with self._revision_lock:
+                    if self.revision == revision:
+                        self._has_pending = False
+                return
+            self.active_id = job.id
+            self._publish_change()
+            self._run(job, cancel)
+        except sqlite3.Error:
+            # Keep any persisted RUNNING row recoverable on the next startup.
+            self.paused = True
+        finally:
+            self.active_id = None
+            self._cancel = None
+            self.controller.release_file_recognition()
+            self._publish_change()
 
     def _run(self, job: TranscriptionJob, cancel: Event) -> None:
         result = None
@@ -222,6 +259,6 @@ class FileTranscriptionQueue:
                        WHERE id = ?""",
                     (status, None if status == "QUEUED" else time.time(), error, result, job.id),
                 )
-        finally:
-            self.revision = time.monotonic_ns()
-            self.controller.release_file_recognition()
+        except sqlite3.Error:
+            # Keep the persisted RUNNING row recoverable on the next startup.
+            self.paused = True

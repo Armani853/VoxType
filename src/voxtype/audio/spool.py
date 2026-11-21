@@ -46,6 +46,8 @@ class _SpoolEntry:
     sample_rate: int
     frames: int
     bytes_on_disk: int
+    session_id: int | None = None
+    sample_offset: int | None = None
 
     @property
     def duration_seconds(self) -> float:
@@ -121,7 +123,7 @@ class DiskSpool:
         return _SpoolEntry(sequence, path, sample_rate, frames, actual_size)
 
     def append(self, chunk: AudioChunk) -> None:
-        payload = chunk.samples.astype("<f4", copy=False).tobytes(order="C")
+        payload = memoryview(chunk.samples.astype("<f4", copy=False)).cast("B")
         checksum = zlib.crc32(payload) & 0xFFFFFFFF
         flags = int(chunk.input_overflow)
         header = _HEADER.pack(
@@ -166,10 +168,13 @@ class DiskSpool:
                     _ = temp_path
                 raise SpoolError(f"cannot persist PCM chunk {chunk.sequence}") from exc
             entry = _SpoolEntry(
-                chunk.sequence, final_path, chunk.sample_rate, chunk.frames, record_size
+                chunk.sequence, final_path, chunk.sample_rate, chunk.frames, record_size,
+                chunk.session_id, chunk.sample_offset,
             )
+            out_of_order = bool(self._entries) and chunk.sequence < next(reversed(self._entries))
             self._entries[chunk.sequence] = entry
-            self._entries = OrderedDict(sorted(self._entries.items()))
+            if out_of_order:
+                self._entries = OrderedDict(sorted(self._entries.items()))
             self._bytes += record_size
 
     def acquire(self) -> AudioChunk | None:
@@ -196,8 +201,11 @@ class DiskSpool:
             raise SpoolCorruptionError(f"spool metadata changed: {entry.path.name}")
         if zlib.crc32(payload) & 0xFFFFFFFF != checksum:
             raise SpoolCorruptionError(f"PCM checksum mismatch: {entry.path.name}")
-        samples = np.frombuffer(payload, dtype="<f4").astype(np.float32, copy=True)
-        return AudioChunk(sequence, samples, sample_rate, captured_at, bool(flags & 1))
+        samples = np.frombuffer(payload, dtype="<f4")
+        return AudioChunk(
+            sequence, samples, sample_rate, captured_at, bool(flags & 1),
+            entry.session_id, entry.sample_offset,
+        )
 
     def ack(self, sequence: int) -> None:
         with self._lock:

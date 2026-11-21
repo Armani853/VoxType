@@ -20,7 +20,7 @@ from urllib.request import Request, urlopen
 
 from platformdirs import user_cache_path, user_data_path
 
-from voxtype.asr.faster_whisper_backend import FasterWhisperBackend
+from voxtype.asr.faster_whisper_backend import FasterWhisperBackend, WhisperEngineSlot
 from voxtype.asr.base import ASRModelUnavailable
 from voxtype.asr.model_manager import DEFAULT_MODEL_SPECS, ModelManager
 from voxtype.asr.profiles import ASRProfile, ASRProfileConfig, get_profile
@@ -39,6 +39,7 @@ from voxtype.audio.preprocessing import (
 from voxtype.audio.preprocessing import PreprocessorSettings
 from voxtype.audio.spool import LosslessAudioQueue
 from voxtype.constants import APP_AUTHOR, APP_NAME
+from voxtype.core.compute_budget import ComputeBudget, DecodingPreset
 from voxtype.core.controller import ApplicationController
 from voxtype.core.models import ModelProfile
 from voxtype.monitoring.logging import configure_logging
@@ -76,22 +77,23 @@ def domain_profile(profile: ASRProfile | str) -> ModelProfile:
     return ModelProfile(value)
 
 
-def configured_profile(settings: AppSettings) -> ASRProfileConfig:
-    profile = get_profile(asr_profile(settings.dictation.model_profile))
-    threads = effective_cpu_threads(settings)
-    return replace(profile, cpu_threads=threads)
+def configured_profile(
+    settings: AppSettings, selection: ASRProfile | None = None,
+) -> ASRProfileConfig:
+    profile = get_profile(selection or asr_profile(settings.dictation.model_profile))
+    profile = replace(profile, cpu_threads=effective_cpu_threads(settings))
+    preset = settings.model.decoding_preset
+    if preset == DecodingPreset.FAST:
+        return replace(profile, beam_size=1, best_of=1)
+    if preset == DecodingPreset.ACCURATE:
+        return replace(profile, beam_size=max(3, profile.beam_size))
+    return profile
 
 
 def effective_cpu_threads(settings: AppSettings) -> int:
-    configured = settings.model.cpu_threads
-    logical = os.cpu_count() or 2
-    requested = max(1, min(configured, logical)) if configured > 0 else max(1, min(8, logical - 1))
-    mode = settings.model.power_mode.strip().casefold()
-    if mode in {"energy", "energy_saving", "eco"}:
-        return max(1, min(requested, 4, logical // 2 or 1))
-    if mode in {"maximum", "performance", "max_performance"}:
-        return max(requested, min(12, logical))
-    return requested
+    return ComputeBudget.from_settings(
+        settings.model.power_mode, settings.model.cpu_threads
+    ).asr_intra_threads
 
 
 def select_input_device(
@@ -195,14 +197,13 @@ class RuntimeBundle:
     data_directory: Path
     log_path: Path
     selected_model_installed: bool
+    engine_slot: WhisperEngineSlot | None = None
 
     def backend_for(self, profile: ASRProfile | str) -> FasterWhisperBackend:
         selected = asr_profile(domain_profile(profile))
-        config = get_profile(selected)
-        threads = effective_cpu_threads(self.settings)
-        config = replace(config, cpu_threads=threads)
+        config = configured_profile(self.settings, selected)
         path = self.model_manager.path_for(config.model_name)
-        return FasterWhisperBackend(path, config)
+        return FasterWhisperBackend(path, config, engine_slot=self.engine_slot)
 
     def retry_backend_for(self, profile: ASRProfile | str) -> FasterWhisperBackend | None:
         selected = asr_profile(domain_profile(profile))
@@ -217,6 +218,7 @@ class RuntimeBundle:
         return FasterWhisperBackend(
             self.model_manager.path_for(retry_config.model_name),
             retry_config,
+            engine_slot=self.engine_slot,
         )
 
     def backend_for_model(self, model_id: str) -> FasterWhisperBackend:
@@ -228,10 +230,14 @@ class RuntimeBundle:
     def close(self) -> bool:
         if not self.controller.shutdown():
             return False
-        self.controller.backend.unload()
-        retry_backend = self.controller.retry_backend
-        if retry_backend is not None and retry_backend is not self.controller.backend:
-            retry_backend.unload()
+        if self.engine_slot is not None:
+            with self.engine_slot.lock:
+                self.engine_slot.clear()
+        else:
+            self.controller.backend.unload()
+            retry_backend = self.controller.retry_backend
+            if retry_backend is not None and retry_backend is not self.controller.backend:
+                retry_backend.unload()
         self.session_repository.close()
         return True
 
@@ -306,7 +312,10 @@ def build_runtime(*, verbose: bool = False) -> RuntimeBundle:
     if settings.model.installed_model != profile.model_name:
         settings.model.installed_model = profile.model_name
         settings_repository.save(settings)
-    backend = FasterWhisperBackend(model_manager.path_for(profile.model_name), profile)
+    engine_slot = WhisperEngineSlot()
+    backend = FasterWhisperBackend(
+        model_manager.path_for(profile.model_name), profile, engine_slot=engine_slot,
+    )
     retry_backend: FasterWhisperBackend | None = None
     if profile.profile is ASRProfile.BALANCED and model_manager.is_installed("large-v3-turbo"):
         retry_profile = replace(
@@ -316,6 +325,7 @@ def build_runtime(*, verbose: bool = False) -> RuntimeBundle:
         retry_backend = FasterWhisperBackend(
             model_manager.path_for(retry_profile.model_name),
             retry_profile,
+            engine_slot=engine_slot,
         )
     target_manager = TargetWindowManager(policy=TargetPolicy(settings.dictation.target_mode.value))
     injection = TextInjectionService(
@@ -387,6 +397,7 @@ def build_runtime(*, verbose: bool = False) -> RuntimeBundle:
         data_directory,
         log_path,
         installed,
+        engine_slot,
     )
     controller.profile_backend_factory = bundle.backend_for_model
     return bundle

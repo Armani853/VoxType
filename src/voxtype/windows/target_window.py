@@ -113,6 +113,7 @@ class TargetWindowManager:
         }
         self.application_blocked: Callable[[WindowMetadata], bool] | None = None
         self._locked_target: WindowMetadata | None = None
+        self._observed_foreground: WindowMetadata | None = None
         self._suspended = False
         self._lock = threading.RLock()
 
@@ -125,6 +126,18 @@ class TargetWindowManager:
     def locked_target(self) -> WindowMetadata | None:
         with self._lock:
             return self._locked_target
+
+    @property
+    def display_target(self) -> WindowMetadata | None:
+        with self._lock:
+            if self._policy is TargetPolicy.FOLLOW_FOCUS:
+                return self._observed_foreground
+            return self._locked_target
+
+    def observe_foreground(self, hwnd: int = 0) -> None:
+        foreground = self._window_provider(hwnd) if hwnd else self._foreground_provider()
+        with self._lock:
+            self._observed_foreground = foreground
 
     def set_policy(self, policy: TargetPolicy | str) -> None:
         with self._lock:
@@ -144,6 +157,7 @@ class TargetWindowManager:
 
         foreground = self._foreground_provider()
         with self._lock:
+            self._observed_foreground = foreground
             blocked = self._blocked_status(foreground) if foreground is not None else None
             # A click on VoxType necessarily makes its own main window
             # foreground.  Retain the most recently observed external target so
@@ -153,13 +167,14 @@ class TargetWindowManager:
             self._suspended = False
         return self.resolve(foreground=foreground)
 
-    def remember_foreground_target(self) -> WindowMetadata | None:
+    def remember_foreground_target(self, hwnd: int = 0) -> WindowMetadata | None:
         """Remember a safe external foreground while no session is active."""
 
-        foreground = self._foreground_provider()
+        foreground = self._window_provider(hwnd) if hwnd else self._foreground_provider()
         if foreground is None or self._blocked_status(foreground) is not None:
             return None
         with self._lock:
+            self._observed_foreground = foreground
             self._locked_target = foreground
         return foreground
 
@@ -222,6 +237,9 @@ class TargetWindowManager:
             locked = self._locked_target
             suspended = self._suspended
         current = self._foreground_provider() if foreground is None else foreground
+        if policy is TargetPolicy.FOLLOW_FOCUS:
+            with self._lock:
+                self._observed_foreground = current
         if suspended:
             return TargetDecision(
                 TargetStatus.SUSPENDED,

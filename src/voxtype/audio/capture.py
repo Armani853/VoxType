@@ -101,6 +101,7 @@ class AudioCaptureService:
         self._running = False
         self._accept_callbacks = False
         self._next_sequence = output_queue.next_sequence
+        self._sample_offset = 0
         # Callback-owned integer updates stay lock-free; the dispatcher publishes
         # their deltas into the synchronized public metrics object.
         self._captured_frames = 0
@@ -283,7 +284,9 @@ class AudioCaptureService:
                             block.captured_at,
                             block.input_overflow,
                             self.output_queue.session_id,
+                            self._sample_offset,
                         )
+                        self._sample_offset += chunk.frames
                         if self._put_with_backpressure(chunk):
                             self._next_sequence += 1
                     self._publish_callback_metrics()
@@ -298,7 +301,9 @@ class AudioCaptureService:
                 chunk = AudioChunk(
                     self._next_sequence, processed.samples, self.config.target_sample_rate, time(),
                     session_id=self.output_queue.session_id,
+                    sample_offset=self._sample_offset,
                 )
+                self._sample_offset += chunk.frames
                 if self._put_with_backpressure(chunk):
                     self._next_sequence += 1
         except Exception as exc:

@@ -124,6 +124,7 @@ class StreamingSegmenter:
         if sample_rate <= 0:
             raise ValueError("sample_rate must be positive")
         self.detector = detector
+        self.session_id: int | None = None
         self.sample_rate = sample_rate
         self.settings = settings or SegmentationSettings()
         self._frame_samples = max(1, round(sample_rate * self.settings.frame_ms / 1_000))
@@ -293,6 +294,7 @@ class StreamingSegmenter:
             reason=reason,
             leading_overlap_seconds=self._leading_overlap / self.sample_rate,
             speech_seconds=speech_samples / self.sample_rate,
+            session_id=self.session_id,
         )
         self._segment_sequence += 1
         return segment

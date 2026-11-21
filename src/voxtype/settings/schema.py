@@ -11,6 +11,7 @@ from voxtype.constants import (
     DEFAULT_PAUSE_HOTKEY,
     SETTINGS_SCHEMA_VERSION,
 )
+from voxtype.core.compute_budget import DecodingPreset, MemoryPolicy
 from voxtype.core.models import (
     InjectionMode,
     Language,
@@ -66,6 +67,9 @@ class ModelSettings:
     cpu_threads: int = 0
     experimental_gpu: bool = False
     power_mode: str = "balanced"
+    decoding_preset: DecodingPreset = DecodingPreset.BALANCED
+    memory_policy: MemoryPolicy = MemoryPolicy.KEEP_LOADED
+    idle_unload_minutes: int = 15
 
 
 @dataclass(slots=True)

@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
@@ -118,7 +119,7 @@ class StateMachine:
         self._logger = logger or logging.getLogger("voxtype.state")
         self._lock = threading.RLock()
         self._listeners: list[Callable[[StateTransition], None]] = []
-        self._history: list[StateTransition] = []
+        self._history: deque[StateTransition] = deque(maxlen=512)
 
     @property
     def state(self) -> AppState:

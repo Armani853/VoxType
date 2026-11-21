@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from functools import lru_cache
 from pathlib import Path
 from threading import RLock
 from typing import Any
@@ -10,12 +11,31 @@ import numpy as np
 import numpy.typing as npt
 
 from voxtype.audio.models import mono_float32
+from voxtype.core.compute_budget import ComputeBudget
 
 from .base import AdaptiveEnergyVAD, VoiceActivityDetector
 
 
 class VADUnavailable(RuntimeError):
     """Silero was requested strictly but its local runtime cannot be loaded."""
+
+
+_onnx_load_lock = RLock()
+
+
+@lru_cache(maxsize=1)
+def _load_onnx_session(path: Path, modified_ns: int, size: int) -> Any:
+    # File metadata invalidates the cached session if the model is replaced.
+    import onnxruntime as ort
+
+    budget = ComputeBudget(0)
+    options = ort.SessionOptions()
+    options.intra_op_num_threads = budget.vad_intra_threads
+    options.inter_op_num_threads = budget.vad_inter_threads
+    options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+    return ort.InferenceSession(
+        str(path), sess_options=options, providers=["CPUExecutionProvider"]
+    )
 
 
 class SileroVAD:
@@ -41,6 +61,7 @@ class SileroVAD:
         self.fallback = fallback or AdaptiveEnergyVAD()
         self._model = model
         self._onnx_session = onnx_session
+        self._onnx_input_names: tuple[str, ...] | None = None
         self._load_attempted = model is not None or onnx_session is not None
         self._load_error: BaseException | None = None
         self._state: npt.NDArray[np.float32] = np.zeros((2, 1, 128), dtype=np.float32)
@@ -75,17 +96,11 @@ class SileroVAD:
                 if self.model_path is None or not self.model_path.is_file():
                     raise FileNotFoundError("local Silero model was not found")
                 if self.model_path.suffix.casefold() == ".onnx":
-                    import onnxruntime as ort
-
-                    options = ort.SessionOptions()
-                    options.intra_op_num_threads = 1
-                    options.inter_op_num_threads = 1
-                    options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
-                    self._onnx_session = ort.InferenceSession(
-                        str(self.model_path),
-                        sess_options=options,
-                        providers=["CPUExecutionProvider"],
-                    )
+                    with _onnx_load_lock:
+                        stat = self.model_path.stat()
+                        self._onnx_session = _load_onnx_session(
+                            self.model_path, stat.st_mtime_ns, stat.st_size
+                        )
                 else:
                     import torch
 
@@ -152,9 +167,10 @@ class SileroVAD:
             model_audio = np.concatenate(
                 (self._context, inference_audio.reshape(1, -1)), axis=1
             ).astype(np.float32, copy=False)
-            names = {item.name for item in session.get_inputs()}
+            if self._onnx_input_names is None:
+                self._onnx_input_names = tuple(item.name for item in session.get_inputs())
             feeds: dict[str, np.ndarray[Any, Any]] = {}
-            for name in names:
+            for name in self._onnx_input_names:
                 normalized = name.casefold()
                 if normalized in {"input", "audio", "x"}:
                     feeds[name] = model_audio

@@ -9,6 +9,8 @@ from threading import RLock
 from time import perf_counter
 from typing import Any
 
+from voxtype.core.compute_budget import ComputeBudget
+
 from .base import (
     ASRDependencyUnavailable,
     ASRModelUnavailable,
@@ -19,6 +21,19 @@ from .base import (
     WordTimestamp,
 )
 from .profiles import ASRProfileConfig
+
+
+class WhisperEngineSlot:
+    """Own one resident CTranslate2 engine across the runtime's profile wrappers."""
+
+    def __init__(self) -> None:
+        self.lock = RLock()
+        self.key: tuple[Any, ...] | None = None
+        self.engine: Any = None
+
+    def clear(self) -> None:
+        self.key = None
+        self.engine = None
 
 
 class FasterWhisperBackend:
@@ -39,6 +54,7 @@ class FasterWhisperBackend:
         allow_download: bool = False,
         download_root: str | Path | None = None,
         model_factory: Any = None,
+        engine_slot: WhisperEngineSlot | None = None,
     ) -> None:
         self.model = str(model)
         self.profile = profile
@@ -47,8 +63,14 @@ class FasterWhisperBackend:
         self.allow_download = allow_download
         self.download_root = str(download_root) if download_root is not None else None
         self._model_factory = model_factory
-        self._engine: Any = None
-        self._lock = RLock()
+        self._slot = engine_slot if engine_slot is not None else WhisperEngineSlot()
+        self._lock = self._slot.lock
+        self._engine_key = (
+            self.model, self.device,
+            tuple(self.device_index) if isinstance(self.device_index, list) else self.device_index,
+            self.profile.compute_type, self.profile.cpu_threads, self.download_root,
+            self.allow_download, self._model_factory,
+        )
 
     @property
     def model_id(self) -> str:
@@ -56,12 +78,12 @@ class FasterWhisperBackend:
 
     @property
     def loaded(self) -> bool:
-        with self._lock:
-            return self._engine is not None
+        # The reference is published only after native construction returns.
+        return self._slot.key == self._engine_key
 
     def load(self) -> None:
         with self._lock:
-            if self._engine is not None:
+            if self.loaded:
                 return
             model_path = Path(self.model)
             if not self.allow_download and not model_path.is_dir():
@@ -77,29 +99,30 @@ class FasterWhisperBackend:
                         "Для распознавания установите совместимые faster-whisper и CTranslate2."
                     ) from exc
                 factory = WhisperModel
+            self._slot.clear()
             try:
-                self._engine = factory(
+                self._slot.engine = factory(
                     self.model,
                     device=self.device,
                     device_index=self.device_index,
                     compute_type=self.profile.compute_type,
                     cpu_threads=self.profile.cpu_threads,
-                    num_workers=1,
+                    num_workers=ComputeBudget(self.profile.cpu_threads).asr_inter_threads,
                     download_root=self.download_root,
                     local_files_only=not self.allow_download,
                 )
             except (RuntimeError, ValueError, OSError) as exc:
-                self._engine = None
                 raise ASRModelUnavailable(
                     f"Не удалось загрузить модель '{self.model_id}'."
                 ) from exc
+            self._slot.key = self._engine_key
 
     def transcribe(self, request: TranscriptionRequest) -> TranscriptionResult:
         if request.sample_rate != 16_000:
             raise ValueError("faster-whisper backend requires 16 kHz PCM")
-        self.load()
         with self._lock:
-            engine = self._engine
+            self.load()
+            engine = self._slot.engine
             if engine is None:
                 raise ASRModelUnavailable(f"model '{self.model_id}' is not loaded")
             options: dict[str, Any] = {
@@ -175,7 +198,23 @@ class FasterWhisperBackend:
 
     def unload(self) -> None:
         with self._lock:
-            self._engine = None
+            if self.loaded:
+                self._slot.clear()
+
+    def unload_resident(self) -> None:
+        with self._lock:
+            self._slot.clear()
+
+    @property
+    def any_model_loaded(self) -> bool:
+        return self._slot.key is not None
+
+    def shares_resident_model(self, other: object) -> bool:
+        return (
+            isinstance(other, FasterWhisperBackend)
+            and self._slot is other._slot
+            and self._engine_key == other._engine_key
+        )
         gc.collect()
 
     def __enter__(self) -> FasterWhisperBackend:

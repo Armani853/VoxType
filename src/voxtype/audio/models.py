@@ -25,13 +25,17 @@ def mono_float32(samples: npt.ArrayLike, *, copy: bool = False) -> FloatAudio:
         scale = float(max(abs(limits.min), limits.max))
         result = array.astype(np.float32) / scale
     else:
-        result = array.astype(np.float32, copy=copy)
+        result = array.astype(np.float32, copy=False)
     if result.ndim == 2:
         result = result[:, 0] if result.shape[1] == 1 else np.mean(result, axis=1)
     if result.ndim != 1:
         raise ValueError("audio must be a one-dimensional mono array")
     if not np.all(np.isfinite(result)):
         result = np.nan_to_num(result, nan=0.0, posinf=1.0, neginf=-1.0)
+    if copy:
+        canonical = np.empty(result.shape, dtype=np.float32)
+        np.clip(result, -1.0, 1.0, out=canonical)
+        return canonical
     return np.ascontiguousarray(np.clip(result, -1.0, 1.0), dtype=np.float32)
 
 
@@ -45,6 +49,7 @@ class AudioChunk:
     captured_at: float = field(default_factory=time)
     input_overflow: bool = False
     session_id: int | None = None
+    sample_offset: int | None = None
 
     @property
     def channels(self) -> int:
@@ -53,6 +58,8 @@ class AudioChunk:
     def __post_init__(self) -> None:
         if self.sequence < 0:
             raise ValueError("sequence must be non-negative")
+        if self.sample_offset is not None and self.sample_offset < 0:
+            raise ValueError("sample_offset must be non-negative")
         if self.sample_rate <= 0:
             raise ValueError("sample_rate must be positive")
         canonical = mono_float32(self.samples, copy=True)
