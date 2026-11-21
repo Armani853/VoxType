@@ -15,8 +15,10 @@ from voxtype.transcript.professional import DictionaryEntry, ProfessionalContent
 
 MAX_PACK_BYTES = 1_048_576
 _COLLECTIONS = {
-    "vocabulary": "dictionary", "snippets": "snippets",
-    "replacement_rules": "replacements", "command_sets": "commands",
+    "vocabulary": "dictionary",
+    "snippets": "snippets",
+    "replacement_rules": "replacements",
+    "command_sets": "commands",
 }
 
 
@@ -41,11 +43,17 @@ class OrganizationProfilePack:
             raw = json.loads(data.decode("utf-8-sig"))
         except RecursionError as exc:
             raise ValueError("Слишком глубокая структура оргпакета") from exc
-        if not isinstance(raw, dict) or type(raw.get("schema_version")) is not int or raw["schema_version"] != 1:
+        if (
+            not isinstance(raw, dict)
+            or type(raw.get("schema_version")) is not int
+            or raw["schema_version"] != 1
+        ):
             raise ValueError("Ожидается UTF-8 JSON со схемой версии 1")
         pack = cls(**raw)
-        if (not isinstance(pack.organization_name, str)
-                or not 0 < len(pack.organization_name.strip()) <= 128):
+        if (
+            not isinstance(pack.organization_name, str)
+            or not 0 < len(pack.organization_name.strip()) <= 128
+        ):
             raise ValueError("Укажите название организации")
         if not isinstance(pack.profiles, list) or len(pack.profiles) > 100:
             raise ValueError("Допускается до 100 профилей")
@@ -65,7 +73,9 @@ class OrganizationProfilePack:
 
 
 class OrganizationPackService:
-    def __init__(self, repository: SettingsRepository, profiles: ProfileManager, content: ProfessionalContent):
+    def __init__(
+        self, repository: SettingsRepository, profiles: ProfileManager, content: ProfessionalContent
+    ):
         self.repository = repository
         self.profiles = profiles
         self.content = content
@@ -78,8 +88,11 @@ class OrganizationPackService:
                 for key, value in _COLLECTIONS.items()
             }
             pack = OrganizationProfilePack(
-                1, organization, [asdict(item) for item in self.profiles._custom.values()],
-                **collections, policy_defaults=policy_defaults,
+                1,
+                organization,
+                [asdict(item) for item in self.profiles._custom.values()],
+                **collections,
+                policy_defaults=policy_defaults,
             )
             payload = json.dumps(asdict(pack), ensure_ascii=False, indent=2)
         if len(payload.encode("utf-8")) > MAX_PACK_BYTES:
@@ -89,8 +102,13 @@ class OrganizationPackService:
     @staticmethod
     def _key(collection: str, item: Any) -> object:
         if collection == "dictionary":
-            return (item.canonical_text.casefold(), item.language, item.profile_id,
-                    item.executable, item.vocabulary_id)
+            return (
+                item.canonical_text.casefold(),
+                item.language,
+                item.profile_id,
+                item.executable,
+                item.vocabulary_id,
+            )
         return item.id
 
     def merge(self, pack: OrganizationProfilePack, *, apply: bool = False) -> tuple[str, ...]:
@@ -100,7 +118,11 @@ class OrganizationPackService:
             names = {item.name.casefold() for item in self.profiles.profiles()}
             for row in pack.profiles:
                 profile = self.profiles.decode_profile(row)
-                if profile.id in changed or profile.id in BUILTIN_IDS or profile.name.casefold() in names:
+                if (
+                    profile.id in changed
+                    or profile.id in BUILTIN_IDS
+                    or profile.name.casefold() in names
+                ):
                     preview.append(f"Пропуск профиля {profile.id}: конфликт ID или имени")
                     continue
                 changed[profile.id] = profile
@@ -120,20 +142,33 @@ class OrganizationPackService:
                         preview.append(f"Пропуск записи {collection}: ID уже существует")
                         continue
                     indexed.add(identifier)
-                    new.append(replace(item, origin="organization") if isinstance(item, DictionaryEntry) else item)
+                    new.append(
+                        replace(item, origin="organization")
+                        if isinstance(item, DictionaryEntry)
+                        else item
+                    )
                 combined = (*current, *new)
                 self.content.parse(collection, [asdict(item) for item in combined])
                 preview.append(f"{collection}: +{len(new)}")
                 new_collections[collection] = combined
             if pack.policy_defaults:
-                preview.append("Предложения по политике: " + ", ".join(sorted(pack.policy_defaults)))
+                preview.append(
+                    "Предложения по политике: " + ", ".join(sorted(pack.policy_defaults))
+                )
                 preview.append("Административные ограничения задаются отдельно через ProgramData")
             if apply:
-                self.repository.update({"professional": {
-                    "schema_version": 1,
-                    "profiles": [asdict(item) for item in changed.values()],
-                    **{key: [asdict(item) for item in items] for key, items in new_collections.items()},
-                }})
+                self.repository.update(
+                    {
+                        "professional": {
+                            "schema_version": 1,
+                            "profiles": [asdict(item) for item in changed.values()],
+                            **{
+                                key: [asdict(item) for item in items]
+                                for key, items in new_collections.items()
+                            },
+                        }
+                    }
+                )
                 self.profiles._custom = changed
                 self.content._collections = new_collections
         return tuple(preview)

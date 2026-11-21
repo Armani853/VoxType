@@ -218,6 +218,17 @@ if PYSIDE6_AVAILABLE:
             hardware_layout.addStretch(1)
             self.hardware_page_id = self.addPage(self.hardware_page)
 
+            language_page = QWizardPage()
+            language_page.setTitle("Язык диктовки")
+            language_page.setSubTitle("Язык по умолчанию можно изменить в любой момент.")
+            language_layout = QVBoxLayout(language_page)
+            self.dictation_language = QComboBox(language_page)
+            self.dictation_language.addItem("Русский", "ru")
+            self.dictation_language.addItem("English", "en")
+            language_layout.addWidget(self.dictation_language)
+            language_layout.addStretch()
+            self.addPage(language_page)
+
             self.model_page = _ManagedPage(
                 "Локальная модель",
                 "Выберите предложенный профиль и дождитесь проверки или загрузки модели.",
@@ -247,6 +258,16 @@ if PYSIDE6_AVAILABLE:
             model_layout.addWidget(model_card)
             model_layout.addStretch(1)
             self.addPage(self.model_page)
+
+            shortcuts = QWizardPage()
+            shortcuts.setTitle("Горячие клавиши")
+            shortcuts.setSubTitle("Эти сочетания доступны, пока VoxType запущен.")
+            shortcuts_layout = QVBoxLayout(shortcuts)
+            self.current_shortcuts = QLabel(shortcuts)
+            self.current_shortcuts.setWordWrap(True)
+            shortcuts_layout.addWidget(self.current_shortcuts)
+            shortcuts_layout.addStretch()
+            self.addPage(shortcuts)
 
             self.phrase_page = _ManagedPage(
                 "Проверка русского и английского",
@@ -578,10 +599,22 @@ if PYSIDE6_AVAILABLE:
             return {
                 "audio_device_id": self.microphone_combo.currentData(),
                 "model_profile": self.model_combo.currentData(),
+                "language": self.dictation_language.currentData(),
                 "toggle_hotkey": self.hotkey_edit.text().strip() or "Ctrl+Alt+Space",
                 "start_with_windows": self.autostart_check.isChecked(),
                 "onboarding_completed": True,
             }
+
+        def restore_choices(
+            self, language: str, toggle: str, switch_language: str, pause: str
+        ) -> None:
+            index = self.dictation_language.findData(language)
+            if index >= 0:
+                self.dictation_language.setCurrentIndex(index)
+            self.hotkey_edit.setText(toggle)
+            self.current_shortcuts.setText(
+                f"Диктовка — {toggle}\nЯзык — {switch_language}\nПауза — {pause}"
+            )
 
         def accept(self) -> None:
             self.setup_completed.emit(self.setup_values())

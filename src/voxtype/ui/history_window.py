@@ -12,7 +12,6 @@ if PYSIDE6_AVAILABLE:
     from PySide6.QtCore import Qt, QTimer, Signal
     from PySide6.QtGui import QGuiApplication
     from PySide6.QtWidgets import (
-        QComboBox,
         QDialog,
         QHBoxLayout,
         QLabel,
@@ -26,14 +25,23 @@ if PYSIDE6_AVAILABLE:
         QWidget,
     )
 
+    from .models import text_preview
+    from .obsidian import (
+        VoxBusyIndicator,
+        VoxButton,
+        VoxComboBox,
+        VoxEmptyState,
+        VoxSearchField,
+        VoxTextField,
+        confirm_delete,
+    )
+    from .records_view import RecordsView
     from .theme import SPACING, state_color
     from .widgets import Card
-    from .obsidian import VoxEmptyState, VoxSearchField, confirm_delete
-    from .records_view import RecordsView
-    from .models import text_preview
 
     class HistoryWindow(QDialog):
         refresh_requested = Signal()
+        outbox_requested = Signal()
         export_requested = Signal(str)
         delete_requested = Signal(str)
         recover_requested = Signal(str)
@@ -72,10 +80,11 @@ if PYSIDE6_AVAILABLE:
             heading_column.addWidget(hint)
             header.addLayout(heading_column)
             header.addStretch(1)
-            self.refresh_button = QPushButton("Обновить", self)
-            self.refresh_button.setProperty("flat", True)
-            self.clear_button = QPushButton("Очистить историю", self)
-            self.clear_button.setProperty("danger", True)
+            self.refresh_button = VoxButton("Обновить", self, variant="flat")
+            self.clear_button = VoxButton("Очистить историю", self, variant="danger")
+            outbox_button = VoxButton("Результаты вставки", self, variant="flat")
+            outbox_button.clicked.connect(self.outbox_requested)
+            header.addWidget(outbox_button)
             header.addWidget(self.clear_button)
             header.addWidget(self.refresh_button)
             root.addLayout(header)
@@ -85,11 +94,11 @@ if PYSIDE6_AVAILABLE:
             self.search_edit.setObjectName("historySearch")
             self.search_edit.setPlaceholderText("Поиск по тексту…")
             self.search_edit.setClearButtonEnabled(True)
-            self.language_filter = QComboBox(self)
+            self.language_filter = VoxComboBox(self)
             self.language_filter.addItem("Все языки", "")
             self.language_filter.addItem("RU", "ru")
             self.language_filter.addItem("EN", "en")
-            self.status_filter = QComboBox(self)
+            self.status_filter = VoxComboBox(self)
             self.status_filter.addItem("Все статусы", "")
             self.status_filter.addItem("Завершено", "completed")
             self.status_filter.addItem("Не завершено", "incomplete")
@@ -97,13 +106,21 @@ if PYSIDE6_AVAILABLE:
             filters.addWidget(self.search_edit, 1)
             filters.addWidget(self.language_filter)
             filters.addWidget(self.status_filter)
+            self.source_filter = VoxComboBox(self)
+            self.source_filter.addItem("Все источники", "")
+            self.source_filter.addItem("Диктовка", "dictation")
+            self.source_filter.addItem("Аудиофайл", "file")
+            filters.addWidget(self.source_filter)
             root.addLayout(filters)
             details = QHBoxLayout()
             for attr, placeholder in (
-                ("application_filter", "Приложение"), ("profile_filter", "ID профиля"),
-                ("since_filter", "С даты: ГГГГ-ММ-ДД"), ("until_filter", "По дату: ГГГГ-ММ-ДД"),
+                ("application_filter", "Приложение"),
+                ("profile_filter", "ID профиля"),
+                ("since_filter", "С даты: ГГГГ-ММ-ДД"),
+                ("until_filter", "По дату: ГГГГ-ММ-ДД"),
             ):
-                field = QLineEdit(self)
+                field = VoxTextField(self)
+                field.setAccessibleName(placeholder)
                 field.setPlaceholderText(placeholder)
                 setattr(self, attr, field)
                 details.addWidget(field)
@@ -114,6 +131,9 @@ if PYSIDE6_AVAILABLE:
                 details.addWidget(widget)
             self.set_page_available(False)
             root.addLayout(details)
+            self.loading_indicator = VoxBusyIndicator("Загрузка истории", self)
+            self.loading_indicator.hide()
+            root.addWidget(self.loading_indicator)
 
             splitter = self.splitter = QSplitter(Qt.Orientation.Horizontal, self)
             left_panel = QWidget(splitter)
@@ -124,8 +144,12 @@ if PYSIDE6_AVAILABLE:
             self.table.setObjectName("historyTable")
             self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
             self.table.setAccessibleName("Записи истории диктовок")
-            empty_panel = VoxEmptyState("history", "Записей не найдено",
-                                       "Измените фильтры или включите сохранение истории в настройках.", left_panel)
+            empty_panel = VoxEmptyState(
+                "history",
+                "Записей не найдено",
+                "Измените фильтры или включите сохранение истории в настройках.",
+                left_panel,
+            )
             empty_panel.action.setText("Сбросить фильтры")
             empty_panel.action.clicked.connect(self._reset_filters)
             empty_panel.action.show()
@@ -185,13 +209,19 @@ if PYSIDE6_AVAILABLE:
             self.clear_button.clicked.connect(self._clear_history)
             self._search_timer = QTimer(self, interval=230, singleShot=True)
             self._search_timer.timeout.connect(self.refresh_requested)
-            for field in (self.search_edit, self.application_filter, self.profile_filter,
-                          self.since_filter, self.until_filter):
+            for field in (
+                self.search_edit,
+                self.application_filter,
+                self.profile_filter,
+                self.since_filter,
+                self.until_filter,
+            ):
                 field.textChanged.connect(self._search_changed)
             self.previous_page.clicked.connect(lambda: self._change_page(-1))
             self.next_page.clicked.connect(lambda: self._change_page(1))
             self.language_filter.currentIndexChanged.connect(self._search_changed)
             self.status_filter.currentIndexChanged.connect(self._search_changed)
+            self.source_filter.currentIndexChanged.connect(self._search_changed)
             self.table.selectionModel().selectionChanged.connect(self._selection_changed)
             self.copy_button.clicked.connect(self._copy_selected)
             self.insert_button.clicked.connect(self._insert_selected)
@@ -229,9 +259,13 @@ if PYSIDE6_AVAILABLE:
                     return None
 
             return {
-                "text": self.search_edit.text(), "profile": self.profile_filter.text().strip(),
-                "application": self.application_filter.text().strip(), "page": self._page,
-                "language": self.language_filter.currentData(), "status": self.status_filter.currentData(),
+                "text": self.search_edit.text(),
+                "profile": self.profile_filter.text().strip(),
+                "application": self.application_filter.text().strip(),
+                "page": self._page,
+                "language": self.language_filter.currentData(),
+                "status": self.status_filter.currentData(),
+                "source_type": self.source_filter.currentData(),
                 "since": date_value(self.since_filter),
                 "until": date_value(self.until_filter, inclusive_end=True),
             }
@@ -239,27 +273,41 @@ if PYSIDE6_AVAILABLE:
         def set_loading(self, loading: bool) -> None:
             self.refresh_button.setText("Загружаю…" if loading else "Обновить")
             self.refresh_button.setEnabled(not loading)
+            self.loading_indicator.setVisible(loading)
 
         def resizeEvent(self, event: object) -> None:
             super().resizeEvent(event)
-            orientation = Qt.Orientation.Vertical if self.width() < 800 else Qt.Orientation.Horizontal
+            orientation = (
+                Qt.Orientation.Vertical if self.width() < 800 else Qt.Orientation.Horizontal
+            )
             if orientation != self.splitter.orientation():
                 self.splitter.setOrientation(orientation)
                 self.splitter.setSizes((280, 360))
 
         def _reset_filters(self) -> None:
-            for field in (self.search_edit, self.application_filter, self.profile_filter,
-                          self.since_filter, self.until_filter):
+            for field in (
+                self.search_edit,
+                self.application_filter,
+                self.profile_filter,
+                self.since_filter,
+                self.until_filter,
+            ):
                 field.clear()
             self.language_filter.setCurrentIndex(0)
             self.status_filter.setCurrentIndex(0)
+            self.source_filter.setCurrentIndex(0)
             self._search_changed()
 
         def set_sessions(self, sessions: list[HistoryEntry | object]) -> None:
             entries = [history_entry_from(session) for session in sessions]
             selected = self.selected_session_id()
-            ordered = sorted(entries, key=lambda entry: _datetime_sort_key(entry.started_at), reverse=True)
-            self._entries = {entry.session_id: entry for entry in ordered if entry.session_id}
+            ordered = sorted(
+                entries, key=lambda entry: _datetime_sort_key(entry.started_at), reverse=True
+            )
+            updated = {entry.session_id: entry for entry in ordered if entry.session_id}
+            if updated == self._entries and self.table.proxy.rowCount():
+                return
+            self._entries = updated
             self._apply_filters(preferred_session_id=selected)
 
         def selected_session_id(self) -> str | None:
@@ -281,7 +329,10 @@ if PYSIDE6_AVAILABLE:
             self.delete_button.setEnabled(enabled)
             recoverable = bool(
                 entry
-                and entry.completion_status.lower() not in {"completed", "complete", "success"}
+                and (
+                    entry.source_type == "draft"
+                    or entry.completion_status.lower() not in {"completed", "complete", "success"}
+                )
             )
             self.recover_button.setVisible(recoverable)
             self.recover_button.setEnabled(recoverable)
@@ -312,7 +363,11 @@ if PYSIDE6_AVAILABLE:
             for entry in self._entries.values():
                 if language and language != entry.language.value:
                     continue
-                if needle and needle not in f"{entry.confirmed_text} {entry.target_application}".casefold():
+                if (
+                    needle
+                    and needle
+                    not in f"{entry.confirmed_text} {entry.target_application}".casefold()
+                ):
                     continue
                 normalized = entry.completion_status.lower()
                 if status == "incomplete":
@@ -320,13 +375,27 @@ if PYSIDE6_AVAILABLE:
                         continue
                 elif status and normalized != status:
                     continue
-                rows.append((entry.session_id, (
-                    _format_datetime(entry.started_at), entry.language.value.upper(),
-                    entry.target_application or ("Аудиофайл" if entry.source_type == "file" else "—"),
-                    text_preview(entry.confirmed_text, 110) or _status_text(entry.completion_status),
-                )))
+                rows.append(
+                    (
+                        entry.session_id,
+                        (
+                            _format_datetime(entry.started_at),
+                            entry.language.value.upper(),
+                            entry.target_application
+                            or (
+                                {"file": "Аудиофайл", "draft": "Черновик"}.get(
+                                    entry.source_type, "Диктовка"
+                                )
+                            ),
+                            text_preview(entry.confirmed_text, 110)
+                            or _status_text(entry.completion_status),
+                        ),
+                    )
+                )
             self.table.records.replace(rows)
-            self._history_left_stack.setCurrentWidget(self.table if rows else self._history_empty_panel)
+            self._history_left_stack.setCurrentWidget(
+                self.table if rows else self._history_empty_panel
+            )
             if rows:
                 row = self._row_for_session(selected) if selected else -1
                 self.table.selectRow(max(0, row))
@@ -365,10 +434,15 @@ if PYSIDE6_AVAILABLE:
                 self.insert_requested.emit(entry.confirmed_text)
 
         def _clear_history(self) -> None:
-            if QMessageBox.question(
-                self, "Очистить историю?", "Удалить завершённые записи и их текст?",
-                defaultButton=QMessageBox.StandardButton.No,
-            ) == QMessageBox.StandardButton.Yes:
+            if (
+                QMessageBox.question(
+                    self,
+                    "Очистить историю?",
+                    "Удалить завершённые записи и их текст?",
+                    defaultButton=QMessageBox.StandardButton.No,
+                )
+                == QMessageBox.StandardButton.Yes
+            ):
                 self._page = 0
                 self.clear_requested.emit()
 

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import asdict, is_dataclass
-from typing import Any, cast
+from typing import Any, ClassVar, cast
 
 from ._optional import PYSIDE6_AVAILABLE, require_pyside6
 
@@ -42,9 +42,42 @@ if PYSIDE6_AVAILABLE:
         QWidget,
     )
 
+    from voxtype.constants import DEFAULT_HOTKEY, DEFAULT_LANGUAGE_HOTKEY, DEFAULT_PAUSE_HOTKEY
+
+    from .obsidian import (
+        VoxButton,
+        VoxComboBox,
+        VoxDisclosure,
+        VoxEmptyState,
+        VoxMessageBox,
+        VoxSectionHeader,
+        VoxSettingRow,
+        VoxToggle,
+        confirm_delete,
+    )
     from .theme import SPACING, state_color
     from .widgets import AudioLevelMeter, Card, rms_to_meter
-    from .obsidian import VoxButton, VoxComboBox, VoxEmptyState, VoxSectionHeader, VoxToggle, confirm_delete
+
+    class _SettingsForm(QFormLayout):
+        _details: ClassVar[dict[str, str]] = {
+            "Язык по умолчанию": "Применяется со следующей записи.",
+            "Целевое окно": "Определяет, куда отправлять готовый текст.",
+            "Задержка перед вставкой": "Время, которое получает целевое приложение для чтения буфера.",
+            "Активная модель": "Обрабатывает речь на устройстве.",
+            "Потоки CPU": "Количество потоков локального распознавания.",
+            "Срок хранения": "Срок хранения записей локальной истории.",
+        }
+
+        def addRow(self, *args: object) -> None:
+            if len(args) == 2 and isinstance(args[0], str) and isinstance(args[1], QWidget):
+                title, control = args
+                super().addRow(
+                    VoxSettingRow(
+                        title, control, detail=control.toolTip() or self._details.get(title, "")
+                    )
+                )
+                return
+            super().addRow(*args)
 
     class SettingsWindow(QDialog):
         settings_submitted = Signal(object)
@@ -54,6 +87,15 @@ if PYSIDE6_AVAILABLE:
         model_benchmark_requested = Signal(str)
         open_data_folder_requested = Signal()
         delete_local_data_requested = Signal()
+        recovery_center_requested = Signal()
+        backup_requested = Signal()
+        restore_backup_requested = Signal()
+        export_personal_requested = Signal()
+        import_personal_requested = Signal()
+        export_archive_requested = Signal(str)
+        updates_requested = Signal()
+        input_compatibility_requested = Signal()
+        audio_view_hidden = Signal()
         open_log_requested = Signal()
         export_diagnostics_requested = Signal()
         self_test_requested = Signal()
@@ -153,10 +195,10 @@ if PYSIDE6_AVAILABLE:
             hint.setWordWrap(True)
             layout.addWidget(heading)
             layout.addWidget(hint)
-            form = QFormLayout()
+            form = _SettingsForm()
             form.setContentsMargins(0, 0, 0, 0)
             form.setHorizontalSpacing(24)
-            form.setVerticalSpacing(SPACING.space_5)
+            form.setVerticalSpacing(SPACING.space_2)
             form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
             form.setFormAlignment(Qt.AlignmentFlag.AlignTop)
             form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
@@ -210,11 +252,16 @@ if PYSIDE6_AVAILABLE:
             def update(value: bool) -> None:
                 store.setValue("ui/reduceMotion", value)
                 QApplication.instance().setProperty("voxtypeReduceMotion", value)
+                from .motion import AnimationCoordinator
+
+                AnimationCoordinator.instance().preference_changed()
 
             self.reduce_motion.toggled.connect(update)
 
         def _build_dictation_page(self) -> None:
-            page, form = self._page("Распознавание", "Язык, способ вставки и политика целевого окна.")
+            page, form = self._page(
+                "Распознавание", "Язык, способ вставки и политика целевого окна."
+            )
             self.default_language_combo = self._combo(
                 (("RU — Русский", "ru"), ("EN — English", "en")), page
             )
@@ -232,6 +279,10 @@ if PYSIDE6_AVAILABLE:
                 "По одному имени, термину или сокращению на строку (до 200)"
             )
             self.vocabulary_edit.setMaximumHeight(110)
+            self.live_preview_check = QCheckBox("Предварительный текст во время диктовки", page)
+            self.live_preview_check.setToolTip(
+                "Текст будет отправлен в целевое окно после остановки."
+            )
             self.auto_insert_check = QCheckBox("Автоматически вставлять подтверждённый текст", page)
             self.copy_complete_check = QCheckBox(
                 "Копировать весь текст в буфер после завершения", page
@@ -250,10 +301,48 @@ if PYSIDE6_AVAILABLE:
             self.insertion_delay_spin.setSuffix(" мс")
             self.spacing_check = QCheckBox("Добавлять пробел между фрагментами", page)
             self.capitalize_check = QCheckBox("Начинать предложение с заглавной буквы", page)
+            self.text_transformations_check = QCheckBox(
+                "Применять личный словарь и правила замены", page
+            )
             form.addRow("Язык по умолчанию", self.default_language_combo)
             form.addRow("Профиль модели", self.profile_combo)
             form.addRow(self.voice_commands_check)
             form.addRow("Пользовательский словарь", self.vocabulary_edit)
+            form.addRow(self.text_transformations_check)
+            _, form = self._page(
+                "Вставка", "Целевое окно, буфер обмена и форматирование фрагментов."
+            )
+            self.dictation_mode_combo = QComboBox(page)
+            for label, mode in (
+                ("По нажатию", "toggle"),
+                ("При удержании", "push_to_talk"),
+                ("Останавливать по тишине", "auto_stop"),
+                ("Вручную", "manual"),
+            ):
+                self.dictation_mode_combo.addItem(label, mode)
+            form.addRow("Режим записи", self.dictation_mode_combo)
+            self.auto_stop_enabled = QCheckBox("Включить остановку по тишине в этом режиме", page)
+            form.addRow(self.auto_stop_enabled)
+            self.auto_stop_limits = []
+            for label, low, high, value in (
+                ("Минимум речи", 100, 10000, 400),
+                ("Тишина после речи", 200, 15000, 1500),
+                ("Максимальная длительность", 1000, 3600000, 120000),
+            ):
+                limit = QSpinBox(page)
+                limit.setRange(low, high)
+                limit.setValue(value)
+                limit.setSuffix(" мс")
+                self.auto_stop_limits.append(limit)
+                form.addRow(label, limit)
+            self.safe_terminal_check = QCheckBox("Предпочитать безопасный ввод в терминалах", page)
+            form.addRow(self.safe_terminal_check)
+            self.caret_overlay_check = QCheckBox("Размещать индикатор рядом с курсором", page)
+            form.addRow(self.caret_overlay_check)
+            compatibility = QPushButton("Совместимость приложений…", page)
+            compatibility.clicked.connect(lambda: self.input_compatibility_requested.emit())
+            form.addRow(compatibility)
+            form.addRow(self.live_preview_check)
             form.addRow(self.auto_insert_check)
             form.addRow(self.copy_complete_check)
             form.addRow(self.auto_hide_result_check)
@@ -265,6 +354,7 @@ if PYSIDE6_AVAILABLE:
 
         def _build_audio_page(self) -> None:
             page, form = self._page("Аудио", "Микрофон и осторожная обработка сигнала.")
+            self._audio_page = page
             self.audio_device_combo = QComboBox(page)
             self.audio_device_combo.setObjectName("audioDeviceCombo")
             self.audio_device_combo.setSizeAdjustPolicy(
@@ -291,7 +381,24 @@ if PYSIDE6_AVAILABLE:
                 ),
                 page,
             )
+            self.preprocessing_mode_combo = self._combo(
+                (
+                    ("Прежний профиль", "legacy"),
+                    ("Без обработки", "off"),
+                    ("Базовая обработка", "basic"),
+                    ("Улучшенная — недоступна", "enhanced"),
+                ),
+                page,
+            )
+            enhanced = self.preprocessing_mode_combo.model().item(3)
+            enhanced.setEnabled(False)
+            enhanced.setToolTip("Требуется совместимый модуль шумоподавления.")
             self.noise_suppression_check = QCheckBox("Умеренное шумоподавление", page)
+            self.startup_pre_roll_check = QCheckBox("Первые звуки во время подготовки модели", page)
+            self.startup_pre_roll_check.setToolTip(
+                "Микрофон открывается после команды записи. Последние 350 мс подготовки хранятся в памяти. "
+                "При сохранении аудио функция отключена."
+            )
             self.normalization_check = QCheckBox("Безопасная нормализация громкости", page)
             self.mic_meter = AudioLevelMeter(page)
             self.mic_status_label = QLabel("Нажмите «Тест микрофона»", page)
@@ -301,14 +408,73 @@ if PYSIDE6_AVAILABLE:
             meter_layout.setContentsMargins(0, 0, 0, 0)
             meter_layout.addWidget(self.mic_meter)
             meter_layout.addWidget(self.mic_status_label)
+            self.audio_quality_label = QLabel("Показатели появятся во время диктовки", page)
+            self.audio_quality_label.setWordWrap(True)
+            self._last_audio_quality_view = None
+            self.audio_quality_label.setProperty("muted", True)
+            meter_layout.addWidget(self.audio_quality_label)
             self.test_microphone_button = QPushButton("Тест микрофона", page)
             form.addRow("Устройство записи", self.audio_device_combo)
             form.addRow("Чувствительность речи", vad_row)
-            form.addRow("Профиль обработки", self.preprocessing_combo)
+            form.addRow("Предобработка", self.preprocessing_mode_combo)
+            form.addRow("Унаследованный профиль", self.preprocessing_combo)
             form.addRow(self.noise_suppression_check)
             form.addRow(self.normalization_check)
+            form.addRow(self.startup_pre_roll_check)
             form.addRow("Живой уровень", meter_row)
             form.addRow("", self.test_microphone_button)
+            self.preprocessing_mode_combo.currentIndexChanged.connect(
+                self._update_audio_processing_options
+            )
+            self._update_audio_processing_options()
+
+        def _update_audio_processing_options(self) -> None:
+            legacy = self.preprocessing_mode_combo.currentData() == "legacy"
+            self.preprocessing_combo.setEnabled(legacy)
+            self.noise_suppression_check.setEnabled(legacy)
+            self.normalization_check.setEnabled(legacy)
+
+        def hideEvent(self, event) -> None:
+            self.audio_view_hidden.emit()
+            super().hideEvent(event)
+
+        def update_audio_quality(self, snapshot, device_name: str) -> None:
+            if not self.isVisible() or self.pages.currentWidget() is not self._audio_page:
+                return
+            mode = {
+                "off": "без предобработки",
+                "basic": "базовая предобработка",
+                "enhanced": "базовая предобработка (расширенная недоступна)",
+                "legacy": "унаследованный профиль",
+            }.get(self.preprocessing_mode_combo.currentData(), "унаследованный профиль")
+            view = (snapshot, device_name, mode)
+            if self._last_audio_quality_view == view:
+                return
+            self._last_audio_quality_view = view
+            if snapshot is None:
+                self.audio_quality_label.setText(f"{device_name} · {mode}")
+                return
+            noise = {
+                "quiet": "тихий",
+                "moderate": "умеренный",
+                "noisy": "шумный",
+                "unknown": "ещё не оценён",
+            }
+            warnings = []
+            if snapshot.clipping_detected:
+                warnings.append("Клиппинг: уменьшите усиление микрофона.")
+            if snapshot.low_signal:
+                warnings.append("Речь тихая. Попробуйте говорить ближе к микрофону.")
+            description = (
+                f"{device_name} · {snapshot.sample_rate} Гц · {snapshot.rms_dbfs:.0f} dBFS · "
+                f"пик {snapshot.peak_dbfs:.0f} dBFS · фон {noise[snapshot.noise_category.value]} · {mode}"
+            )
+            text = " ".join((description, *warnings))
+            if self.audio_quality_label.text() != text:
+                self.audio_quality_label.setText(text)
+            self.mic_meter.set_level(
+                rms_to_meter(10 ** (snapshot.rms_dbfs / 20)), snapshot.clipping_ratio * 100
+            )
 
         def _build_model_page(self) -> None:
             self._models_index = self.pages.count()
@@ -317,6 +483,16 @@ if PYSIDE6_AVAILABLE:
             )
             self.model_combo = QComboBox(page)
             self.model_cards = QVBoxLayout()
+            self._model_widgets: dict[str, tuple[Card, QLabel, QLabel, VoxButton]] = {}
+            self._models_installed: dict[str, bool] = {}
+            self._model_empty = VoxEmptyState(
+                "files",
+                "Нет установленных моделей",
+                "Для офлайн-диктовки установите одну из моделей ниже.",
+                page,
+            )
+            self._model_empty.hide()
+            self.model_cards.addWidget(self._model_empty)
             form.addRow(self.model_cards)
             model_actions = QWidget(page)
             actions = QHBoxLayout(model_actions)
@@ -334,19 +510,45 @@ if PYSIDE6_AVAILABLE:
             self.model_progress.setTextVisible(False)
             self.model_progress.hide()
             self.cpu_threads_spin = QSpinBox(page)
-            self.cpu_threads_spin.setRange(1, 128)
-            self.cpu_threads_spin.setValue(4)
+            self.cpu_threads_spin.setRange(0, 128)
+            self.cpu_threads_spin.setSpecialValueText("Авто · по профилю")
             self.power_mode_combo = QComboBox(page)
             self.power_mode_combo.addItem("Экономия энергии", "energy")
             self.power_mode_combo.addItem("Баланс", "balanced")
             self.power_mode_combo.addItem("Максимальная производительность", "maximum")
+            self.decoding_preset_combo = QComboBox(page)
+            self.decoding_preset_combo.addItem("Быстро", "fast")
+            self.decoding_preset_combo.addItem("Стандартное", "balanced")
+            self.decoding_preset_combo.addItem("Точнее (выше нагрузка)", "accurate")
+            self.memory_policy_combo = QComboBox(page)
+            self.memory_policy_combo.addItem("Оставлять модель в памяти", "keep_loaded")
+            self.memory_policy_combo.addItem("Выгружать после простоя", "unload_after_idle")
+            self.memory_policy_combo.addItem("Выгружать по запросу", "explicit")
+            self.idle_unload_spin = QSpinBox(page)
+            self.idle_unload_spin.setRange(1, 120)
+            self.idle_unload_spin.setSuffix(" мин")
+            self.release_models_button = QPushButton("Выгрузить модель сейчас", page)
+            self.memory_policy_combo.currentIndexChanged.connect(
+                lambda: self.idle_unload_spin.setEnabled(
+                    self.memory_policy_combo.currentData() == "unload_after_idle"
+                )
+            )
+            self.idle_unload_spin.setEnabled(False)
             self.gpu_experimental_check = QCheckBox("Экспериментальный GPU backend", page)
             form.addRow("Активная модель", self.model_combo)
             form.addRow("Управление", model_actions)
             form.addRow("Загрузка", self.model_progress)
-            form.addRow("Потоки CPU", self.cpu_threads_spin)
-            form.addRow("Режим питания", self.power_mode_combo)
-            form.addRow(self.gpu_experimental_check)
+            advanced = QWidget(page)
+            controls = _SettingsForm(advanced)
+            controls.setContentsMargins(0, 0, 0, 0)
+            controls.addRow("Потоки CPU", self.cpu_threads_spin)
+            controls.addRow("Режим питания", self.power_mode_combo)
+            controls.addRow("Декодирование", self.decoding_preset_combo)
+            controls.addRow("Модель в памяти", self.memory_policy_combo)
+            controls.addRow("Выгрузка после", self.idle_unload_spin)
+            controls.addRow(self.release_models_button)
+            controls.addRow(self.gpu_experimental_check)
+            form.addRow(VoxDisclosure("Расширенные параметры модели", advanced, page))
 
         def open_general(self) -> None:
             self.navigation.setCurrentRow(0)
@@ -357,12 +559,14 @@ if PYSIDE6_AVAILABLE:
         def confirm_navigation(self) -> bool:
             if not self._dirty:
                 return True
-            message = QMessageBox(self)
+            message = VoxMessageBox(self)
             message.setWindowTitle("Сохранить изменения?")
             message.setText("В настройках есть неприменённые изменения.")
-            message.setStandardButtons(QMessageBox.StandardButton.Save
-                                       | QMessageBox.StandardButton.Discard
-                                       | QMessageBox.StandardButton.Cancel)
+            message.setStandardButtons(
+                QMessageBox.StandardButton.Save
+                | QMessageBox.StandardButton.Discard
+                | QMessageBox.StandardButton.Cancel
+            )
             message.setDefaultButton(QMessageBox.StandardButton.Cancel)
             choice = message.exec()
             if choice == QMessageBox.StandardButton.Save:
@@ -370,35 +574,66 @@ if PYSIDE6_AVAILABLE:
                 return True
             return choice == QMessageBox.StandardButton.Discard
 
-        def set_model_cards(self, items: list[tuple[str, str, str, bool, bool, bool, bool]]) -> None:
-            while self.model_cards.count():
-                old = self.model_cards.takeAt(0).widget()
-                if old is not None:
-                    old.hide()
-                    old.deleteLater()
-            if items and not any(item[3] for item in items):
-                empty = VoxEmptyState("files", "Нет установленных моделей",
-                                      "Для офлайн-диктовки установите одну из моделей ниже.", self)
-                self.model_cards.addWidget(empty)
-            for identifier, description, size, installed, active, install_allowed, usable in items:
-                card = Card(self)
-                title = VoxSectionHeader(identifier, card)
-                card.content_layout.addWidget(title)
-                detail = QLabel(f"Whisper · RU / EN · {size}\n{description}", card)
-                detail.setWordWrap(True)
-                card.content_layout.addWidget(detail)
-                state = "Активна" if active and installed else "Установлена" if installed else "Не установлена"
-                label = QLabel(state if usable else f"{state} · ограничено политикой", card)
-                label.setProperty("muted", True)
-                card.content_layout.addWidget(label)
-                action = VoxButton("Активна" if active and installed else "Активировать" if installed else "Установить", card)
+        def set_model_cards(
+            self, items: list[tuple[str, str, str, bool, bool, bool, bool, str]]
+        ) -> None:
+            if items == getattr(self, "_rendered_model_cards", None):
+                return
+            self._rendered_model_cards = items
+            visible = {item[0] for item in items}
+            self._model_empty.setVisible(bool(items) and not any(item[3] for item in items))
+            for identifier in tuple(self._model_widgets):
+                if identifier not in visible:
+                    card, *_fields = self._model_widgets.pop(identifier)
+                    self.model_cards.removeWidget(card)
+                    card.hide()
+                    card.deleteLater()
+                    self._models_installed.pop(identifier, None)
+            for (
+                identifier,
+                description,
+                size,
+                installed,
+                active,
+                install_allowed,
+                usable,
+                state,
+            ) in items:
+                fields = self._model_widgets.get(identifier)
+                if fields is None:
+                    card = Card(self)
+                    card.content_layout.addWidget(VoxSectionHeader(identifier, card))
+                    detail = QLabel(card)
+                    detail.setWordWrap(True)
+                    card.content_layout.addWidget(detail)
+                    label = QLabel(card)
+                    label.setProperty("muted", True)
+                    card.content_layout.addWidget(label)
+                    action = VoxButton("", card)
+                    action.clicked.connect(
+                        lambda _checked=False, model=identifier: self._pick_model_card_action(model)
+                    )
+                    card.content_layout.addWidget(action, alignment=Qt.AlignmentFlag.AlignLeft)
+                    self.model_cards.addWidget(card)
+                    fields = self._model_widgets[identifier] = (card, detail, label, action)
+                _card, detail, label, action = fields
+                self._models_installed[identifier] = installed
+                detail.setText(f"Whisper · RU / EN · {size}\n{description}")
+                label.setText(state if usable else f"{state} · ограничено политикой")
+                action.setText(
+                    "Активна"
+                    if active and installed
+                    else "Активировать"
+                    if installed
+                    else "Установить"
+                )
                 action.setEnabled((usable and not active) if installed else install_allowed)
-                if installed:
-                    action.clicked.connect(lambda _checked=False, model=identifier: self._activate_model_card(model))
-                else:
-                    action.clicked.connect(lambda _checked=False, model=identifier: self.model_download_requested.emit(model))
-                card.content_layout.addWidget(action, alignment=Qt.AlignmentFlag.AlignLeft)
-                self.model_cards.addWidget(card)
+
+        def _pick_model_card_action(self, identifier: str) -> None:
+            if self._models_installed.get(identifier, False):
+                self._activate_model_card(identifier)
+            else:
+                self.model_download_requested.emit(identifier)
 
         def _activate_model_card(self, identifier: str) -> None:
             index = self.model_combo.findData(identifier)
@@ -408,9 +643,13 @@ if PYSIDE6_AVAILABLE:
 
         def _build_privacy_page(self) -> None:
             page, form = self._page(
-                "Приватность", "Все данные хранятся локально и не отправляются на серверы."
+                "Приватность",
+                "Речь обрабатывается на этом устройстве. История и запись аудио включаются отдельно.",
             )
             self.save_history_check = QCheckBox("Сохранять текст истории", page)
+            self.recover_drafts_check = QCheckBox(
+                "Сохранять завершённые черновики для восстановления", page
+            )
             self.save_audio_check = QCheckBox("Сохранять исходное аудио", page)
             self.retention_spin = QSpinBox(page)
             self.retention_spin.setRange(1, 3650)
@@ -426,16 +665,51 @@ if PYSIDE6_AVAILABLE:
             actions.addStretch(1)
             form.addRow(self.save_history_check)
             form.addRow(self.save_audio_check)
+            form.addRow(self.recover_drafts_check)
+            for title, action in (
+                ("Центр восстановления", self.recovery_center_requested),
+                ("Создать резервную копию", self.backup_requested),
+                ("Восстановить резервную копию…", self.restore_backup_requested),
+                ("Экспортировать настройки…", self.export_personal_requested),
+                ("Импортировать настройки…", self.import_personal_requested),
+            ):
+                button = QPushButton(title, page)
+                button.clicked.connect(lambda _checked=False, signal=action: signal.emit())
+                form.addRow(button)
+            for title, category in (
+                ("Экспорт истории диктовок…", "history"),
+                ("Экспорт транскриптов файлов…", "transcripts"),
+            ):
+                button = QPushButton(title, page)
+                button.clicked.connect(
+                    lambda _checked=False, selected=category: self.export_archive_requested.emit(
+                        selected
+                    )
+                )
+                form.addRow(button)
             form.addRow("Срок хранения", self.retention_spin)
             form.addRow("Данные", data_actions)
+            notice = QLabel(
+                "При вставке текст получает выбранное приложение. Диагностика содержит технические сведения. "
+                "Проверка обновлений обращается к доверенному каналу только по запросу и не отправляет диктовку.",
+                page,
+            )
+            notice.setWordWrap(True)
+            notice.setProperty("muted", True)
+            form.addRow(notice)
 
         def set_privacy_policy(self, *, history_disabled: bool, audio_disabled: bool) -> None:
             self._history_policy_disabled = history_disabled
             self._audio_policy_disabled = audio_disabled
             self.save_history_check.setEnabled(not history_disabled)
+            self.recover_drafts_check.setEnabled(not history_disabled)
             self.save_audio_check.setEnabled(not audio_disabled)
-            self.save_history_check.setToolTip("Отключено политикой организации" if history_disabled else "")
-            self.save_audio_check.setToolTip("Отключено политикой организации" if audio_disabled else "")
+            self.save_history_check.setToolTip(
+                "Отключено политикой организации" if history_disabled else ""
+            )
+            self.save_audio_check.setToolTip(
+                "Отключено политикой организации" if audio_disabled else ""
+            )
 
         def _build_hotkeys_page(self) -> None:
             page, form = self._page(
@@ -445,14 +719,24 @@ if PYSIDE6_AVAILABLE:
             self.pause_hotkey_edit = QKeySequenceEdit(page)
             self.language_hotkey_edit = QKeySequenceEdit(page)
             self.push_to_talk_hotkey_edit = QKeySequenceEdit(page)
-            self.push_to_talk_hotkey_edit.setEnabled(False)
             self.push_to_talk_hotkey_edit.setToolTip(
-                "Отключено: RegisterHotKey не сообщает надёжное отпускание клавиши"
+                "Используется только в режиме записи при удержании."
             )
             form.addRow("Начать / остановить", self.toggle_hotkey_edit)
             form.addRow("Пауза / продолжить", self.pause_hotkey_edit)
             form.addRow("Переключить RU / EN", self.language_hotkey_edit)
             form.addRow("Push-to-talk", self.push_to_talk_hotkey_edit)
+            reset = VoxButton("Вернуть стандартные сочетания", page)
+            reset.clicked.connect(self._reset_hotkeys)
+            form.addRow(reset)
+
+        def _reset_hotkeys(self) -> None:
+            for widget, specification in (
+                (self.toggle_hotkey_edit, DEFAULT_HOTKEY),
+                (self.language_hotkey_edit, DEFAULT_LANGUAGE_HOTKEY),
+                (self.pause_hotkey_edit, DEFAULT_PAUSE_HOTKEY),
+            ):
+                widget.setKeySequence(QKeySequence(specification))
 
         def _build_diagnostics_page(self) -> None:
             page, form = self._page(
@@ -462,16 +746,30 @@ if PYSIDE6_AVAILABLE:
             self.export_diagnostics_button = QPushButton("Экспортировать отчёт", page)
             self.self_test_button = QPushButton("Выполнить self-test", page)
             self.show_versions_button = QPushButton("Показать версии библиотек", page)
+            self.check_updates_button = QPushButton("Проверить обновления", page)
+            self.check_updates_button.clicked.connect(lambda: self.updates_requested.emit())
             self.diagnostics_status_label = QLabel("Проверки ещё не запускались", page)
             self.diagnostics_status_label.setProperty("muted", True)
             form.addRow(self.open_log_button)
             form.addRow(self.export_diagnostics_button)
             form.addRow(self.self_test_button)
             form.addRow(self.show_versions_button)
+            self.update_channel_combo = QComboBox(page)
+            self.update_channel_combo.addItem("Стабильный", "stable")
+            self.update_channel_combo.addItem("Бета", "beta")
+            form.addRow("Канал обновлений", self.update_channel_combo)
+            form.addRow(self.check_updates_button)
             form.addRow("Состояние", self.diagnostics_status_label)
 
         def _connect_actions(self) -> None:
             self.navigation.currentRowChanged.connect(self.pages.setCurrentIndex)
+            self.pages.currentChanged.connect(
+                lambda _index: (
+                    self.audio_view_hidden.emit()
+                    if self.pages.currentWidget() is not self._audio_page
+                    else None
+                )
+            )
             self.button_box.accepted.connect(self._save_and_accept)
             self.button_box.rejected.connect(self.reject)
             self.button_box.button(QDialogButtonBox.StandardButton.Apply).clicked.connect(
@@ -507,38 +805,52 @@ if PYSIDE6_AVAILABLE:
                 self.overlay_check,
                 self.sounds_check,
                 self.voice_commands_check,
+                self.live_preview_check,
+                self.auto_stop_enabled,
+                self.safe_terminal_check,
+                self.caret_overlay_check,
                 self.auto_insert_check,
                 self.copy_complete_check,
                 self.auto_hide_result_check,
                 self.safe_clipboard_check,
                 self.spacing_check,
                 self.capitalize_check,
+                self.text_transformations_check,
                 self.noise_suppression_check,
                 self.normalization_check,
+                self.startup_pre_roll_check,
                 self.gpu_experimental_check,
                 self.save_history_check,
                 self.save_audio_check,
+                self.recover_drafts_check,
             )
             for check in checks:
                 check.toggled.connect(self._mark_dirty)
             combos = (
                 self.theme_combo,
+                self.dictation_mode_combo,
+                self.update_channel_combo,
                 self.interface_language_combo,
                 self.default_language_combo,
                 self.profile_combo,
                 self.target_policy_combo,
                 self.audio_device_combo,
                 self.preprocessing_combo,
+                self.preprocessing_mode_combo,
                 self.model_combo,
                 self.power_mode_combo,
+                self.memory_policy_combo,
+                self.decoding_preset_combo,
             )
             for combo in combos:
                 combo.currentIndexChanged.connect(self._mark_dirty)
             for spin in (
                 self.insertion_delay_spin,
                 self.cpu_threads_spin,
+                self.idle_unload_spin,
                 self.retention_spin,
                 self.vad_slider,
+                *self.auto_stop_limits,
             ):
                 spin.valueChanged.connect(self._mark_dirty)
             for key_edit in (
@@ -576,6 +888,7 @@ if PYSIDE6_AVAILABLE:
                     "show_overlay": self.overlay_check.isChecked(),
                     "play_sounds": self.sounds_check.isChecked(),
                     "theme": self.theme_combo.currentData(),
+                    "release_channel": self.update_channel_combo.currentData(),
                     "ui_language": self.interface_language_combo.currentData(),
                 },
                 "dictation": {
@@ -587,6 +900,16 @@ if PYSIDE6_AVAILABLE:
                         for line in self.vocabulary_edit.toPlainText().splitlines()
                         if line.strip()
                     ][:200],
+                    "live_preview": self.live_preview_check.isChecked(),
+                    "mode": self.dictation_mode_combo.currentData(),
+                    "safe_terminal_input": self.safe_terminal_check.isChecked(),
+                    "caret_overlay": self.caret_overlay_check.isChecked(),
+                    "auto_stop": {
+                        "enabled": self.auto_stop_enabled.isChecked(),
+                        "minimum_speech_ms": self.auto_stop_limits[0].value(),
+                        "trailing_silence_ms": self.auto_stop_limits[1].value(),
+                        "max_session_duration_ms": self.auto_stop_limits[2].value(),
+                    },
                     "auto_insert": self.auto_insert_check.isChecked(),
                     "copy_full_text_on_complete": self.copy_complete_check.isChecked(),
                     "auto_hide_completed_result": self.auto_hide_result_check.isChecked(),
@@ -599,23 +922,30 @@ if PYSIDE6_AVAILABLE:
                     "insertion_delay_ms": self.insertion_delay_spin.value(),
                     "add_fragment_space": self.spacing_check.isChecked(),
                     "capitalize_sentences": self.capitalize_check.isChecked(),
+                    "user_text_transformations": self.text_transformations_check.isChecked(),
                 },
                 "audio": {
                     "device_id": self.audio_device_combo.currentData(),
                     "vad_sensitivity": self.vad_slider.value() / 100.0,
                     "preprocessing_profile": self.preprocessing_combo.currentData(),
+                    "preprocessing_mode": self.preprocessing_mode_combo.currentData(),
                     "noise_suppression": self.noise_suppression_check.isChecked(),
                     "normalization": self.normalization_check.isChecked(),
+                    "startup_pre_roll": self.startup_pre_roll_check.isChecked(),
                 },
                 "model": {
                     "installed_model": self.model_combo.currentData(),
                     "cpu_threads": self.cpu_threads_spin.value(),
                     "power_mode": self.power_mode_combo.currentData(),
+                    "decoding_preset": self.decoding_preset_combo.currentData(),
+                    "memory_policy": self.memory_policy_combo.currentData(),
+                    "idle_unload_minutes": self.idle_unload_spin.value(),
                     "experimental_gpu": self.gpu_experimental_check.isChecked(),
                 },
                 "privacy": {
                     "save_history": self.save_history_check.isChecked(),
                     "save_audio": self.save_audio_check.isChecked(),
+                    "recover_unsaved_drafts": self.recover_drafts_check.isChecked(),
                     "retention_days": self.retention_spin.value(),
                 },
                 "hotkeys": {
@@ -646,6 +976,10 @@ if PYSIDE6_AVAILABLE:
                 self.sounds_check.setChecked(
                     bool(_setting(general, "play_sounds", "sounds", default=False))
                 )
+                _select_data(
+                    self.update_channel_combo,
+                    _setting(general, "release_channel", default="stable"),
+                )
                 _select_data(self.theme_combo, _setting(general, "theme", default="system"))
                 _select_data(
                     self.interface_language_combo,
@@ -665,6 +999,33 @@ if PYSIDE6_AVAILABLE:
                 vocabulary = _setting(dictation, "custom_vocabulary", default=[])
                 entries = vocabulary if isinstance(vocabulary, list) else []
                 self.vocabulary_edit.setPlainText("\n".join(str(item) for item in entries[:200]))
+                _select_data(
+                    self.dictation_mode_combo, _setting(dictation, "mode", default="toggle")
+                )
+                self.safe_terminal_check.setChecked(
+                    bool(_setting(dictation, "safe_terminal_input", default=True))
+                )
+                self.caret_overlay_check.setChecked(
+                    bool(_setting(dictation, "caret_overlay", default=False))
+                )
+                auto_stop = _setting(dictation, "auto_stop", default={})
+                self.auto_stop_enabled.setChecked(
+                    bool(_setting(auto_stop, "enabled", default=True))
+                )
+                for spin, key, default in zip(
+                    self.auto_stop_limits,
+                    (
+                        "minimum_speech_ms",
+                        "trailing_silence_ms",
+                        "max_session_duration_ms",
+                    ),
+                    (400, 1500, 120000),
+                    strict=True,
+                ):
+                    spin.setValue(int(_setting(auto_stop, key, default=default)))
+                self.live_preview_check.setChecked(
+                    bool(_setting(dictation, "live_preview", default=False))
+                )
                 self.auto_insert_check.setChecked(
                     bool(_setting(dictation, "auto_insert", default=True))
                 )
@@ -703,6 +1064,9 @@ if PYSIDE6_AVAILABLE:
                 self.capitalize_check.setChecked(
                     bool(_setting(dictation, "capitalize_sentences", default=True))
                 )
+                self.text_transformations_check.setChecked(
+                    bool(_setting(dictation, "user_text_transformations", default=True))
+                )
                 _select_data(self.audio_device_combo, _setting(audio, "device_id", default=""))
                 sensitivity = float(str(_setting(audio, "vad_sensitivity", default=0.5)))
                 self.vad_slider.setValue(round(min(1.0, max(0.0, sensitivity)) * 100))
@@ -710,8 +1074,16 @@ if PYSIDE6_AVAILABLE:
                     self.preprocessing_combo,
                     _setting(audio, "preprocessing_profile", default="normal"),
                 )
+                _select_data(
+                    self.preprocessing_mode_combo,
+                    _setting(audio, "preprocessing_mode", default="legacy"),
+                )
+                self._update_audio_processing_options()
                 self.noise_suppression_check.setChecked(
                     bool(_setting(audio, "noise_suppression", default=False))
+                )
+                self.startup_pre_roll_check.setChecked(
+                    bool(_setting(audio, "startup_pre_roll", default=False))
                 )
                 self.normalization_check.setChecked(
                     bool(_setting(audio, "normalization", default=True))
@@ -720,10 +1092,21 @@ if PYSIDE6_AVAILABLE:
                     self.model_combo,
                     _setting(model, "installed_model", "name", default=""),
                 )
-                self.cpu_threads_spin.setValue(int(str(_setting(model, "cpu_threads", default=4))))
+                self.cpu_threads_spin.setValue(int(str(_setting(model, "cpu_threads", default=0))))
                 _select_data(
                     self.power_mode_combo,
                     _setting(model, "power_mode", default="balanced"),
+                )
+                _select_data(
+                    self.memory_policy_combo,
+                    _setting(model, "memory_policy", default="keep_loaded"),
+                )
+                _select_data(
+                    self.decoding_preset_combo,
+                    _setting(model, "decoding_preset", default="balanced"),
+                )
+                self.idle_unload_spin.setValue(
+                    int(str(_setting(model, "idle_unload_minutes", default=15)))
                 )
                 self.gpu_experimental_check.setChecked(
                     bool(_setting(model, "experimental_gpu", default=False))
@@ -731,6 +1114,10 @@ if PYSIDE6_AVAILABLE:
                 self.save_history_check.setChecked(
                     not getattr(self, "_history_policy_disabled", False)
                     and bool(_setting(privacy, "save_history", default=False))
+                )
+                self.recover_drafts_check.setChecked(
+                    not getattr(self, "_history_policy_disabled", False)
+                    and bool(_setting(privacy, "recover_unsaved_drafts", default=False))
                 )
                 self.save_audio_check.setChecked(
                     not getattr(self, "_audio_policy_disabled", False)

@@ -8,5 +8,7 @@ def create_default_settings(logical_cores: int | None = None) -> AppSettings:
         return AppSettings()
 
     settings = AppSettings()
-    settings.model.cpu_threads = max(1, min(8, logical_cores - 2 if logical_cores > 4 else logical_cores))
+    settings.model.cpu_threads = max(
+        1, min(8, logical_cores - 2 if logical_cores > 4 else logical_cores)
+    )
     return settings

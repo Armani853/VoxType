@@ -11,20 +11,29 @@ from threading import Thread
 from PySide6.QtCore import Qt, QUrl, Signal
 from PySide6.QtGui import QTextBlockFormat, QTextCursor
 from PySide6.QtWidgets import (
-    QComboBox, QFileDialog, QHBoxLayout, QLabel, QListWidget, QMessageBox, QPushButton,
-    QApplication, QProgressBar, QSplitter, QStackedWidget, QTextEdit, QVBoxLayout, QWidget,
+    QApplication,
+    QFileDialog,
+    QHBoxLayout,
+    QLabel,
+    QMessageBox,
+    QSplitter,
+    QStackedWidget,
+    QTextEdit,
+    QVBoxLayout,
+    QWidget,
 )
 
 from voxtype.asr.file_transcription import FileSegment, FileTranscript, export_transcript
 from voxtype.asr.transcription_queue import FileTranscriptionQueue, TranscriptionJob
 from voxtype.windows.local_paths import is_local_path
 
-from .obsidian import VoxButton, VoxEmptyState, VoxSectionHeader
+from .obsidian import VoxBusyIndicator, VoxButton, VoxComboBox, VoxEmptyState
 from .records_view import RecordsView
 
 
 class TranscriptionPanel(QWidget):
     transcript_ready = Signal(object, object, str)
+    queue_rows_ready = Signal(object, object)
     write_finished = Signal(object, str, bool)
     _PAGE_SIZE = 200
 
@@ -32,6 +41,7 @@ class TranscriptionPanel(QWidget):
         super().__init__(parent)
         self.queue = queue
         self._revision = -1
+        self._loading_jobs = False
         self._jobs: tuple[TranscriptionJob, ...] = ()
         self._job: TranscriptionJob | None = None
         self._transcript: FileTranscript | None = None
@@ -44,16 +54,21 @@ class TranscriptionPanel(QWidget):
         root = QVBoxLayout(self)
         self.setAcceptDrops(True)
         bar = QHBoxLayout()
-        self.language = QComboBox(self)
+        self.language = VoxComboBox(self)
         for label, value in (("Русский", "ru"), ("English", "en")):
             self.language.addItem(label, value)
-        self.profile = QComboBox(self)
-        self.priority = QComboBox(self)
+        self.profile = VoxComboBox(self)
+        self.priority = VoxComboBox(self)
         for label, value in (("Обычный", 0), ("Высокий", 10), ("Низкий", -10)):
             self.priority.addItem(label, value)
-        self.automatic_export = QComboBox(self)
-        for label, suffix in (("Без автоэкспорта", ""), ("TXT", ".txt"), ("JSON", ".json"),
-                              ("SRT", ".srt"), ("WebVTT", ".vtt")):
+        self.automatic_export = VoxComboBox(self)
+        for label, suffix in (
+            ("Без автоэкспорта", ""),
+            ("TXT", ".txt"),
+            ("JSON", ".json"),
+            ("SRT", ".srt"),
+            ("WebVTT", ".vtt"),
+        ):
             self.automatic_export.addItem(label, suffix)
         if find_spec("docx"):
             self.automatic_export.addItem("DOCX", ".docx")
@@ -68,22 +83,24 @@ class TranscriptionPanel(QWidget):
         self._button(queue_actions, "Открыть транскрипт", self._open)
         root.addLayout(queue_actions)
         self.jobs_pane = QStackedWidget(self)
-        self.jobs = QListWidget(self.jobs_pane)
+        self.jobs = RecordsView(("Файл", "Состояние", "Язык", "Подробности"), self.jobs_pane)
+        self.jobs.setSortingEnabled(False)
         self.jobs.setAccessibleName("Очередь транскрипции")
-        self.jobs.itemDoubleClicked.connect(lambda _item: self._open())
+        self.jobs.doubleClicked.connect(lambda _item: self._open())
         self.jobs_pane.addWidget(self.jobs)
-        self.empty = VoxEmptyState("files", "Нет транскрипций",
-                                   "Добавьте аудиофайлы или перетащите их в эту область.", self.jobs_pane)
+        self.empty = VoxEmptyState(
+            "files",
+            "Нет транскрипций",
+            "Добавьте аудиофайлы или перетащите их в эту область.",
+            self.jobs_pane,
+        )
         self.empty.action.setText("Добавить файлы…")
         self.empty.action.clicked.connect(self._enqueue)
         self.empty.action.show()
         self.jobs_pane.addWidget(self.empty)
         self.jobs_pane.setCurrentWidget(self.empty)
         root.addWidget(self.jobs_pane)
-        self.progress = QProgressBar(self)
-        self.progress.setRange(0, 0)
-        self.progress.setTextVisible(False)
-        self.progress.setAccessibleName("Выполняется распознавание аудиофайла")
+        self.progress = VoxBusyIndicator("Выполняется распознавание аудиофайла", self)
         self.progress.hide()
         root.addWidget(self.progress)
 
@@ -120,6 +137,7 @@ class TranscriptionPanel(QWidget):
         self.feedback.setWordWrap(True)
         root.addWidget(self.feedback)
         self.transcript_ready.connect(self._show_transcript)
+        self.queue_rows_ready.connect(self._show_jobs, Qt.ConnectionType.QueuedConnection)
         self.write_finished.connect(self._finish_write)
 
     def _button(self, row, label, action):
@@ -132,10 +150,15 @@ class TranscriptionPanel(QWidget):
         if not self.isVisible():
             return
         selected_profile = self.profile.currentData() or self.queue.controller.profiles.default_id
-        profiles = tuple((item.name, item.id) for item in self.queue.controller.profiles.profiles()
-                         if self.queue.controller.profile_allowed(item))
-        existing = tuple((self.profile.itemText(i), self.profile.itemData(i))
-                         for i in range(self.profile.count()))
+        profiles = tuple(
+            (item.name, item.id)
+            for item in self.queue.controller.profiles.profiles()
+            if self.queue.controller.profile_allowed(item)
+        )
+        existing = tuple(
+            (self.profile.itemText(i), self.profile.itemData(i))
+            for i in range(self.profile.count())
+        )
         if profiles != existing:
             self.profile.clear()
             for label, value in profiles:
@@ -144,37 +167,61 @@ class TranscriptionPanel(QWidget):
             self.profile.setCurrentIndex(max(0, index))
         self.pause.setText("Продолжить очередь" if self.queue.paused else "Пауза очереди")
         revision = self.queue.revision
-        if revision == self._revision:
+        if revision == self._revision or self._loading_jobs:
             return
-        try:
-            jobs = self.queue.recent()
-        except (OSError, SQLiteError):
-            self.feedback.setText("Очередь недоступна")
+        self._loading_jobs = True
+
+        def load() -> None:
+            try:
+                jobs = self.queue.recent()
+            except (OSError, SQLiteError):
+                jobs = None
+            self.queue_rows_ready.emit(revision, jobs)
+
+        Thread(target=load, name="voxtype-file-queue-view", daemon=True).start()
+
+    def _show_jobs(self, revision: int, jobs: tuple[TranscriptionJob, ...] | None) -> None:
+        self._loading_jobs = False
+        if not self.isVisible():
             return
         self._revision = revision
-        if jobs == self._jobs:
+        if jobs is None:
+            self.feedback.setText("Очередь недоступна")
             return
-        current = self._selected()
-        self._jobs = jobs
-        self.jobs_pane.setCurrentWidget(self.jobs if jobs else self.empty)
-        self.progress.setVisible(any(job.status == "RUNNING" for job in jobs))
-        self.jobs.clear()
-        for row, job in enumerate(jobs):
-            label = f"{job.status} · {job.language.upper()} · {Path(job.input_path).name}"
-            self.jobs.addItem(f"{label} · {job.error}" if job.error else label)
-            if current and job.id == current.id:
-                self.jobs.setCurrentRow(row)
+        if jobs != self._jobs:
+            current_id = self.jobs.selected_key()
+            self._jobs = jobs
+            self.jobs_pane.setCurrentWidget(self.jobs if jobs else self.empty)
+            self.progress.setVisible(any(job.status == "RUNNING" for job in jobs))
+            self.jobs.records.replace(
+                [
+                    (
+                        job.id,
+                        (Path(job.input_path).name, job.status, job.language.upper(), job.error),
+                    )
+                    for job in jobs
+                ]
+            )
+            if current_id and current_id != self.jobs.selected_key():
+                for row, job in enumerate(jobs):
+                    if job.id == current_id:
+                        self.jobs.setCurrentIndex(self.jobs.proxy.index(row, 0))
+                        break
+        self.refresh()
 
     def _selected(self) -> TranscriptionJob | None:
-        row = self.jobs.currentRow()
-        return self._jobs[row] if 0 <= row < len(self._jobs) else None
+        current_id = self.jobs.selected_key()
+        return next((job for job in self._jobs if job.id == current_id), None)
 
     def _enqueue(self) -> None:
         self.refresh()
         if not self.profile.currentData():
             return
         sources, _ = QFileDialog.getOpenFileNames(
-            self, "Добавить аудио", "", "Аудио (*.wav *.mp3 *.m4a *.flac)",
+            self,
+            "Добавить аудио",
+            "",
+            "Аудио (*.wav *.mp3 *.m4a *.flac)",
         )
         if sources:
             self._enqueue_sources([Path(name) for name in sources])
@@ -193,8 +240,12 @@ class TranscriptionPanel(QWidget):
     def _local_audio(event: object) -> list[Path]:
         if not event.mimeData().hasUrls():
             return []
-        return [Path(url.toLocalFile()) for url in event.mimeData().urls()[:100]
-                if url.isLocalFile() and Path(url.toLocalFile()).suffix.lower() in {".wav", ".mp3", ".m4a", ".flac"}]
+        return [
+            Path(url.toLocalFile())
+            for url in event.mimeData().urls()[:100]
+            if url.isLocalFile()
+            and Path(url.toLocalFile()).suffix.lower() in {".wav", ".mp3", ".m4a", ".flac"}
+        ]
 
     def _enqueue_sources(self, sources: list[Path]) -> None:
         if not self.profile.currentData():
@@ -206,8 +257,11 @@ class TranscriptionPanel(QWidget):
             destination = None
             if suffix:
                 selected, _ = QFileDialog.getSaveFileName(
-                    self, "Новый файл транскрипта", str(source.with_suffix(suffix)),
-                    f"{suffix[1:].upper()} (*{suffix})", options=QFileDialog.Option.DontConfirmOverwrite,
+                    self,
+                    "Новый файл транскрипта",
+                    str(source.with_suffix(suffix)),
+                    f"{suffix[1:].upper()} (*{suffix})",
+                    options=QFileDialog.Option.DontConfirmOverwrite,
                 )
                 if not selected:
                     continue
@@ -215,8 +269,13 @@ class TranscriptionPanel(QWidget):
                 if not destination.suffix:
                     destination = destination.with_suffix(suffix)
             try:
-                self.queue.enqueue(source, destination, self.language.currentData(),
-                                   self.profile.currentData(), self.priority.currentData())
+                self.queue.enqueue(
+                    source,
+                    destination,
+                    self.language.currentData(),
+                    self.profile.currentData(),
+                    self.priority.currentData(),
+                )
             except (OSError, ValueError, SQLiteError) as exc:
                 failures.append(str(exc))
         self.feedback.setText("\n".join(failures[:3]) if failures else "Очередь обновлена")
@@ -248,9 +307,15 @@ class TranscriptionPanel(QWidget):
         if job is None or self._opening or self._writing:
             return
         self._capture_page_edits()
-        if self._transcript and tuple(self._working_segments) != self._transcript.segments:
-            if QMessageBox.question(self, "Несохранённые правки", "Открыть другой транскрипт?") != QMessageBox.StandardButton.Yes:
-                return
+        if (
+            self._transcript
+            and tuple(self._working_segments) != self._transcript.segments
+            and (
+                QMessageBox.question(self, "Несохранённые правки", "Открыть другой транскрипт?")
+                != QMessageBox.StandardButton.Yes
+            )
+        ):
+            return
         self._opening = True
         self.segments.setEnabled(False)
 
@@ -264,7 +329,9 @@ class TranscriptionPanel(QWidget):
 
         Thread(target=read, name="voxtype-file-transcript-read", daemon=True).start()
 
-    def _show_transcript(self, job: TranscriptionJob, transcript: FileTranscript | None, error: str) -> None:
+    def _show_transcript(
+        self, job: TranscriptionJob, transcript: FileTranscript | None, error: str
+    ) -> None:
         self._opening = False
         self.segments.setEnabled(True)
         if transcript is None:
@@ -291,15 +358,18 @@ class TranscriptionPanel(QWidget):
         self._segment_index = int(value) if value is not None else -1
         active = 0 <= self._segment_index < len(self._working_segments)
         self.segment_edit.setEnabled(active)
-        self.segment_edit.setPlainText(self._working_segments[self._segment_index].text if active else "")
+        self.segment_edit.setPlainText(
+            self._working_segments[self._segment_index].text if active else ""
+        )
         if active:
             cursor = self.segment_edit.textCursor()
             cursor.select(QTextCursor.SelectionType.Document)
             format = QTextBlockFormat()
             format.setLineHeight(135, 1)
             cursor.mergeBlockFormat(format)
-        self.seek_button.setEnabled(active and self._job is not None
-                                    and Path(self._job.input_path).is_file())
+        self.seek_button.setEnabled(
+            active and self._job is not None and Path(self._job.input_path).is_file()
+        )
 
     def _change_page(self, step: int) -> None:
         destination = self._page + step
@@ -312,11 +382,13 @@ class TranscriptionPanel(QWidget):
     def _show_page(self) -> None:
         self._segment_index = -1
         offset = self._page * self._PAGE_SIZE
-        visible = self._working_segments[offset:offset + self._PAGE_SIZE]
-        self.segments.records.replace([
-            (str(index), (f"{segment.start:08.3f} с", " ".join(segment.text.split())[:90]))
-            for index, segment in enumerate(visible, start=offset)
-        ])
+        visible = self._working_segments[offset : offset + self._PAGE_SIZE]
+        self.segments.records.replace(
+            [
+                (str(index), (f"{segment.start:08.3f} с", " ".join(segment.text.split())[:90]))
+                for index, segment in enumerate(visible, start=offset)
+            ]
+        )
         if visible:
             self.segments.selectRow(0)
         else:
@@ -331,7 +403,9 @@ class TranscriptionPanel(QWidget):
     def _copy(self) -> None:
         transcript = self._edited()
         if transcript is not None:
-            QApplication.clipboard().setText(self.segment_edit.textCursor().selectedText() or transcript.text)
+            QApplication.clipboard().setText(
+                self.segment_edit.textCursor().selectedText() or transcript.text
+            )
 
     def _search(self) -> None:
         from PySide6.QtWidgets import QInputDialog
@@ -362,8 +436,9 @@ class TranscriptionPanel(QWidget):
         transcript = self._edited()
         if self._job is not None and transcript is not None:
             job_id = self._job.id
-            self._write(lambda: self.queue.save_result(job_id, transcript),
-                        transcript, "Правки сохранены")
+            self._write(
+                lambda: self.queue.save_result(job_id, transcript), transcript, "Правки сохранены"
+            )
 
     def _export(self) -> None:
         if self._opening or self._writing:
@@ -375,8 +450,11 @@ class TranscriptionPanel(QWidget):
         if find_spec("docx"):
             formats += ";;DOCX (*.docx)"
         selected, selected_filter = QFileDialog.getSaveFileName(
-            self, "Экспорт транскрипта", str(Path(self._job.input_path).with_suffix(".txt")),
-            formats, options=QFileDialog.Option.DontConfirmOverwrite,
+            self,
+            "Экспорт транскрипта",
+            str(Path(self._job.input_path).with_suffix(".txt")),
+            formats,
+            options=QFileDialog.Option.DontConfirmOverwrite,
         )
         if not selected:
             return
@@ -389,13 +467,18 @@ class TranscriptionPanel(QWidget):
             self.feedback.setText("Политика организации разрешает только локальные файлы")
             return
         overwrite = target.exists()
-        if overwrite and QMessageBox.question(
-            self, "Заменить файл?", target.name
-        ) != QMessageBox.StandardButton.Yes:
+        if (
+            overwrite
+            and QMessageBox.question(self, "Заменить файл?", target.name)
+            != QMessageBox.StandardButton.Yes
+        ):
             return
         source = Path(self._job.input_path)
-        self._write(lambda: export_transcript(transcript, target, source=source, overwrite=overwrite),
-                    None, "Транскрипт экспортирован")
+        self._write(
+            lambda: export_transcript(transcript, target, source=source, overwrite=overwrite),
+            None,
+            "Транскрипт экспортирован",
+        )
 
     def _write(self, action, saved: FileTranscript | None, message: str) -> None:
         self._writing = True

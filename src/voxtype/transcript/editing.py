@@ -19,7 +19,8 @@ class TextEditService:
         if operation == "Sentence case":
             return re.sub(
                 r"(^|[.!?]\s+|\n\s*)([^\W\d_])",
-                lambda m: m[1] + m[2].upper(), text,
+                lambda m: m[1] + m[2].upper(),
+                text,
             )
         if operation == "Remove duplicate spaces":
             return re.sub(r"[^\S\r\n]{2,}", " ", text)
@@ -28,7 +29,9 @@ class TextEditService:
                 raise ValueError("Укажите фразу для замены")
             return text.replace(source, replacement)
         if operation == "Insert bullet list formatting":
-            return "\n".join("• " + line.lstrip() if line.strip() else "" for line in text.split("\n"))
+            return "\n".join(
+                "• " + line.lstrip() if line.strip() else "" for line in text.split("\n")
+            )
         if operation == "Normalize line breaks":
             return text.replace("\r\n", "\n").replace("\r", "\n")
         raise ValueError("Неизвестный способ правки")

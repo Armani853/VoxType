@@ -129,10 +129,13 @@ class UIState:
     full_transcript: str = ""
     delivery_status: str = "pending"
     readiness: AppReadiness | None = None
+    configured_language: DictationLanguage | None = None
 
     def __post_init__(self) -> None:
         self.state = AppStatus.coerce(self.state)
         self.language = DictationLanguage.coerce(self.language)
+        if self.configured_language is not None:
+            self.configured_language = DictationLanguage.coerce(self.configured_language)
         self.model_profile = ModelProfile.coerce(self.model_profile)
         self.session_elapsed_s = max(0.0, _finite_float(self.session_elapsed_s))
         self.queued_audio_seconds = max(0.0, _finite_float(self.queued_audio_seconds))
@@ -221,6 +224,7 @@ def snapshot_from(source: UIState | Mapping[str, Any] | object) -> UIState:
         full_transcript=read("full_transcript", ""),
         delivery_status=read("delivery_status", "pending"),
         readiness=read("readiness", None),
+        configured_language=read("configured_language", None),
     )
 
 

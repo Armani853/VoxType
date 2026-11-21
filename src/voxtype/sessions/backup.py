@@ -30,7 +30,9 @@ def _copy_database(source: Path, destination: Path) -> None:
             raise TimeoutError("SQLite backup exceeded its time budget")
 
     with (
-        closing(sqlite3.connect(source.resolve().as_uri() + "?mode=ro", uri=True, timeout=3)) as origin,
+        closing(
+            sqlite3.connect(source.resolve().as_uri() + "?mode=ro", uri=True, timeout=3)
+        ) as origin,
         closing(sqlite3.connect(destination, timeout=3)) as target,
     ):
         origin.backup(target, pages=128, progress=progress, sleep=0.05)
@@ -44,11 +46,16 @@ class BackupManager:
 
     def create(self, *, automatic: bool = False) -> Path | None:
         self.root.mkdir(parents=True, exist_ok=True)
-        autos = sorted((
-            path for path in self.root.glob("auto-*")
-            if re.fullmatch(r"auto-[0-9]+-[0-9a-f]{8}", path.name)
-            and path.is_dir() and not path.is_symlink()
-        ), reverse=True)
+        autos = sorted(
+            (
+                path
+                for path in self.root.glob("auto-*")
+                if re.fullmatch(r"auto-[0-9]+-[0-9a-f]{8}", path.name)
+                and path.is_dir()
+                and not path.is_symlink()
+            ),
+            reverse=True,
+        )
         if automatic and autos and time.time() - autos[0].stat().st_mtime < 86_400:
             return None
         prefix = "auto" if automatic else "manual"
@@ -57,11 +64,19 @@ class BackupManager:
             temp = Path(staging)
             db = temp / "sessions.sqlite3"
             _copy_database(self.database, db)
-            (temp / "manifest.json").write_text(json.dumps({
-                "schema_version": 1, "database_schema": SESSION_SCHEMA_VERSION,
-                "app_version": __version__, "created_at_utc": time.time(),
-                "sha256": _digest(db), "bytes": db.stat().st_size,
-            }), encoding="utf-8")
+            (temp / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "database_schema": SESSION_SCHEMA_VERSION,
+                        "app_version": __version__,
+                        "created_at_utc": time.time(),
+                        "sha256": _digest(db),
+                        "bytes": db.stat().st_size,
+                    }
+                ),
+                encoding="utf-8",
+            )
             os.replace(temp, folder)
         if automatic:
             for obsolete in autos[4:]:
@@ -69,7 +84,10 @@ class BackupManager:
         return folder / "manifest.json"
 
     def _remove_archive(self, folder: Path) -> None:
-        if folder.is_symlink() or set(child.name for child in folder.iterdir()) != {"manifest.json", "sessions.sqlite3"}:
+        if folder.is_symlink() or set(child.name for child in folder.iterdir()) != {
+            "manifest.json",
+            "sessions.sqlite3",
+        }:
             return
         with suppress(OSError):
             (folder / "sessions.sqlite3").unlink()
@@ -83,20 +101,32 @@ class BackupManager:
             raise ValueError("Invalid backup manifest")
         meta = json.loads(raw)
         if (
-            not isinstance(meta, dict) or meta.get("schema_version") != 1
+            not isinstance(meta, dict)
+            or meta.get("schema_version") != 1
             or type(meta.get("database_schema")) is not int
             or not 0 <= meta["database_schema"] <= SESSION_SCHEMA_VERSION
-            or type(meta.get("bytes")) is not int or not 0 < meta["bytes"] <= 2 * 1024**3
+            or type(meta.get("bytes")) is not int
+            or not 0 < meta["bytes"] <= 2 * 1024**3
         ):
             raise ValueError("Unsupported backup schema or size")
         database = manifest.with_name("sessions.sqlite3")
-        if database.is_symlink() or database.stat().st_size != meta["bytes"] or _digest(database) != meta.get("sha256"):
+        if (
+            database.is_symlink()
+            or database.stat().st_size != meta["bytes"]
+            or _digest(database) != meta.get("sha256")
+        ):
             raise ValueError("Backup checksum mismatch")
-        with closing(sqlite3.connect(database.resolve().as_uri() + "?mode=ro&immutable=1", uri=True)) as connection:
+        with closing(
+            sqlite3.connect(database.resolve().as_uri() + "?mode=ro&immutable=1", uri=True)
+        ) as connection:
             schema = connection.execute("PRAGMA user_version").fetchone()[0]
-            tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            tables = {
+                row[0]
+                for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            }
             if (
-                schema != meta["database_schema"] or not {"sessions", "session_events"} <= tables
+                schema != meta["database_schema"]
+                or not {"sessions", "session_events"} <= tables
                 or connection.execute("PRAGMA quick_check(1)").fetchone()[0] != "ok"
             ):
                 raise ValueError("Backup database is invalid")
@@ -114,6 +144,7 @@ class BackupManager:
             if source.is_symlink() or not 0 < source.stat().st_size <= 2 * 1024**3:
                 raise ValueError("Backup file is not supported")
             from shutil import copyfile
+
             copyfile(source, temp / "sessions.sqlite3")
             copyfile(manifest, temp / "manifest.json")
             self._validate(temp / "manifest.json")

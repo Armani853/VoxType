@@ -52,7 +52,11 @@ class StagedUpdate:
     info: UpdateInfo
 
     def launch_verified(self) -> None:
-        if os.name != "nt" or self.path.is_symlink() or self.path.stat().st_size != self.info.size_bytes:
+        if (
+            os.name != "nt"
+            or self.path.is_symlink()
+            or self.path.stat().st_size != self.info.size_bytes
+        ):
             raise ValueError("Invalid staged installer")
         with self.path.open("rb") as stream:
             if hashlib.file_digest(stream, "sha256").hexdigest() != self.info.sha256:
@@ -61,7 +65,10 @@ class StagedUpdate:
 
 
 def _version(value: str) -> tuple[int, int, int, int, int]:
-    match = re.fullmatch(r"(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})(?:-beta\.(0|[1-9][0-9]{0,5}))?", value)
+    match = re.fullmatch(
+        r"(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})(?:-beta\.(0|[1-9][0-9]{0,5}))?",
+        value,
+    )
     if match is None:
         raise ValueError("Invalid release version")
     major, minor, patch, beta = match.groups()
@@ -69,7 +76,9 @@ def _version(value: str) -> tuple[int, int, int, int, int]:
 
 
 def _canonical(document: dict) -> bytes:
-    return json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False).encode("ascii")
+    return json.dumps(
+        document, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False
+    ).encode("ascii")
 
 
 def _unique_fields(pairs):
@@ -90,7 +99,9 @@ class UpdateMetadataClient:
         self._endpoint = endpoint
         self._hostname = urlsplit(endpoint).hostname
         self._require_url(endpoint)
-        self._verifier = Ed25519PublicKey.from_public_bytes(base64.b64decode(public_key, validate=True))
+        self._verifier = Ed25519PublicKey.from_public_bytes(
+            base64.b64decode(public_key, validate=True)
+        )
         self.version = version
         self._opener = build_opener(_NoRedirects())
 
@@ -105,9 +116,15 @@ class UpdateMetadataClient:
     def _require_url(self, url: str) -> None:
         parsed = urlsplit(url)
         if (
-            parsed.scheme != "https" or not parsed.hostname or parsed.hostname != self._hostname
-            or parsed.port not in (None, 443) or parsed.username is not None or parsed.password is not None
-            or parsed.fragment or not parsed.path.startswith("/") or any(ord(ch) <= 32 for ch in url)
+            parsed.scheme != "https"
+            or not parsed.hostname
+            or parsed.hostname != self._hostname
+            or parsed.port not in (None, 443)
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.fragment
+            or not parsed.path.startswith("/")
+            or any(ord(ch) <= 32 for ch in url)
             or chr(92) in url
         ):
             raise ValueError("Untrusted update URL")
@@ -115,7 +132,9 @@ class UpdateMetadataClient:
     def check(self) -> UpdateInfo | None:
         deadline = time.monotonic() + 12
         body = bytearray()
-        with self._opener.open(Request(self._endpoint, headers={"Accept": "application/json"}), timeout=8) as response:
+        with self._opener.open(
+            Request(self._endpoint, headers={"Accept": "application/json"}), timeout=8
+        ) as response:
             while time.monotonic() < deadline and len(body) <= _METADATA_LIMIT:
                 block = response.read1(min(8192, _METADATA_LIMIT + 1 - len(body)))
                 if not block:
@@ -124,13 +143,33 @@ class UpdateMetadataClient:
         if time.monotonic() >= deadline or len(body) > _METADATA_LIMIT:
             raise ValueError("Update metadata exceeded its size or time limit")
         document = json.loads(body, object_pairs_hook=_unique_fields)
-        if not isinstance(document, dict) or set(document) != {"payload", "signature"} or not isinstance(document["payload"], dict):
+        if (
+            not isinstance(document, dict)
+            or set(document) != {"payload", "signature"}
+            or not isinstance(document["payload"], dict)
+        ):
             raise ValueError("Invalid manifest envelope")
         payload = document["payload"]
-        self._verifier.verify(base64.b64decode(document["signature"], validate=True), _canonical(payload))
-        fields = {"schema_version", "version", "channel", "platform", "download_url", "sha256",
-                  "artifact_signature", "published_at", "min_os_version", "size_bytes"}
-        if set(payload) != fields or type(payload["schema_version"]) is not int or payload["schema_version"] != 1:
+        self._verifier.verify(
+            base64.b64decode(document["signature"], validate=True), _canonical(payload)
+        )
+        fields = {
+            "schema_version",
+            "version",
+            "channel",
+            "platform",
+            "download_url",
+            "sha256",
+            "artifact_signature",
+            "published_at",
+            "min_os_version",
+            "size_bytes",
+        }
+        if (
+            set(payload) != fields
+            or type(payload["schema_version"]) is not int
+            or payload["schema_version"] != 1
+        ):
             raise ValueError("Unsupported update schema")
         target = f"windows-{platform.machine().lower()}"
         if payload["platform"] != target or payload["channel"] != self.version.release_channel:
@@ -143,10 +182,13 @@ class UpdateMetadataClient:
         minimum = payload["min_os_version"]
         published = datetime.fromisoformat(payload["published_at"])
         if (
-            not isinstance(minimum, list) or len(minimum) != 3
-            or any(type(item) is not int or item < 0 for item in minimum) or published.tzinfo is None
+            not isinstance(minimum, list)
+            or len(minimum) != 3
+            or any(type(item) is not int or item < 0 for item in minimum)
+            or published.tzinfo is None
             or not re.fullmatch(r"[0-9a-f]{64}", payload["sha256"])
-            or type(payload["size_bytes"]) is not int or not 0 < payload["size_bytes"] <= _INSTALLER_LIMIT
+            or type(payload["size_bytes"]) is not int
+            or not 0 < payload["size_bytes"] <= _INSTALLER_LIMIT
             or len(base64.b64decode(payload["artifact_signature"], validate=True)) != 64
         ):
             raise ValueError("Invalid signed update metadata")
@@ -154,9 +196,14 @@ class UpdateMetadataClient:
             return None
         self._require_url(payload["download_url"])
         return UpdateInfo(
-            payload["version"], ReleaseChannel(payload["channel"]), payload["download_url"],
-            payload["sha256"], payload["artifact_signature"], payload["published_at"],
-            tuple(minimum), payload["size_bytes"],
+            payload["version"],
+            ReleaseChannel(payload["channel"]),
+            payload["download_url"],
+            payload["sha256"],
+            payload["artifact_signature"],
+            payload["published_at"],
+            tuple(minimum),
+            payload["size_bytes"],
         )
 
     def download(self, release: UpdateInfo, root: Path, cancel: Event) -> StagedUpdate:
@@ -172,7 +219,10 @@ class UpdateMetadataClient:
         received = 0
         deadline = time.monotonic() + 900
         try:
-            with self._opener.open(release.download_url, timeout=8) as response, temporary.open("xb") as stream:
+            with (
+                self._opener.open(release.download_url, timeout=8) as response,
+                temporary.open("xb") as stream,
+            ):
                 while not cancel.is_set() and time.monotonic() < deadline:
                     block = response.read1(128 * 1024)
                     if not block:

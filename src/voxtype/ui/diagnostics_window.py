@@ -9,9 +9,10 @@ from ._optional import PYSIDE6_AVAILABLE, require_pyside6
 from .models import DiagnosticReport, diagnostic_report_from
 
 if PYSIDE6_AVAILABLE:
-    from PySide6.QtCore import Signal
+    from PySide6.QtCore import QTimer, Signal
     from PySide6.QtGui import QColor, QGuiApplication
     from PySide6.QtWidgets import (
+        QCheckBox,
         QDialog,
         QHBoxLayout,
         QHeaderView,
@@ -33,6 +34,8 @@ if PYSIDE6_AVAILABLE:
         self_test_requested = Signal()
         open_log_requested = Signal()
         export_requested = Signal()
+        resources_requested = Signal()
+        updates_requested = Signal()
 
         def __init__(self, parent: QWidget | None = None) -> None:
             super().__init__(parent)
@@ -45,6 +48,29 @@ if PYSIDE6_AVAILABLE:
             self._build_ui()
             self._connect_ui()
             self.set_report(self._report)
+            self._resource_timer = QTimer(self, interval=1500)
+            self._resource_timer.timeout.connect(self.resources_requested.emit)
+            self.live_resources.toggled.connect(self._update_resource_timer)
+
+        def _update_resource_timer(self) -> None:
+            if self.isVisible() and self.live_resources.isChecked():
+                self._resource_timer.start()
+                self.resources_requested.emit()
+            else:
+                self._resource_timer.stop()
+                self.resource_label.clear()
+
+        def showEvent(self, event: object) -> None:
+            super().showEvent(event)
+            self._update_resource_timer()
+
+        def hideEvent(self, event: object) -> None:
+            self._resource_timer.stop()
+            super().hideEvent(event)
+
+        def show_resource_counters(self, summary: str) -> None:
+            if summary != self.resource_label.text():
+                self.resource_label.setText(summary)
 
         def _build_ui(self) -> None:
             root = QVBoxLayout(self)
@@ -72,7 +98,16 @@ if PYSIDE6_AVAILABLE:
             self.self_test_button.setProperty("compactPrimary", True)
             header.addWidget(self.refresh_button)
             header.addWidget(self.self_test_button)
+            updates = QPushButton("Обновления", self)
+            updates.clicked.connect(lambda: self.updates_requested.emit())
+            header.addWidget(updates)
             root.addLayout(header)
+            self.live_resources = QCheckBox("Показывать нагрузку в реальном времени", self)
+            self.resource_label = QLabel(self)
+            self.resource_label.setWordWrap(True)
+            self.resource_label.setProperty("muted", True)
+            root.addWidget(self.live_resources)
+            root.addWidget(self.resource_label)
 
             self.progress = QProgressBar(self)
             self.progress.setRange(0, 0)

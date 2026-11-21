@@ -7,12 +7,11 @@ pause. Exact text equality alone is deliberately insufficient.
 
 from __future__ import annotations
 
-from collections.abc import Callable
-
 import re
 import threading
 import unicodedata
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from itertools import islice
@@ -123,14 +122,21 @@ class TranscriptMerger:
                 raw_insertion = join_word_texts([word.text for word in remaining])
             if raw_insertion and transform is not None:
                 raw_insertion = transform(raw_insertion)
-            insertion = raw_insertion if raw_insertion in {"\n", "\n\n"} else (
-                format_fragment_boundary(
-                    self._text, raw_insertion,
-                    add_space=add_space and not (
-                        code_spacing and (self._text.endswith("_") or raw_insertion.startswith(("_", "(")))
-                    ),
-                    capitalize=capitalize,
-                    normalize=not preserve_format,
+            insertion = (
+                raw_insertion
+                if raw_insertion in {"\n", "\n\n"}
+                else (
+                    format_fragment_boundary(
+                        self._text,
+                        raw_insertion,
+                        add_space=add_space
+                        and not (
+                            code_spacing
+                            and (self._text.endswith("_") or raw_insertion.startswith(("_", "(")))
+                        ),
+                        capitalize=capitalize,
+                        normalize=not preserve_format,
+                    )
                 )
             )
             if insertion:

@@ -13,7 +13,8 @@ from pathlib import Path
 from voxtype.core.profiles import DictationContext, normalized_executable
 
 _PRIVILEGED_SIDS = (
-    "S-1-5-18", "S-1-5-32-544",
+    "S-1-5-18",
+    "S-1-5-32-544",
     "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464",
 )
 _WRITE_ACCESS = 0x500D0156  # generic write/all, ownership, ACL, delete, data and attribute writes
@@ -41,9 +42,14 @@ class EnterprisePolicy:
         values = {}
         for key, value in raw.items():
             if key in {"allowed_models", "allowed_profiles", "disabled_applications"}:
-                if (not isinstance(value, (list, tuple)) or len(value) > 500
-                        or any(not isinstance(item, str) or not item.strip()
-                               or len(item) > 1024 for item in value)):
+                if (
+                    not isinstance(value, (list, tuple))
+                    or len(value) > 500
+                    or any(
+                        not isinstance(item, str) or not item.strip() or len(item) > 1024
+                        for item in value
+                    )
+                ):
                     raise ValueError("Неверный список корпоративных ограничений")
                 values[key] = tuple(value)
             elif type(value) is bool:
@@ -81,7 +87,11 @@ class EnterprisePolicyService:
             self.path = path
             if not path.is_file():
                 return
-            if not self._trusted(base, parent_only=True) or not self._trusted(path.parent) or not self._trusted(path):
+            if (
+                not self._trusted(base, parent_only=True)
+                or not self._trusted(path.parent)
+                or not self._trusted(path)
+            ):
                 self.status = "Отклонена: владелец или права NTFS допускают изменение"
                 return
             with path.open("rb") as source:
@@ -116,12 +126,25 @@ class EnterprisePolicyService:
         dacl = ctypes.c_void_p()
         descriptor = ctypes.c_void_p()
         security.GetNamedSecurityInfoW.argtypes = (
-            wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
-            ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p,
-            ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p),
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_void_p),
         )
-        if security.GetNamedSecurityInfoW(str(path), 1, 5, ctypes.byref(owner), None,
-                                          ctypes.byref(dacl), None, ctypes.byref(descriptor)):
+        if security.GetNamedSecurityInfoW(
+            str(path),
+            1,
+            5,
+            ctypes.byref(owner),
+            None,
+            ctypes.byref(dacl),
+            None,
+            ctypes.byref(descriptor),
+        ):
             return False
         sid_strings: list[ctypes.c_void_p] = []
 

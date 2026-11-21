@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import json
-from hashlib import sha256
 import os
 import sqlite3
 import threading
 import time
 import uuid
 from dataclasses import dataclass
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
@@ -110,7 +110,9 @@ class SessionRepository:
     def _initialize_schema(self) -> None:
         version = self._connection.execute("PRAGMA user_version").fetchone()[0]
         if version > SESSION_SCHEMA_VERSION:
-            raise UnsupportedDatabaseSchema(f"Unsupported database schema {version}; expected at most {SESSION_SCHEMA_VERSION}")
+            raise UnsupportedDatabaseSchema(
+                f"Unsupported database schema {version}; expected at most {SESSION_SCHEMA_VERSION}"
+            )
         self._connection.execute("PRAGMA journal_mode=WAL")
         with self._connection:
             self._connection.executescript(
@@ -156,7 +158,9 @@ class SessionRepository:
                 """
             )
             self._connection.execute("BEGIN IMMEDIATE")
-            columns = {row["name"] for row in self._connection.execute("PRAGMA table_info(sessions)")}
+            columns = {
+                row["name"] for row in self._connection.execute("PRAGMA table_info(sessions)")
+            }
             if "profile_id" not in columns:
                 self._connection.execute(
                     "ALTER TABLE sessions ADD COLUMN profile_id TEXT NOT NULL DEFAULT 'general'"
@@ -170,7 +174,9 @@ class SessionRepository:
             )
             if version < 1:
                 if "recovery_allowed" not in columns:
-                    self._connection.execute("ALTER TABLE sessions ADD COLUMN recovery_allowed INTEGER NOT NULL DEFAULT 0")
+                    self._connection.execute(
+                        "ALTER TABLE sessions ADD COLUMN recovery_allowed INTEGER NOT NULL DEFAULT 0"
+                    )
                 if "updated_at" not in columns:
                     self._connection.execute("ALTER TABLE sessions ADD COLUMN updated_at REAL")
                 self._connection.execute(
@@ -297,8 +303,14 @@ class SessionRepository:
         return identifier
 
     def save_file_record(
-        self, session_id: str, language: str, model: str, profile_id: str,
-        model_profile: str, duration: float, text: str,
+        self,
+        session_id: str,
+        language: str,
+        model: str,
+        profile_id: str,
+        model_profile: str,
+        duration: float,
+        text: str,
     ) -> None:
         now = time.time()
         with self._lock, self._connection:
@@ -345,7 +357,13 @@ class SessionRepository:
         return cursor.rowcount == 1
 
     def queue_delivery(
-        self, delivery_id: str, session_id: str, text: str, strategy: str, *, whole_result: bool,
+        self,
+        delivery_id: str,
+        session_id: str,
+        text: str,
+        strategy: str,
+        *,
+        whole_result: bool,
     ) -> bool:
         if not text:
             return False
@@ -353,31 +371,48 @@ class SessionRepository:
         now = time.time()
         with self._lock, self._connection:
             row = self._connection.execute(
-                "SELECT committed_text, target_application FROM sessions WHERE session_id=?", (session_id,),
+                "SELECT committed_text, target_application FROM sessions WHERE session_id=?",
+                (session_id,),
             ).fetchone()
             if row is None:
                 return False
             committed = row["committed_text"]
             start = 0 if whole_result else len(committed) - len(text)
-            if start < 0 or committed[start:start + len(text)] != text:
+            if start < 0 or committed[start : start + len(text)] != text:
                 return False
-            cursor = self._connection.execute("""
+            cursor = self._connection.execute(
+                """
                 INSERT INTO delivery_outbox (
                     delivery_id, session_id, created_at, updated_at, text_start,
                     text_length, text_sha256, target_executable, requested_strategy
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(delivery_id) DO NOTHING
-            """, (delivery_id, session_id, now, now, start, len(text), digest, row["target_application"], strategy))
+            """,
+                (
+                    delivery_id,
+                    session_id,
+                    now,
+                    now,
+                    start,
+                    len(text),
+                    digest,
+                    row["target_application"],
+                    strategy,
+                ),
+            )
             return cursor.rowcount == 1
 
     def claim_delivery(self, delivery_id: str, *, explicit: bool = False) -> bool:
         with self._lock, self._connection:
-            cursor = self._connection.execute("""
+            cursor = self._connection.execute(
+                """
                 UPDATE delivery_outbox SET status='attempting', updated_at=?, attempt_count=attempt_count+1
                 WHERE delivery_id=? AND (status='pending' OR (? AND status IN (
                     'failed', 'submitted_unconfirmed'
                 )))
-            """, (time.time(), delivery_id, explicit))
+            """,
+                (time.time(), delivery_id, explicit),
+            )
             return cursor.rowcount == 1
 
     def finish_delivery(self, delivery_id: str, status: str, error: str | None = None) -> None:
@@ -393,38 +428,55 @@ class SessionRepository:
 
     def queued_retry_ids(self, session_id: str) -> tuple[str, ...]:
         with self._lock:
-            rows = self._connection.execute("""
+            rows = self._connection.execute(
+                """
                 SELECT delivery_id FROM delivery_outbox
                 WHERE session_id=? AND status='failed' AND last_error_code IN ('queued','blocked')
                 ORDER BY created_at DESC LIMIT 256
-            """, (session_id,)).fetchall()
+            """,
+                (session_id,),
+            ).fetchall()
         return tuple(row[0] for row in rows)
 
     def settle_queued_retry(self, delivery_ids: tuple[str, ...]) -> None:
         with self._lock, self._connection:
-            self._connection.executemany("""
+            self._connection.executemany(
+                """
                 UPDATE delivery_outbox SET status='submitted_unconfirmed', updated_at=?, last_error_code=NULL
                 WHERE delivery_id=? AND status='failed' AND last_error_code IN ('queued','blocked')
-            """, ((time.time(), delivery_id) for delivery_id in delivery_ids))
+            """,
+                ((time.time(), delivery_id) for delivery_id in delivery_ids),
+            )
 
     def pending_deliveries(self, limit: int = 40) -> tuple[OutboxItem, ...]:
         with self._lock:
-            rows = self._connection.execute("""
+            rows = self._connection.execute(
+                """
                 SELECT d.*, substr(s.committed_text, d.text_start + 1, d.text_length) AS fragment
                 FROM delivery_outbox d JOIN sessions s USING(session_id)
                 WHERE d.status NOT IN ('confirmed','cancelled')
                 ORDER BY d.created_at DESC LIMIT ?
-            """, (max(1, min(100, limit)),)).fetchall()
+            """,
+                (max(1, min(100, limit)),),
+            ).fetchall()
         return tuple(
-            OutboxItem(row["delivery_id"], row["session_id"], row["created_at"], row["fragment"],
-                       row["target_executable"], row["status"])
+            OutboxItem(
+                row["delivery_id"],
+                row["session_id"],
+                row["created_at"],
+                row["fragment"],
+                row["target_executable"],
+                row["status"],
+            )
             for row in rows
             if sha256(row["fragment"].encode("utf-8")).hexdigest() == row["text_sha256"]
         )
 
     def delete_delivery(self, delivery_id: str) -> None:
         with self._lock, self._connection:
-            self._connection.execute("DELETE FROM delivery_outbox WHERE delivery_id=?", (delivery_id,))
+            self._connection.execute(
+                "DELETE FROM delivery_outbox WHERE delivery_id=?", (delivery_id,)
+            )
 
     def update_metrics(
         self,
@@ -522,7 +574,8 @@ class SessionRepository:
         with self._lock, self._connection:
             self._connection.execute(
                 """UPDATE sessions SET committed_text=?, source_type='draft', recovery_allowed=1, updated_at=?
-                   WHERE session_id=?""", (text, time.time(), session_id),
+                   WHERE session_id=?""",
+                (text, time.time(), session_id),
             )
             self._prune_drafts(limit)
 
@@ -545,12 +598,14 @@ class SessionRepository:
         self._connection.execute(
             """DELETE FROM session_events WHERE session_id IN (
                SELECT session_id FROM sessions WHERE source_type='draft' AND finished_at IS NOT NULL
-               ORDER BY updated_at DESC LIMIT -1 OFFSET ?)""", (limit,),
+               ORDER BY updated_at DESC LIMIT -1 OFFSET ?)""",
+            (limit,),
         )
         self._connection.execute(
             """DELETE FROM sessions WHERE session_id IN (
                SELECT session_id FROM sessions WHERE source_type='draft' AND finished_at IS NOT NULL
-               ORDER BY updated_at DESC LIMIT -1 OFFSET ?)""", (limit,),
+               ORDER BY updated_at DESC LIMIT -1 OFFSET ?)""",
+            (limit,),
         )
 
     def recoverable(self, *, include_drafts: bool, limit: int = 100) -> tuple[RecoveryRecord, ...]:
@@ -560,12 +615,23 @@ class SessionRepository:
                    source_type, status, committed_text FROM sessions
                    WHERE recovery_allowed=1 AND (source_type!='draft' OR ?)
                      AND (finished_at IS NULL OR status IN ('interrupted','recovery_required') OR source_type='draft')
-                   ORDER BY touched DESC LIMIT ?""", (include_drafts, max(1, min(100, limit))),
+                   ORDER BY touched DESC LIMIT ?""",
+                (include_drafts, max(1, min(100, limit))),
             ).fetchall()
-        return tuple(RecoveryRecord(
-            1, row["session_id"], row["started_at"], row["touched"], row["source_type"],
-            row["status"], row["committed_text"], row["session_id"], True,
-        ) for row in rows)
+        return tuple(
+            RecoveryRecord(
+                1,
+                row["session_id"],
+                row["started_at"],
+                row["touched"],
+                row["source_type"],
+                row["status"],
+                row["committed_text"],
+                row["session_id"],
+                True,
+            )
+            for row in rows
+        )
 
     def unfinished(self) -> tuple[SessionRecord, ...]:
         with self._lock:
@@ -582,15 +648,26 @@ class SessionRepository:
         return tuple(self._record(row) for row in rows)
 
     def search(
-        self, *, text: str = "", profile: str = "", application: str = "",
-        since: float | None = None, until: float | None = None, page: int = 0,
-        language: str = "", status: str = "", include_drafts: bool = False, source_type: str = "",
+        self,
+        *,
+        text: str = "",
+        profile: str = "",
+        application: str = "",
+        since: float | None = None,
+        until: float | None = None,
+        page: int = 0,
+        language: str = "",
+        status: str = "",
+        include_drafts: bool = False,
+        source_type: str = "",
     ) -> tuple[tuple[SessionRecord, ...], bool]:
         clauses: list[str] = [] if include_drafts else ["source_type != 'draft'"]
         values: list[str | float | int] = []
         text = text.strip()[:256]
         if text and self._fts and any(char.isalnum() for char in text):
-            clauses.append("rowid IN (SELECT rowid FROM session_search WHERE session_search MATCH ?)")
+            clauses.append(
+                "rowid IN (SELECT rowid FROM session_search WHERE session_search MATCH ?)"
+            )
             values.append('"' + text.replace('"', '""') + '"')
         elif text:
             clauses.append("unicode_casefold(committed_text) LIKE ? ESCAPE '!'")
@@ -628,7 +705,12 @@ class SessionRepository:
         return tuple(self._record(row) for row in rows[:100]), len(rows) > 100
 
     def record_usage(
-        self, profile_id: str, outcome: str, duration_ms: int, words: int, processing_ms: int,
+        self,
+        profile_id: str,
+        outcome: str,
+        duration_ms: int,
+        words: int,
+        processing_ms: int,
     ) -> None:
         with self._lock, self._connection:
             self._connection.execute(
@@ -653,7 +735,9 @@ class SessionRepository:
 
     def save_workflow_steps(self, steps: list[dict[str, str]]) -> None:
         with self._lock, self._connection:
-            self._connection.execute("INSERT INTO workflow_runs(steps_json) VALUES (?)", (json.dumps(steps),))
+            self._connection.execute(
+                "INSERT INTO workflow_runs(steps_json) VALUES (?)", (json.dumps(steps),)
+            )
             self._connection.execute(
                 """DELETE FROM workflow_runs WHERE id IN (
                        SELECT id FROM workflow_runs ORDER BY id DESC LIMIT -1 OFFSET 100

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import sqlite3
@@ -16,8 +17,9 @@ from voxtype.windows.local_paths import is_local_path
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from voxtype.settings.repository import SettingsRepository
+
     from voxtype.sessions.repository import SessionRepository
+    from voxtype.settings.repository import SettingsRepository
 
 ACTIONS = {"save_txt", "save_json", "apply_template", "copy", "preview", "offer_export"}
 TRIGGERS = {"dictation", "file", "manual"}
@@ -56,9 +58,17 @@ _DRAFTS = (
 )
 
 WORKFLOW_TEMPLATES = tuple(
-    WorkflowDefinition(key, name, "manual", "", (
-        WorkflowAction("apply_template", heading + "\n\n{text}"), WorkflowAction("preview"),
-    ), True)
+    WorkflowDefinition(
+        key,
+        name,
+        "manual",
+        "",
+        (
+            WorkflowAction("apply_template", heading + "\n\n{text}"),
+            WorkflowAction("preview"),
+        ),
+        True,
+    )
     for key, name, heading in _DRAFTS
 )
 
@@ -73,13 +83,24 @@ def parse_workflows(rows: object) -> tuple[WorkflowDefinition, ...]:
             raise ValueError("Неверная структура процесса")
         actions = tuple(WorkflowAction(**item) for item in raw["actions"])
         workflow = WorkflowDefinition(**{**raw, "actions": actions})
-        if (not isinstance(workflow.id, str) or not workflow.id.isalnum() or workflow.id in ids
-                or not isinstance(workflow.name, str) or not 0 < len(workflow.name.strip()) <= 100
-                or not isinstance(workflow.profile_id, str) or type(workflow.enabled) is not bool
-                or workflow.trigger_type not in TRIGGERS or not 1 <= len(actions) <= 12):
+        if (
+            not isinstance(workflow.id, str)
+            or not workflow.id.isalnum()
+            or workflow.id in ids
+            or not isinstance(workflow.name, str)
+            or not 0 < len(workflow.name.strip()) <= 100
+            or not isinstance(workflow.profile_id, str)
+            or type(workflow.enabled) is not bool
+            or workflow.trigger_type not in TRIGGERS
+            or not 1 <= len(actions) <= 12
+        ):
             raise ValueError("Неверный ID, режим или число шагов процесса")
-        if any(step.kind not in ACTIONS or not isinstance(step.template, str)
-               or len(step.template) > 8192 for step in actions):
+        if any(
+            step.kind not in ACTIONS
+            or not isinstance(step.template, str)
+            or len(step.template) > 8192
+            for step in actions
+        ):
             raise ValueError("Недопустимое действие или слишком длинный шаблон")
         ids.add(workflow.id)
         workflows.append(workflow)
@@ -88,7 +109,10 @@ def parse_workflows(rows: object) -> tuple[WorkflowDefinition, ...]:
 
 class WorkflowService:
     def __init__(
-        self, repository: SettingsRepository, sessions: SessionRepository, configuration: dict[str, Any],
+        self,
+        repository: SettingsRepository,
+        sessions: SessionRepository,
+        configuration: dict[str, Any],
     ) -> None:
         self._repository = repository
         self._sessions = sessions
@@ -110,7 +134,9 @@ class WorkflowService:
 
     def save(self, definitions: tuple[WorkflowDefinition, ...]) -> None:
         with self._lock:
-            data = json.loads(json.dumps([asdict(item) for item in definitions], ensure_ascii=False))
+            data = json.loads(
+                json.dumps([asdict(item) for item in definitions], ensure_ascii=False)
+            )
             self._repository.update({"professional": {"schema_version": 1, "workflows": data}})
             self._definitions = definitions
 
@@ -127,16 +153,21 @@ class WorkflowService:
             self._repository.update({"professional": {"workflow_directory": str(resolved)}})
             self._directory = str(resolved)
 
-    def dispatch(self, trigger: str, profile_id: str, text: str, *, workflow_id: str = "") -> tuple[StepResult, ...]:
+    def dispatch(
+        self, trigger: str, profile_id: str, text: str, *, workflow_id: str = ""
+    ) -> tuple[StepResult, ...]:
         if not text.strip():
             return ()
         with self._lock:
             definitions, directory = self._definitions, self._directory
         steps: list[StepResult] = []
         for definition in definitions:
-            if (not definition.enabled or definition.trigger_type != trigger
-                    or definition.profile_id and definition.profile_id != profile_id
-                    or workflow_id and definition.id != workflow_id):
+            if (
+                not definition.enabled
+                or definition.trigger_type != trigger
+                or (definition.profile_id and definition.profile_id != profile_id)
+                or (workflow_id and definition.id != workflow_id)
+            ):
                 continue
             value = text
             for action in definition.actions:
@@ -146,7 +177,10 @@ class WorkflowService:
                             fields = action.template.count("{text}")
                             if not fields:
                                 raise ValueError("В шаблоне отсутствует {text}")
-                            if len(action.template) + fields * (len(value) - len("{text}")) > 4_000_000:
+                            if (
+                                len(action.template) + fields * (len(value) - len("{text}"))
+                                > 4_000_000
+                            ):
                                 raise ValueError("Слишком длинный результат")
                             value = action.template.replace("{text}", value)
                         case "save_txt" | "save_json":
@@ -162,10 +196,8 @@ class WorkflowService:
         with self._lock:
             if steps:
                 self.last_steps = tuple(steps)
-                try:
+                with contextlib.suppress(AttributeError, sqlite3.Error):
                     self._sessions.save_workflow_steps([asdict(item) for item in steps])
-                except (AttributeError, sqlite3.Error):
-                    pass
         return tuple(steps)
 
     def _save_text(self, directory: str, text: str, profile_id: str, kind: str) -> None:
@@ -179,8 +211,11 @@ class WorkflowService:
             raise ValueError("Выберите локальную папку")
         extension = ".json" if kind == "save_json" else ".txt"
         if kind == "save_json":
-            payload = json.dumps({"schema_version": 1, "profile_id": profile_id, "text": text},
-                                 ensure_ascii=False, indent=2)
+            payload = json.dumps(
+                {"schema_version": 1, "profile_id": profile_id, "text": text},
+                ensure_ascii=False,
+                indent=2,
+            )
         else:
             payload = text
         with NamedTemporaryFile(dir=path, delete=False) as stream:

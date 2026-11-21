@@ -33,7 +33,11 @@ class CorrectionSuggestionService:
         self.vocabulary = vocabulary
 
     def suggest(
-        self, raw: str, edited: str, language: str, profile_id: str = "",
+        self,
+        raw: str,
+        edited: str,
+        language: str,
+        profile_id: str = "",
     ) -> CorrectionSuggestion | None:
         if max(len(raw), len(edited)) > 16_000:
             return None
@@ -45,13 +49,14 @@ class CorrectionSuggestionService:
         if max(len(old), len(new)) > 500:
             return None
         differences = [
-            (tag, a, b, c, d) for tag, a, b, c, d in
-            SequenceMatcher(None, old, new, autojunk=False).get_opcodes() if tag != "equal"
+            (tag, a, b, c, d)
+            for tag, a, b, c, d in SequenceMatcher(None, old, new, autojunk=False).get_opcodes()
+            if tag != "equal"
         ]
         if len(differences) != 1:
             return None
         tag, a, b, c, d = differences[0]
-        if tag != "replace" or not (1 <= b-a <= 3 and 1 <= d-c <= 3):
+        if tag != "replace" or not (1 <= b - a <= 3 and 1 <= d - c <= 3):
             return None
         before, after = " ".join(old[a:b]), " ".join(new[c:d])
         # Boundary punctuation shared by both selections is context, not part
@@ -68,7 +73,10 @@ class CorrectionSuggestionService:
         words = {word.casefold() for word in (*before.split(), *after.split())}
         if words & {"not", "no", "never", "не", "нет", "никогда", "без"}:
             return None
-        if SequenceMatcher(None, before.casefold(), after.casefold(), autojunk=False).ratio() < 0.55:
+        if (
+            SequenceMatcher(None, before.casefold(), after.casefold(), autojunk=False).ratio()
+            < 0.55
+        ):
             return None
         suggestion = CorrectionSuggestion(before, after, language, profile_id)
         ignored = self.repository.load().professional.get("ignored_corrections", [])
@@ -82,8 +90,10 @@ class CorrectionSuggestionService:
 
     def save(self, suggestion: CorrectionSuggestion) -> None:
         entry = DictionaryEntry(
-            canonical_text=suggestion.canonical, spoken_variants=(suggestion.spoken,),
-            language=suggestion.language, profile_id=suggestion.profile_id,
+            canonical_text=suggestion.canonical,
+            spoken_variants=(suggestion.spoken,),
+            language=suggestion.language,
+            profile_id=suggestion.profile_id,
         )
         with self.vocabulary._lock:
             document = json.loads(self.vocabulary.export_json("dictionary"))
@@ -92,8 +102,10 @@ class CorrectionSuggestionService:
             for row in rows:
                 if (
                     row["canonical_text"].casefold() == entry.canonical_text.casefold()
-                    and row["language"] == entry.language and row["profile_id"] == entry.profile_id
-                    and not row["executable"] and not row["vocabulary_id"]
+                    and row["language"] == entry.language
+                    and row["profile_id"] == entry.profile_id
+                    and not row["executable"]
+                    and not row["vocabulary_id"]
                 ):
                     variants = row["spoken_variants"]
                     if any(value.casefold() == suggestion.spoken.casefold() for value in variants):

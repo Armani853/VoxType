@@ -11,9 +11,10 @@ from .models import AppStatus, DictationLanguage, UIState, snapshot_from
 if PYSIDE6_AVAILABLE:
     from PySide6.QtCore import QObject, Signal
     from PySide6.QtGui import QAction, QActionGroup, QIcon
-    from PySide6.QtWidgets import QMenu, QSystemTrayIcon
+    from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
-    from .theme import create_app_icon, state_color
+    from .obsidian import IconProvider
+    from .theme import create_app_icon, state_color, theme_manager
 
     class TrayController(QObject):
         dictation_toggle_requested = Signal()
@@ -71,6 +72,9 @@ if PYSIDE6_AVAILABLE:
             self.quit_action = QAction("Выйти из VoxType", self.menu)
             self.quit_action.setObjectName("trayQuitAction")
             self.menu.addAction(self.quit_action)
+            self._menu_icons_active: bool | None = None
+            theme_manager(QApplication.instance()).theme_changed.connect(self._refresh_menu_icons)
+            self._refresh_menu_icons()
             self.icon.setContextMenu(self.menu)
             self._connect_ui()
             if controller is not None:
@@ -84,6 +88,19 @@ if PYSIDE6_AVAILABLE:
             self.settings_action.triggered.connect(self.settings_requested)
             self.quit_action.triggered.connect(self.quit_requested)
             self.icon.activated.connect(self._activated)
+
+        def _refresh_menu_icons(self, _theme: object = None) -> None:
+            active = self._state.state.active
+            self._menu_icons_active = active
+            dpr = self.menu.devicePixelRatioF()
+            for action, symbol in (
+                (self.open_action, "home"),
+                (self.toggle_action, "stop" if active else "mic"),
+                (self.pause_action, "pause"),
+                (self.settings_action, "settings"),
+                (self.quit_action, "close"),
+            ):
+                action.setIcon(IconProvider.icon(symbol, 16, dpr))
 
         def bind_controller(self, controller: object) -> None:
             self.unbind_controller()
@@ -131,7 +148,14 @@ if PYSIDE6_AVAILABLE:
             state = snapshot_from(snapshot)
             self._state = state
             active = state.state.active
+            if active != self._menu_icons_active:
+                self._refresh_menu_icons()
             self.toggle_action.setText("Остановить диктовку" if active else "Начать диктовку")
+            readiness = state.readiness
+            self.toggle_action.setEnabled(
+                (active and state.state is not AppStatus.FINISHING)
+                or (readiness.can_record if readiness is not None else not active)
+            )
             self.pause_action.setEnabled(active and state.state is not AppStatus.FINISHING)
             paused = state.state in {AppStatus.PAUSED, AppStatus.PAUSED_TARGET_LOST}
             self.pause_action.setText("Продолжить" if paused else "Пауза")
@@ -148,6 +172,8 @@ if PYSIDE6_AVAILABLE:
                 AppStatus.ERROR_RECOVERABLE: "требуется внимание",
                 AppStatus.ERROR_FATAL: "ошибка",
             }.get(state.state, state.state.value.lower())
+            if readiness is not None and not active:
+                status = readiness.message
             self.icon.setToolTip(f"VoxType — {status} · {state.language.value.upper()}")
             self.icon.setIcon(self._icon_for_state(state.state))
 

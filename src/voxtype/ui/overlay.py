@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import sys
 from collections.abc import Callable
 from typing import Any
@@ -10,7 +11,6 @@ from ._optional import PYSIDE6_AVAILABLE, require_pyside6
 from .models import (
     AppStatus,
     UIState,
-    format_backlog,
     format_duration,
     snapshot_from,
     text_preview,
@@ -18,7 +18,7 @@ from .models import (
 
 if PYSIDE6_AVAILABLE:
     from PySide6.QtCore import QPoint, QSettings, Qt, Signal
-    from PySide6.QtGui import QCloseEvent, QColor, QKeyEvent, QMouseEvent, QShowEvent
+    from PySide6.QtGui import QCloseEvent, QKeyEvent, QMouseEvent, QShowEvent
     from PySide6.QtWidgets import (
         QApplication,
         QFrame,
@@ -30,9 +30,10 @@ if PYSIDE6_AVAILABLE:
         QWidget,
     )
 
+    from .motion import AnimationCoordinator
+    from .obsidian import AnimatedStatusDot, IconProvider, WaveformWidget
     from .theme import OVERLAY_PALETTE, create_app_icon, overlay_stylesheet
-    from .widgets import ElidedLabel, StatusDot, rms_to_meter
-    from .obsidian import IconProvider, MotionController, WaveformWidget
+    from .widgets import ElidedLabel, rms_to_meter
 
     _OVERLAY_STATES: dict[AppStatus, tuple[str, str]] = {
         AppStatus.STARTING: ("Запуск", "text_tertiary"),
@@ -76,7 +77,9 @@ if PYSIDE6_AVAILABLE:
             super().__init__(parent, flags)
             self.setObjectName("dictationOverlay")
             self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
-            self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+            self._composited = self._has_composition()
+            self._hiding = False
+            self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, self._composited)
             self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             self.setWindowTitle("VoxType")
             self.setWindowIcon(create_app_icon())
@@ -84,8 +87,12 @@ if PYSIDE6_AVAILABLE:
             self._drag_offset: QPoint | None = None
             self._state = UIState()
             self._compact = bool(self._settings.value("ui/overlayCompact", True, type=bool))
-            stored_mode = str(self._settings.value("ui/overlayMode", "standard" if self._compact else "expanded"))
-            self._preferred_mode = stored_mode if stored_mode in ("mini", "standard", "expanded") else "standard"
+            stored_mode = str(
+                self._settings.value("ui/overlayMode", "standard" if self._compact else "expanded")
+            )
+            self._preferred_mode = (
+                stored_mode if stored_mode in ("mini", "standard", "expanded") else "standard"
+            )
             self._mode = ""
             self._controller_connections: list[tuple[Any, Callable[..., Any]]] = []
             self._build_ui()
@@ -100,13 +107,13 @@ if PYSIDE6_AVAILABLE:
             outer.setContentsMargins(0, 0, 0, 0)
             self.panel = QFrame(self)
             self.panel.setObjectName("overlayPanel")
-            self.panel.setStyleSheet(overlay_stylesheet())
+            self.panel.setStyleSheet(overlay_stylesheet(self._composited))
             content = QVBoxLayout(self.panel)
             content.setContentsMargins(10, 5, 10, 5)
             content.setSpacing(2)
             line = QHBoxLayout()
             line.setSpacing(5)
-            self.status_dot = StatusDot(self.panel)
+            self.status_dot = AnimatedStatusDot(self.panel)
             self.status_label = ElidedLabel("Готово", self.panel)
             self.status_label.setProperty("overlayStatus", True)
             self.status_label.setObjectName("overlayStatusLabel")
@@ -119,8 +126,15 @@ if PYSIDE6_AVAILABLE:
             self.mini_wave = WaveformWidget(self.panel, bars=13, height=24)
             self.stop_button = self._overlay_button("stop", "Остановить")
             self.expand_button = self._overlay_button("menu", "Размер индикатора")
-            for widget in (self.status_dot, self.status_label, self.mini_wave, self.language_label,
-                           self.timer_label, self.stop_button, self.expand_button):
+            for widget in (
+                self.status_dot,
+                self.status_label,
+                self.mini_wave,
+                self.language_label,
+                self.timer_label,
+                self.stop_button,
+                self.expand_button,
+            ):
                 line.addWidget(widget, 1 if widget is self.status_label else 0)
             content.addLayout(line)
             self.audio_meter = WaveformWidget(self.panel, bars=25, height=24)
@@ -162,7 +176,9 @@ if PYSIDE6_AVAILABLE:
         def _overlay_button(self, icon: str, label: str) -> QPushButton:
             button = QPushButton(self.panel)
             button.setProperty("overlayIcon", True)
-            button.setIcon(IconProvider._pixmap(icon, "dark", 16, button.devicePixelRatioF(), "#F2F3F8"))
+            button.setIcon(
+                IconProvider._pixmap(icon, "dark", 16, button.devicePixelRatioF(), "#F2F3F8")
+            )
             button.setAccessibleName(label)
             button.setToolTip(label)
             button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -208,6 +224,8 @@ if PYSIDE6_AVAILABLE:
             previous = self._state
             self._state = state
             text, color_role = _OVERLAY_STATES[state.state]
+            if state.readiness is not None and not state.state.active:
+                text = state.readiness.message
             completed = state.state is AppStatus.COMPLETED
             if completed and state.delivery_status == "queued_target_inactive":
                 text, color_role = "Ожидает вставки", "warning"
@@ -217,16 +235,27 @@ if PYSIDE6_AVAILABLE:
             self.status_dot.set_color(OVERLAY_PALETTE[color_role])
             self.language_label.setText(state.language.value.upper())
             self.timer_label.setText(format_duration(state.session_elapsed_s))
-            recording = state.state in {AppStatus.LISTENING, AppStatus.SPEECH_DETECTED, AppStatus.TRANSCRIBING}
+            recording = state.state in {
+                AppStatus.LISTENING,
+                AppStatus.SPEECH_DETECTED,
+                AppStatus.TRANSCRIBING,
+            }
             for meter in (self.audio_meter, self.mini_wave):
                 meter.set_active(recording)
                 if not meter.isHidden() and recording:
                     meter.set_level(rms_to_meter(state.input_rms))
             self.processing_label.setText(self._processing_text(state))
             self.processing_label.setToolTip(self._processing_text(state))
-            transcript = state.full_transcript if completed else state.provisional_text or state.last_committed_text
-            if transcript != (previous.full_transcript if previous.state is AppStatus.COMPLETED
-                              else previous.provisional_text or previous.last_committed_text):
+            transcript = (
+                state.full_transcript
+                if completed
+                else state.provisional_text or state.last_committed_text
+            )
+            if transcript != (
+                previous.full_transcript
+                if previous.state is AppStatus.COMPLETED
+                else previous.provisional_text or previous.last_committed_text
+            ):
                 self.provisional_label.setText(text_preview(transcript, 130))
                 self.provisional_label.setToolTip(text_preview(transcript, 420))
                 if completed:
@@ -234,13 +263,20 @@ if PYSIDE6_AVAILABLE:
             finishing = state.state is AppStatus.FINISHING
             self.stop_button.setToolTip("Отменить обработку" if finishing else "Остановить")
             self.stop_button.setAccessibleName(self.stop_button.toolTip())
-            self.stop_button.setVisible(self._mode != "mini" and (state.state.active or finishing) and not completed)
+            self.stop_button.setVisible(
+                self._mode != "mini" and (state.state.active or finishing) and not completed
+            )
             self.pause_button.setVisible(not completed)
-            self.pause_button.setToolTip("Продолжить" if state.state in {AppStatus.PAUSED, AppStatus.PAUSED_TARGET_LOST}
-                                         else "Пауза")
+            self.pause_button.setToolTip(
+                "Продолжить"
+                if state.state in {AppStatus.PAUSED, AppStatus.PAUSED_TARGET_LOST}
+                else "Пауза"
+            )
             self.result_buttons.setVisible(completed)
             self.copy_all_button.setEnabled(bool(transcript))
-            self.insert_button.setEnabled(state.delivery_status in {"failed", "queued_target_inactive"})
+            self.insert_button.setEnabled(
+                state.delivery_status in {"failed", "queued_target_inactive"}
+            )
             if completed and previous.state is not AppStatus.COMPLETED:
                 self.set_mode("expanded", persist=False)
             elif not completed and previous.state is AppStatus.COMPLETED:
@@ -309,10 +345,98 @@ if PYSIDE6_AVAILABLE:
         def is_compact(self) -> bool:
             return self._compact
 
+        def place_near_caret(self, rect: tuple[int, int, int, int] | None) -> None:
+            if self._drag_offset is not None:
+                return
+            if rect is None:
+                self._restore_position()
+                return
+            left, top, _right, bottom = rect
+            screen = None
+            if sys.platform == "win32":
+                from ctypes import wintypes
+
+                class MonitorInfo(ctypes.Structure):
+                    _fields_ = (
+                        ("size", wintypes.DWORD),
+                        ("monitor", wintypes.RECT),
+                        ("work", wintypes.RECT),
+                        ("flags", wintypes.DWORD),
+                        ("device", wintypes.WCHAR * 32),
+                    )
+
+                user32 = ctypes.windll.user32
+                monitor_at = user32.MonitorFromPoint
+                monitor_at.argtypes = (wintypes.POINT, wintypes.DWORD)
+                monitor_at.restype = wintypes.HANDLE
+                monitor_info = user32.GetMonitorInfoW
+                monitor_info.argtypes = (wintypes.HANDLE, ctypes.POINTER(MonitorInfo))
+                monitor_info.restype = wintypes.BOOL
+                handle = monitor_at(wintypes.POINT(left, top), 0)
+                info = MonitorInfo()
+                info.size = ctypes.sizeof(info)
+                if handle and monitor_info(handle, ctypes.byref(info)):
+                    screen = next(
+                        (
+                            item
+                            for item in QApplication.screens()
+                            if item.name().casefold() == info.device.casefold()
+                        ),
+                        None,
+                    )
+                    if screen is not None:
+                        origin = screen.geometry().topLeft()
+                        scale = screen.devicePixelRatio()
+                        left = origin.x() + round((left - info.monitor.left) / scale)
+                        top = origin.y() + round((top - info.monitor.top) / scale)
+                        bottom = origin.y() + round((bottom - info.monitor.top) / scale)
+            else:
+                screen = QApplication.screenAt(QPoint(left, top))
+            if screen is None:
+                self._restore_position()
+                return
+            area = screen.availableGeometry()
+            y = top - self.height() - 14
+            if y < area.top():
+                y = bottom + 14
+            if y + self.height() > area.bottom() + 1:
+                self._restore_position()
+                return
+            x = max(area.left(), min(left, area.right() - self.width() + 1))
+            self.move(x, y)
+
         def show_without_activating(self) -> None:
-            if not self.isVisible():
+            if not self.isVisible() or self._hiding:
+                self._hiding = False
                 self.show()
-                MotionController.fade(self.panel, 140)
+                motion = AnimationCoordinator.instance()
+                motion.animate_opacity(self.panel, 0.0, 1.0, motion.OVERLAY_ENTER)
+
+        def hide(self) -> None:
+            if not self.isVisible() or self._hiding:
+                return
+            self._hiding = True
+            motion = AnimationCoordinator.instance()
+            motion.animate_opacity(
+                self.panel, 1.0, 0.0, motion.OVERLAY_EXIT, finished=self._finish_hide
+            )
+
+        def _finish_hide(self) -> None:
+            if self._hiding:
+                self._hiding = False
+                super().hide()
+
+        @staticmethod
+        def _has_composition() -> bool:
+            if sys.platform != "win32":
+                return False
+            enabled = ctypes.c_int()
+            try:
+                return ctypes.windll.dwmapi.DwmIsCompositionEnabled(
+                    ctypes.byref(enabled)
+                ) == 0 and bool(enabled.value)
+            except (AttributeError, OSError):
+                return False
 
         def _restore_position(self) -> None:
             saved_x = self._settings.value("ui/overlayX", None)
@@ -321,7 +445,9 @@ if PYSIDE6_AVAILABLE:
                 screen = QApplication.primaryScreen()
                 if screen is not None:
                     area = screen.availableGeometry()
-                    self.move(area.center().x() - self.width() // 2, area.bottom() - self.height() - 24)
+                    self.move(
+                        area.center().x() - self.width() // 2, area.bottom() - self.height() - 24
+                    )
                 return
             try:
                 point = QPoint(int(str(saved_x)), int(str(saved_y)))
@@ -374,6 +500,15 @@ if PYSIDE6_AVAILABLE:
         def showEvent(self, event: QShowEvent) -> None:
             super().showEvent(event)
             self._apply_windows_no_activate()
+            handle = self.windowHandle()
+            if handle is not None and getattr(self, "_screen_handle", None) is not handle:
+                self._screen_handle = handle
+                handle.screenChanged.connect(self._screen_changed)
+
+        def _screen_changed(self, _screen: object) -> None:
+            point = self._clamped_position(self.pos())
+            if point != self.pos():
+                self.move(point)
 
         def keyPressEvent(self, event: QKeyEvent) -> None:
             if event.key() == Qt.Key.Key_Escape and self._state.state is AppStatus.COMPLETED:
@@ -383,6 +518,8 @@ if PYSIDE6_AVAILABLE:
             super().keyPressEvent(event)
 
         def closeEvent(self, event: QCloseEvent) -> None:
+            self._hiding = False
+            AnimationCoordinator.instance().cancel(self.panel, "opacity")
             self._save_position()
             self.unbind_controller()
             event.accept()
@@ -396,6 +533,9 @@ if PYSIDE6_AVAILABLE:
             from ctypes import wintypes
 
             hwnd = int(self.winId())
+            if getattr(self, "_styled_hwnd", None) == hwnd:
+                return
+            self._styled_hwnd = hwnd
             user32 = ctypes.windll.user32
             get_window_long = user32.GetWindowLongPtrW
             set_window_long = user32.SetWindowLongPtrW

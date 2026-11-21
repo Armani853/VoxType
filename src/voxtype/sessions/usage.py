@@ -7,11 +7,14 @@ from voxtype.settings.repository import SettingsRepository
 
 
 class UsageMetricsService:
-    def __init__(self, repository: SessionRepository, settings: SettingsRepository,
-                 typing_speed: object) -> None:
+    def __init__(
+        self, repository: SessionRepository, settings: SettingsRepository, typing_speed: object
+    ) -> None:
         self.repository = repository
         self.settings = settings
-        self._typing_speed = typing_speed if type(typing_speed) is int and 10 <= typing_speed <= 150 else 40
+        self._typing_speed = (
+            typing_speed if type(typing_speed) is int and 10 <= typing_speed <= 150 else 40
+        )
 
     def typing_speed(self) -> int:
         return self._typing_speed
@@ -23,7 +26,12 @@ class UsageMetricsService:
         self._typing_speed = value
 
     def record(
-        self, profile_id: str, status: str, duration: float, words: int, processing: float,
+        self,
+        profile_id: str,
+        status: str,
+        duration: float,
+        words: int,
+        processing: float,
     ) -> None:
         if status == "completed":
             outcome = "успех" if words else "нет результата"
@@ -34,7 +42,10 @@ class UsageMetricsService:
         else:
             outcome = "ошибка"
         self.repository.record_usage(
-            profile_id, outcome, round(max(0.0, duration) * 1000), words,
+            profile_id,
+            outcome,
+            round(max(0.0, duration) * 1000),
+            words,
             round(max(0.0, processing) * 1000),
         )
 

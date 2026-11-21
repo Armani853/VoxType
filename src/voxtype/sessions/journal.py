@@ -8,7 +8,9 @@ from voxtype.sessions.repository import SessionRepository
 
 
 class SessionJournal:
-    def __init__(self, repository: SessionRepository, session_id: str, *, persist_text: bool = True):
+    def __init__(
+        self, repository: SessionRepository, session_id: str, *, persist_text: bool = True
+    ):
         self.repository = repository
         self.session_id = session_id
         self.persist_text = persist_text

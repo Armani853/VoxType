@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import logging
 import json
+import logging
 from collections.abc import Callable
 from dataclasses import asdict, replace
 from importlib.util import find_spec
@@ -11,26 +11,66 @@ from pathlib import Path
 from threading import Thread
 from uuid import uuid4
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QIODevice, QSaveFile, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget,
-    QListWidgetItem, QScrollArea, QSplitter, QStackedWidget,
-    QFileDialog, QInputDialog, QMessageBox, QPlainTextEdit, QPushButton, QSpinBox, QTabWidget,
-    QVBoxLayout, QWidget,
+    QCheckBox,
+    QComboBox,
+    QDialog,
+    QFileDialog,
+    QFormLayout,
+    QHBoxLayout,
+    QInputDialog,
+    QLabel,
+    QLineEdit,
+    QListWidget,
+    QListWidgetItem,
+    QMessageBox,
+    QPlainTextEdit,
+    QPushButton,
+    QScrollArea,
+    QSpinBox,
+    QSplitter,
+    QStackedWidget,
+    QTabWidget,
+    QVBoxLayout,
+    QWidget,
 )
 
-from voxtype.core.profiles import AppRule, BUILTIN_IDS, FORMATTING_MODES, DictationProfile
 from voxtype.core.capabilities import CapabilityRegistry
-from voxtype.transcript.enhancer import LocalTextEnhancer, LlamaCppTextEnhancer, OPERATIONS
-from voxtype.transcript.professional import (
-    ACTION_PARAMETERS, MAX_HINT_CHARACTERS, VOICE_ACTION_TYPES, RecognitionRequest, Snippet,
+from voxtype.core.models import RecognitionResult
+from voxtype.core.profiles import (
+    BUILTIN_IDS,
+    FORMATTING_MODES,
+    AppRule,
+    DictationContext,
+    DictationProfile,
 )
-from voxtype.core.profiles import DictationContext
-from voxtype.transcript.editing import TextEditService
-from voxtype.transcript.workflows import ACTIONS, WORKFLOW_TEMPLATES, parse_workflows
 from voxtype.settings.organization_pack import OrganizationProfilePack
+from voxtype.transcript.corrections import CorrectionSuggestionService
+from voxtype.transcript.editing import TextEditService
+from voxtype.transcript.enhancer import OPERATIONS, LlamaCppTextEnhancer, LocalTextEnhancer
+from voxtype.transcript.professional import (
+    ACTION_PARAMETERS,
+    MAX_HINT_CHARACTERS,
+    VOICE_ACTION_TYPES,
+    RecognitionRequest,
+    Snippet,
+)
+from voxtype.transcript.workflows import ACTIONS, WORKFLOW_TEMPLATES, parse_workflows
 from voxtype.windows.selection import SelectedText, SelectionUnavailable
-from .obsidian import VoxButton, VoxCard, VoxComboBox, VoxEmptyState, VoxSearchField, VoxSectionHeader, VoxTextField, VoxToggle
+
+from .obsidian import (
+    VoxButton,
+    VoxCard,
+    VoxComboBox,
+    VoxDialog,
+    VoxEmptyState,
+    VoxSearchField,
+    VoxSectionHeader,
+    VoxTextField,
+    VoxToggle,
+    confirm_delete,
+)
 from .records_view import RecordsView
 
 _LOGGER = logging.getLogger(__name__)
@@ -44,6 +84,9 @@ class ProfessionalWindow(QDialog):
     enhancement_ready = Signal(str, str)
     workflow_finished = Signal(str)
     profiles_refreshed = Signal()
+    editor_draft_requested = Signal(object)
+    scratchpad_toggle_requested = Signal()
+    correction_ready = Signal(object)
 
     def __init__(self, controller, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -89,12 +132,26 @@ class ProfessionalWindow(QDialog):
         self.profile.hide()
         self.name = VoxTextField(page)
         self.language = self._choices(("Язык настроек", "", "Русский", "ru", "English", "en"))
-        self.model = self._choices(("Модель настроек", "", "small", "small", "large-v3-turbo", "large-v3-turbo"))
-        self.formatting = self._choices(tuple(value for mode in FORMATTING_MODES for value in (mode, mode)))
-        self.insertion = self._choices((
-            "Режим настроек", "", "Автоматический", "auto", "Буфер обмена", "clipboard_paste",
-            "Unicode", "unicode_input", "Только копирование", "safe_clipboard",
-        ))
+        self.model = self._choices(
+            ("Модель настроек", "", "small", "small", "large-v3-turbo", "large-v3-turbo")
+        )
+        self.formatting = self._choices(
+            tuple(value for mode in FORMATTING_MODES for value in (mode, mode))
+        )
+        self.insertion = self._choices(
+            (
+                "Режим настроек",
+                "",
+                "Автоматический",
+                "auto",
+                "Буфер обмена",
+                "clipboard_paste",
+                "Unicode",
+                "unicode_input",
+                "Только копирование",
+                "safe_clipboard",
+            )
+        )
         self.enabled = VoxToggle("Профиль активен", page)
         self.rules = QPlainTextEdit(page)
         self.vocabulary_id = QLineEdit(page)
@@ -102,10 +159,14 @@ class ProfessionalWindow(QDialog):
         self.snippet_set_id = QLineEdit(page)
         self.rules.setPlaceholderText("app.exe | *заголовок* | 10 | 1\nC:\\Apps\\app.exe | | 5 | 0")
         for label, widget in (
-            ("Название", self.name), ("Язык", self.language),
-            ("Модель", self.model), ("Формат", self.formatting), ("Вставка", self.insertion),
+            ("Название", self.name),
+            ("Язык", self.language),
+            ("Модель", self.model),
+            ("Формат", self.formatting),
+            ("Вставка", self.insertion),
             ("Включён", self.enabled),
-            ("ID словаря", self.vocabulary_id), ("ID набора команд", self.command_set_id),
+            ("ID словаря", self.vocabulary_id),
+            ("ID набора команд", self.command_set_id),
             ("ID набора шаблонов", self.snippet_set_id),
             ("Правила: EXE | заголовок | приоритет | 0/1", self.rules),
         ):
@@ -115,6 +176,13 @@ class ProfessionalWindow(QDialog):
         self.remove_button = self._button("Удалить", self._remove, actions)
         self._button("По умолчанию", self._default, actions)
         form.addRow(actions)
+        self.technical_language_hint = QLabel(
+            "Основной язык выбирается через RU/EN. Термины и идентификаторы сохраняются без перевода.",
+            page,
+        )
+        self.technical_language_hint.setWordWrap(True)
+        self.technical_language_hint.setProperty("muted", True)
+        form.addRow(self.technical_language_hint)
         self.profile.currentIndexChanged.connect(self._load)
         self.profile_list.currentRowChanged.connect(self.profile.setCurrentIndex)
         self.operation_finished.connect(self._finished)
@@ -123,11 +191,14 @@ class ProfessionalWindow(QDialog):
         self.collection_editors: dict[str, QPlainTextEdit] = {}
         self.collection_tables: dict[str, RecordsView] = {}
         for key, label in (
-            ("dictionary", "Словарь"), ("snippets", "AutoText"),
-            ("commands", "Голосовые команды"), ("replacements", "Замены"),
+            ("dictionary", "Словарь"),
+            ("snippets", "AutoText"),
+            ("commands", "Голосовые команды"),
+            ("replacements", "Замены"),
         ):
-            if ((key == "commands" and not self.controller.policy.allow_voice_commands)
-                    or (key == "snippets" and not self.controller.policy.allow_user_snippets)):
+            if (key == "commands" and not self.controller.policy.allow_voice_commands) or (
+                key == "snippets" and not self.controller.policy.allow_user_snippets
+            ):
                 continue
             page = QWidget(self.tabs)
             self.collection_pages[key] = page
@@ -173,7 +244,9 @@ class ProfessionalWindow(QDialog):
         self._stats_busy = False
         self.statistics_ready.connect(self._render_statistics)
         self.tabs.currentChanged.connect(
-            lambda _index: self._load_statistics() if self.tabs.currentWidget() is self.stats_page else None
+            lambda _index: (
+                self._load_statistics() if self.tabs.currentWidget() is self.stats_page else None
+            )
         )
         self.stats_period.currentIndexChanged.connect(lambda _index: self._load_statistics())
         self.tabs.addTab(page, "Статистика")
@@ -198,7 +271,11 @@ class ProfessionalWindow(QDialog):
 
     def _save_typing_speed(self) -> None:
         value = self.stats_wpm.value()
-        self._persist(lambda: self.controller.usage_metrics.save_typing_speed(value) or self.profiles.default_id)
+        self._persist(
+            lambda: (
+                self.controller.usage_metrics.save_typing_speed(value) or self.profiles.default_id
+            )
+        )
 
     def _render_statistics(self, revision: int, data: object) -> None:
         self._stats_busy = False
@@ -229,9 +306,14 @@ class ProfessionalWindow(QDialog):
         layout.addWidget(self.capability_output)
         self.capability_page = page
         self.tabs.currentChanged.connect(
-            lambda _index: self._refresh_capabilities() if self.tabs.currentWidget() is page else None
+            lambda _index: (
+                self._refresh_capabilities() if self.tabs.currentWidget() is page else None
+            )
         )
-        if find_spec("llama_cpp") is not None and not self.controller.policy.disable_external_processing:
+        if (
+            find_spec("llama_cpp") is not None
+            and not self.controller.policy.disable_external_processing
+        ):
             row = QHBoxLayout()
             self.ai_operation = QComboBox(page)
             for operation, title in OPERATIONS.items():
@@ -251,7 +333,9 @@ class ProfessionalWindow(QDialog):
     def _refresh_capabilities(self) -> None:
         panel = self.transcription_panel
         capabilities = CapabilityRegistry.snapshot(
-            self.controller, file_queue=panel.queue if panel else None, enhancer=self.enhancer,
+            self.controller,
+            file_queue=panel.queue if panel else None,
+            enhancer=self.enhancer,
         )
         text = [
             f"{key} · {'доступно' if item.available else 'недоступно'} · {item.reason}"
@@ -287,7 +371,9 @@ class ProfessionalWindow(QDialog):
             except ValueError as exc:
                 self.enhancement_ready.emit("", str(exc))
             except Exception as exc:
-                self.enhancement_ready.emit("", f"Локальная модель не обработала текст ({type(exc).__name__})")
+                self.enhancement_ready.emit(
+                    "", f"Локальная модель не обработала текст ({type(exc).__name__})"
+                )
             else:
                 self.enhancement_ready.emit(result, "")
 
@@ -299,15 +385,18 @@ class ProfessionalWindow(QDialog):
         if error:
             self.feedback.setText(error)
             return
-        dialog = QDialog(self)
+        dialog = VoxDialog(self)
         dialog.setWindowTitle("Локальный AI — предпросмотр")
         dialog.resize(680, 430)
         layout = QVBoxLayout(dialog)
         preview = QPlainTextEdit(result, dialog)
         layout.addWidget(preview)
         row = QHBoxLayout()
-        self._button("Перенести в локальный редактор",
-                     lambda: (self.edit_original.setPlainText(preview.toPlainText()), dialog.accept()), row)
+        self._button(
+            "Перенести в локальный редактор",
+            lambda: (self.edit_original.setPlainText(preview.toPlainText()), dialog.accept()),
+            row,
+        )
         self._button("Отмена", dialog.reject, row)
         layout.addLayout(row)
         dialog.exec()
@@ -324,10 +413,17 @@ class ProfessionalWindow(QDialog):
         defaults = asdict(EnterprisePolicy())
         summary = QPlainTextEdit(page)
         summary.setReadOnly(True)
-        summary.setPlainText(json.dumps(
-            {key: value for key, value in asdict(service.policy).items() if value != defaults[key]},
-            ensure_ascii=False, indent=2,
-        ))
+        summary.setPlainText(
+            json.dumps(
+                {
+                    key: value
+                    for key, value in asdict(service.policy).items()
+                    if value != defaults[key]
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
         layout.addWidget(summary)
         row = QHBoxLayout()
 
@@ -342,12 +438,16 @@ class ProfessionalWindow(QDialog):
             except (ValueError, TypeError, OSError) as exc:
                 self.feedback.setText(str(exc))
                 return
-            dialog = QMessageBox(QMessageBox.Icon.Question, "Импорт оргпакета",
-                                 "Добавить новые записи?", parent=page)
-            dialog.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            dialog = QMessageBox(
+                QMessageBox.Icon.Question, "Импорт оргпакета", "Добавить новые записи?", parent=page
+            )
+            dialog.setStandardButtons(
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
             dialog.setDefaultButton(QMessageBox.StandardButton.No)
             dialog.setDetailedText("\n".join(preview))
             if dialog.exec() == QMessageBox.StandardButton.Yes:
+
                 def apply() -> str:
                     packs.merge(pack, apply=True)
                     return "organization"
@@ -358,12 +458,15 @@ class ProfessionalWindow(QDialog):
             name, ok = QInputDialog.getText(page, "Оргпакет", "Название организации")
             if not ok or not name.strip() or len(name) > 128:
                 return
-            filename, _ = QFileDialog.getSaveFileName(page, "Экспорт оргпакета", "VoxType.json", "JSON (*.json)")
+            filename, _ = QFileDialog.getSaveFileName(
+                page, "Экспорт оргпакета", "VoxType.json", "JSON (*.json)"
+            )
             if filename:
                 try:
                     active = asdict(self.controller.policy)
                     text = self.controller.organization_packs.export(
-                        name.strip(), {key: value for key, value in active.items() if value != defaults[key]},
+                        name.strip(),
+                        {key: value for key, value in active.items() if value != defaults[key]},
                     )
                     Path(filename).write_text(text, encoding="utf-8")
                 except (OSError, ValueError) as exc:
@@ -382,8 +485,13 @@ class ProfessionalWindow(QDialog):
         for template in WORKFLOW_TEMPLATES:
             templates.addItem(template.name, template)
         toolbar.addWidget(templates, 1)
-        self._button("Использовать шаблон", lambda: self._edit_workflow(
-            self.controller.workflows.copy_template(templates.currentData())), toolbar)
+        self._button(
+            "Использовать шаблон",
+            lambda: self._edit_workflow(
+                self.controller.workflows.copy_template(templates.currentData())
+            ),
+            toolbar,
+        )
         self._button("Новый процесс", lambda: self._edit_workflow(None), toolbar)
         self._button("Папка вывода…", self._workflow_directory, toolbar)
         layout.addLayout(toolbar)
@@ -405,16 +513,29 @@ class ProfessionalWindow(QDialog):
                 widget.deleteLater()
         definitions = self.controller.workflows.definitions()
         if not definitions:
-            self.workflow_cards.addWidget(VoxEmptyState("workflow", "Нет рабочих процессов",
-                                                        "Выберите готовый шаблон или создайте процесс.", self))
+            self.workflow_cards.addWidget(
+                VoxEmptyState(
+                    "workflow",
+                    "Нет рабочих процессов",
+                    "Выберите готовый шаблон или создайте процесс.",
+                    self,
+                )
+            )
         for workflow in definitions:
             card = VoxCard(self)
             card.content_layout.addWidget(VoxSectionHeader(workflow.name, card))
-            trigger = {"dictation": "После диктовки", "file": "После транскрипции", "manual": "Вручную"}
+            trigger = {
+                "dictation": "После диктовки",
+                "file": "После транскрипции",
+                "manual": "Вручную",
+            }
             status = "Включён" if workflow.enabled else "Выключен"
-            card.content_layout.addWidget(QLabel(
-                f"{trigger[workflow.trigger_type]} · шагов: {len(workflow.actions)} · {status}", card
-            ))
+            card.content_layout.addWidget(
+                QLabel(
+                    f"{trigger[workflow.trigger_type]} · шагов: {len(workflow.actions)} · {status}",
+                    card,
+                )
+            )
             actions = QHBoxLayout()
             self._button("Изменить", lambda item=workflow: self._edit_workflow(item), actions)
             if workflow.enabled and workflow.trigger_type == "manual":
@@ -427,7 +548,12 @@ class ProfessionalWindow(QDialog):
     def _workflow_directory(self) -> None:
         folder = QFileDialog.getExistingDirectory(self, "Локальная папка вывода")
         if folder:
-            self._persist(lambda: self.controller.workflows.set_directory(Path(folder)) or self.profiles.default_id)
+            self._persist(
+                lambda: (
+                    self.controller.workflows.set_directory(Path(folder))
+                    or self.profiles.default_id
+                )
+            )
 
     def _run_workflow(self, workflow) -> None:
         profile, text = self.controller.workflow_input()
@@ -436,25 +562,35 @@ class ProfessionalWindow(QDialog):
             profile = selected.id if selected else self.profiles.default_id
             text = self.edit_original.toPlainText()
         if not text.strip() or (workflow.profile_id and workflow.profile_id != profile):
-            self.feedback.setText("Нет текста для выбранного профиля. Используйте диктовку или локальный редактор.")
+            self.feedback.setText(
+                "Нет текста для выбранного профиля. Используйте диктовку или локальный редактор."
+            )
             return
 
         def run() -> str:
-            steps = self.controller.workflows.dispatch("manual", profile, text, workflow_id=workflow.id)
-            self.workflow_finished.emit("\n".join(f"{step.action} · {step.status}" for step in steps))
+            steps = self.controller.workflows.dispatch(
+                "manual", profile, text, workflow_id=workflow.id
+            )
+            self.workflow_finished.emit(
+                "\n".join(f"{step.action} · {step.status}" for step in steps)
+            )
             return self.profiles.default_id
 
         self._persist(run)
 
     def _edit_workflow(self, workflow) -> None:
-        dialog = QDialog(self)
+        dialog = VoxDialog(self)
         dialog.setWindowTitle("Редактор рабочего процесса")
         dialog.resize(590, 450)
         form = QFormLayout(dialog)
         name = VoxTextField(dialog)
         name.setText(workflow.name if workflow else "")
         trigger = VoxComboBox(dialog)
-        for text, key in (("Вручную", "manual"), ("После диктовки", "dictation"), ("После файла", "file")):
+        for text, key in (
+            ("Вручную", "manual"),
+            ("После диктовки", "dictation"),
+            ("После файла", "file"),
+        ):
             trigger.addItem(text, key)
         if workflow:
             trigger.setCurrentIndex(trigger.findData(workflow.trigger_type))
@@ -470,9 +606,14 @@ class ProfessionalWindow(QDialog):
         sequence.setAccessibleName("Последовательность шагов")
         steps = [asdict(action) for action in workflow.actions] if workflow else []
         action_labels = {
-            "save_txt": "Сохранить TXT", "save_json": "Сохранить JSON", "apply_template": "Применить шаблон",
-            "copy": "Скопировать", "preview": "Открыть предпросмотр", "offer_export": "Предложить экспорт",
+            "save_txt": "Сохранить TXT",
+            "save_json": "Сохранить JSON",
+            "apply_template": "Применить шаблон",
+            "copy": "Скопировать",
+            "preview": "Открыть предпросмотр",
+            "offer_export": "Предложить экспорт",
         }
+
         def refresh_steps(position: int = 0) -> None:
             sequence.clear()
             for index, step in enumerate(steps, 1):
@@ -485,15 +626,25 @@ class ProfessionalWindow(QDialog):
                 return
             keys = sorted(ACTIONS)
             labels = [action_labels[key] for key in keys]
-            selected, ok = QInputDialog.getItem(dialog, "Шаг процесса", "Действие", labels,
-                                                  keys.index(steps[index]["kind"]) if index >= 0 else 0, False)
+            selected, ok = QInputDialog.getItem(
+                dialog,
+                "Шаг процесса",
+                "Действие",
+                labels,
+                keys.index(steps[index]["kind"]) if index >= 0 else 0,
+                False,
+            )
             if not ok:
                 return
             kind = keys[labels.index(selected)]
             template = ""
             if kind == "apply_template":
-                template, ok = QInputDialog.getMultiLineText(dialog, "Шаблон", "Текст с параметром {text}",
-                    steps[index]["template"] if index >= 0 else "{text}")
+                template, ok = QInputDialog.getMultiLineText(
+                    dialog,
+                    "Шаблон",
+                    "Текст с параметром {text}",
+                    steps[index]["template"] if index >= 0 else "{text}",
+                )
                 if not ok:
                     return
             step = {"kind": kind, "template": template}
@@ -533,11 +684,21 @@ class ProfessionalWindow(QDialog):
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         identifier = workflow.id if workflow else uuid4().hex
-        data = [asdict(item) for item in self.controller.workflows.definitions() if item.id != identifier]
-        data.append({
-            "id": identifier, "name": name.text(), "trigger_type": trigger.currentData(),
-            "profile_id": profile.currentData(), "enabled": enabled.isChecked(), "actions": steps,
-        })
+        data = [
+            asdict(item)
+            for item in self.controller.workflows.definitions()
+            if item.id != identifier
+        ]
+        data.append(
+            {
+                "id": identifier,
+                "name": name.text(),
+                "trigger_type": trigger.currentData(),
+                "profile_id": profile.currentData(),
+                "enabled": enabled.isChecked(),
+                "actions": steps,
+            }
+        )
         try:
             definitions = parse_workflows(json.loads(json.dumps(data, ensure_ascii=False)))
         except (ValueError, TypeError) as exc:
@@ -573,12 +734,16 @@ class ProfessionalWindow(QDialog):
             self.profile.addItem(profile.name + marker, profile)
             kind = "Встроенный" if profile.id in BUILTIN_IDS else "Пользовательский"
             state = "Активен" if profile.enabled else "Выключен"
-            self.profile_list.addItem(QListWidgetItem(
-                f"{profile.name}{marker}\n{kind} · {state} · {profile.formatting_mode}"
-            ))
+            self.profile_list.addItem(
+                QListWidgetItem(
+                    f"{profile.name}{marker}\n{kind} · {state} · {profile.formatting_mode}"
+                )
+            )
         self.profile.setCurrentIndex(index)
         self.profile_list.setCurrentRow(index)
-        self.profile_hint.setVisible(not any(item.id not in BUILTIN_IDS for item in self.profiles.profiles()))
+        self.profile_hint.setVisible(
+            not any(item.id not in BUILTIN_IDS for item in self.profiles.profiles())
+        )
         self.profile_list.blockSignals(False)
         self.profile.blockSignals(False)
         self._load()
@@ -588,23 +753,38 @@ class ProfessionalWindow(QDialog):
         if profile is None:
             return
         mutable = profile.id not in BUILTIN_IDS
+        self.technical_language_hint.setVisible(
+            profile.output_language == "preserve_spoken_language"
+        )
         self.name.setText(profile.name)
         self.vocabulary_id.setText(profile.vocabulary_id)
         self.command_set_id.setText(profile.command_set_id)
         self.snippet_set_id.setText(profile.snippet_set_id)
         self.enabled.setChecked(profile.enabled)
-        self.rules.setPlainText("\n".join(
-            f"{rule.executable} | {rule.title_glob} | {rule.priority} | {int(rule.enabled)}"
-            for rule in profile.app_rules
-        ))
+        self.rules.setPlainText(
+            "\n".join(
+                f"{rule.executable} | {rule.title_glob} | {rule.priority} | {int(rule.enabled)}"
+                for rule in profile.app_rules
+            )
+        )
         for combo, value in (
-            (self.language, profile.language), (self.model, profile.model_id),
-            (self.formatting, profile.formatting_mode), (self.insertion, profile.insertion_mode),
+            (self.language, profile.language),
+            (self.model, profile.model_id),
+            (self.formatting, profile.formatting_mode),
+            (self.insertion, profile.insertion_mode),
         ):
             combo.setCurrentIndex(combo.findData(value))
             combo.setEnabled(mutable)
-        for widget in (self.name, self.enabled, self.rules, self.save_button, self.remove_button,
-                       self.vocabulary_id, self.command_set_id, self.snippet_set_id):
+        for widget in (
+            self.name,
+            self.enabled,
+            self.rules,
+            self.save_button,
+            self.remove_button,
+            self.vocabulary_id,
+            self.command_set_id,
+            self.snippet_set_id,
+        ):
             widget.setEnabled(mutable)
 
     def _persist(self, work: Callable[[], str]) -> None:
@@ -638,6 +818,125 @@ class ProfessionalWindow(QDialog):
             self.profiles_refreshed.emit()
         self.feedback.setText(message)
 
+    def edit_input_compatibility(self) -> None:
+        profiles = [item for item in self.profiles.profiles() if item.id not in BUILTIN_IDS]
+        if not profiles:
+            self.feedback.setText(
+                "Создайте или продублируйте профиль, чтобы назначить правило приложения."
+            )
+            return
+        name, ok = QInputDialog.getItem(
+            self, "Совместимость приложений", "Профиль", [p.name for p in profiles], editable=False
+        )
+        if not ok:
+            return
+        profile = next(item for item in profiles if item.name == name)
+        options = [
+            f"{item.executable} · {item.title_glob or 'любое поле'}" for item in profile.app_rules
+        ]
+        rule_index = -1
+        if options:
+            options.append("Добавить приложение…")
+            selected, ok = QInputDialog.getItem(
+                self, "Совместимость приложений", "Правило", options, editable=False
+            )
+            if not ok:
+                return
+            rule_index = options.index(selected)
+            if rule_index == len(profile.app_rules):
+                rule_index = -1
+        previous = profile.app_rules[rule_index] if rule_index >= 0 else None
+        dialog = VoxDialog(self)
+        dialog.setWindowTitle("Совместимость приложения")
+        form = QFormLayout(dialog)
+        exe = QLineEdit(previous.executable if previous else "", dialog)
+        exe.setPlaceholderText("Имя EXE или полный путь")
+        form.addRow("Приложение", exe)
+        strategy = self._choices(
+            (
+                "Автоматически",
+                "auto",
+                "Буфер обмена",
+                "clipboard_paste",
+                "Unicode",
+                "unicode_input",
+                "Локальный предпросмотр",
+                "local_preview",
+                "Только копирование",
+                "safe_clipboard",
+            )
+        )
+        restore = self._choices(
+            (
+                "Восстанавливать исходный буфер",
+                "preserve",
+                "Не использовать буфер",
+                "avoid_clipboard",
+            )
+        )
+        formatting = self._choices(
+            ("Настройки профиля", "profile", "Сохранять технический текст", "preserve")
+        )
+        strict = QCheckBox("Проверять исходное поле", dialog)
+        multiline = QCheckBox("Подтверждать многострочную вставку", dialog)
+        unicode = QCheckBox("Предпочитать Unicode", dialog)
+        automatic = QCheckBox("Разрешать автоматическую вставку", dialog)
+        for label, widget in (("Способ", strategy), ("Буфер", restore), ("Формат", formatting)):
+            form.addRow(label, widget)
+        for widget in (strict, multiline, unicode, automatic):
+            form.addRow(widget)
+
+        def populate(rule: AppRule) -> None:
+            for widget, value in (
+                (strategy, rule.input_strategy),
+                (restore, rule.clipboard_restore_policy),
+                (formatting, rule.formatting_policy),
+            ):
+                widget.setCurrentIndex(widget.findData(value))
+            for widget, checked in (
+                (strict, rule.strict_focus),
+                (multiline, rule.multiline_requires_confirmation),
+                (unicode, rule.unicode_preference),
+                (automatic, rule.allow_auto_insert),
+            ):
+                widget.setChecked(checked)
+
+        defaults = AppRule("application.exe")
+        populate(previous or defaults)
+        controls = QHBoxLayout()
+        self._button("По умолчанию", lambda: populate(defaults), controls)
+        self._button("Отмена", dialog.reject, controls)
+        self._button("Сохранить", dialog.accept, controls)
+        form.addRow(controls)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        try:
+            updated = replace(
+                previous or defaults,
+                executable=exe.text().strip(),
+                input_strategy=strategy.currentData(),
+                clipboard_restore_policy=restore.currentData(),
+                formatting_policy=formatting.currentData(),
+                strict_focus=strict.isChecked(),
+                multiline_requires_confirmation=multiline.isChecked(),
+                unicode_preference=unicode.isChecked(),
+                allow_auto_insert=automatic.isChecked(),
+            )
+        except ValueError:
+            self.feedback.setText("Укажите подходящее приложение.")
+            return
+        rules = list(profile.app_rules)
+        if rule_index >= 0:
+            rules[rule_index] = updated
+        else:
+            rules.append(updated)
+        if len(rules) > 100:
+            self.feedback.setText("Допускается не более ста правил на профиль.")
+            return
+        self._persist(
+            lambda: self.profiles.save(replace(profile, app_rules=tuple(rules))) or profile.id
+        )
+
     def _save(self) -> None:
         profile = self._selected()
         if profile is None or profile.id in BUILTIN_IDS:
@@ -655,11 +954,29 @@ class ProfessionalWindow(QDialog):
                     parts = [part.strip() for part in line.split("|")]
                     if len(parts) != 4 or parts[3] not in ("0", "1"):
                         raise ValueError("Для правила нужны четыре поля; последнее 0 или 1")
-                    rules.append(AppRule(parts[0], parts[1], int(parts[2]), parts[3] == "1"))
+                    previous = next(
+                        (
+                            rule
+                            for rule in profile.app_rules
+                            if rule.executable.casefold() == parts[0].casefold()
+                            and rule.title_glob == parts[1]
+                        ),
+                        None,
+                    )
+                    if previous is None:
+                        rules.append(AppRule(parts[0], parts[1], int(parts[2]), parts[3] == "1"))
+                    else:
+                        rules.append(
+                            replace(previous, priority=int(parts[2]), enabled=parts[3] == "1")
+                        )
             updated = replace(
-                profile, name=self.name.text().strip(), language=self.language.currentData(),
-                model_id=self.model.currentData(), formatting_mode=self.formatting.currentData(),
-                insertion_mode=self.insertion.currentData(), enabled=self.enabled.isChecked(),
+                profile,
+                name=self.name.text().strip(),
+                language=self.language.currentData(),
+                model_id=self.model.currentData(),
+                formatting_mode=self.formatting.currentData(),
+                insertion_mode=self.insertion.currentData(),
+                enabled=self.enabled.isChecked(),
                 vocabulary_id=self.vocabulary_id.text().strip(),
                 command_set_id=self.command_set_id.text().strip(),
                 snippet_set_id=self.snippet_set_id.text().strip(),
@@ -686,7 +1003,10 @@ class ProfessionalWindow(QDialog):
         profile = self._selected()
         if profile is None or profile.id in BUILTIN_IDS:
             return
-        if QMessageBox.question(self, "Удаление профиля", "Удалить выбранный профиль?") != QMessageBox.StandardButton.Yes:
+        if (
+            QMessageBox.question(self, "Удаление профиля", "Удалить выбранный профиль?")
+            != QMessageBox.StandardButton.Yes
+        ):
             return
         self._persist(lambda: self._delete(profile.id))
 
@@ -756,14 +1076,20 @@ class ProfessionalWindow(QDialog):
             search = VoxSearchField("Поиск…" if key == "snippets" else "Поиск по терминам…", page)
             table = RecordsView(
                 ("Произнесённая форма", "Написание", "Язык", "Профиль", "Статус")
-                if key == "dictionary" else ("Шаблон", "Фраза", "Категория", "Статус"), page
+                if key == "dictionary"
+                else ("Шаблон", "Фраза", "Категория", "Статус"),
+                page,
             )
             self.collection_tables[key] = table
             layout.addWidget(search)
             pane = QStackedWidget(page)
             pane.addWidget(table)
-            empty = VoxEmptyState("dictionary" if key == "dictionary" else "snippets",
-                                  "Нет записей", "Добавьте первую запись или импортируйте коллекцию.", pane)
+            empty = VoxEmptyState(
+                "dictionary" if key == "dictionary" else "snippets",
+                "Нет записей",
+                "Добавьте первую запись или импортируйте коллекцию.",
+                pane,
+            )
             empty.action.setText("Добавить запись")
             empty.action.clicked.connect(lambda: self._edit_collection_item(key, new=True))
             empty.action.show()
@@ -774,7 +1100,9 @@ class ProfessionalWindow(QDialog):
                 self.snippet_splitter.addWidget(self._snippet_editor(page))
                 self.snippet_splitter.setStretchFactor(1, 2)
                 layout.addWidget(self.snippet_splitter, 1)
-                table.selectionModel().currentChanged.connect(lambda *_args: self._load_snippet_selection())
+                table.selectionModel().currentChanged.connect(
+                    lambda *_args: self._load_snippet_selection()
+                )
             else:
                 layout.removeWidget(search)
                 self.dictionary_splitter = QSplitter(page)
@@ -803,9 +1131,13 @@ class ProfessionalWindow(QDialog):
                 pane.setCurrentWidget(table if table.proxy.rowCount() else empty)
 
             editor.textChanged.connect(refresh)
-            table.proxy.modelReset.connect(lambda: pane.setCurrentWidget(table if table.proxy.rowCount() else empty))
+            table.proxy.modelReset.connect(
+                lambda: pane.setCurrentWidget(table if table.proxy.rowCount() else empty)
+            )
             table.proxy.rowsInserted.connect(lambda *_args: pane.setCurrentWidget(table))
-            table.proxy.rowsRemoved.connect(lambda *_args: pane.setCurrentWidget(table if table.proxy.rowCount() else empty))
+            table.proxy.rowsRemoved.connect(
+                lambda *_args: pane.setCurrentWidget(table if table.proxy.rowCount() else empty)
+            )
             refresh()
         else:
             layout.addWidget(editor)
@@ -820,12 +1152,26 @@ class ProfessionalWindow(QDialog):
             self._button("Изменить", lambda: self._edit_collection_item(key, new=False), row)
         if key == "dictionary":
             self._button("Размер подсказки…", self._edit_processing_options, row)
+            clear = self._button("Очистить словарь", self._clear_dictionary, row)
+            clear.setProperty("danger", True)
         self._button("Сохранить", lambda: self._commit_collection(key), row)
         self._button("Импорт", lambda: self._import_collection(key), row)
         self._button("Экспорт", lambda: self._export_collection(key), row)
         if key == "replacements":
             self._button("Предпросмотр", lambda: self._preview_collection(key), row)
         layout.addLayout(row)
+
+    def _clear_dictionary(self) -> None:
+        if not confirm_delete(
+            self,
+            "Очистить словарь?",
+            "Удалить все термины и варианты произношения из этой коллекции?",
+        ):
+            return
+        self.collection_editors["dictionary"].setPlainText(
+            '{"schema_version": 1, "dictionary": []}'
+        )
+        self._commit_collection("dictionary")
 
     def _snippet_editor(self, parent: QWidget) -> QWidget:
         panel = QWidget(parent)
@@ -847,7 +1193,9 @@ class ProfessionalWindow(QDialog):
         for value in ("{date}", "{time}", "{input:client_name}"):
             fields.addItem(value)
         row.addWidget(fields)
-        self._button("Добавить поле", lambda: self.snippet_body.insertPlainText(fields.currentText()), row)
+        self._button(
+            "Добавить поле", lambda: self.snippet_body.insertPlainText(fields.currentText()), row
+        )
         self._button("Предпросмотр", self._preview_snippet_editor, row)
         layout.addLayout(row)
         row = QHBoxLayout()
@@ -876,18 +1224,26 @@ class ProfessionalWindow(QDialog):
 
     def _snippet_editor_data(self, existing: dict) -> dict:
         return {
-            **existing, "name": self.snippet_name.text().strip(),
+            **existing,
+            "name": self.snippet_name.text().strip(),
             "trigger_phrase": self.snippet_trigger.text().strip(),
-            "category": self.snippet_category.text().strip(), "content": self.snippet_body.toPlainText(),
+            "category": self.snippet_category.text().strip(),
+            "content": self.snippet_body.toPlainText(),
         }
 
     def _preview_snippet_editor(self) -> None:
         entry = Snippet(**self._snippet_editor_data({"id": "preview"}))
         preview = self.render_snippet(entry)
-        if preview is not None and QMessageBox.question(
-            self, "Вставить шаблон?", "Отправить проверенный текст в целевое окно?",
-            defaultButton=QMessageBox.StandardButton.No,
-        ) == QMessageBox.StandardButton.Yes:
+        if (
+            preview is not None
+            and QMessageBox.question(
+                self,
+                "Вставить шаблон?",
+                "Отправить проверенный текст в целевое окно?",
+                defaultButton=QMessageBox.StandardButton.No,
+            )
+            == QMessageBox.StandardButton.Yes
+        ):
             self.insertion_requested.emit(preview)
 
     def _store_snippet_editor(self, action: str) -> None:
@@ -895,10 +1251,16 @@ class ProfessionalWindow(QDialog):
         current = self.collection_tables["snippets"].selected_key()
         index = int(current) if current else None
         if action == "delete":
-            if index is None or QMessageBox.question(
-                self, "Удалить шаблон?", rows[index]["name"],
-                defaultButton=QMessageBox.StandardButton.No,
-            ) != QMessageBox.StandardButton.Yes:
+            if (
+                index is None
+                or QMessageBox.question(
+                    self,
+                    "Удалить шаблон?",
+                    rows[index]["name"],
+                    defaultButton=QMessageBox.StandardButton.No,
+                )
+                != QMessageBox.StandardButton.Yes
+            ):
                 return
             rows.pop(index)
         elif index is not None and action == "save":
@@ -914,9 +1276,9 @@ class ProfessionalWindow(QDialog):
         except (ValueError, TypeError) as exc:
             self.feedback.setText(str(exc))
             return
-        self.collection_editors["snippets"].setPlainText(json.dumps(
-            {"schema_version": 1, "snippets": rows}, ensure_ascii=False, indent=2
-        ))
+        self.collection_editors["snippets"].setPlainText(
+            json.dumps({"schema_version": 1, "snippets": rows}, ensure_ascii=False, indent=2)
+        )
         self._commit_collection("snippets")
 
     def resizeEvent(self, event: object) -> None:
@@ -941,8 +1303,13 @@ class ProfessionalWindow(QDialog):
                 selected = self.dictionary_language.currentData()
                 if selected and item.language and item.language != selected:
                     continue
-                values = (", ".join(item.spoken_variants), item.canonical_text, item.language or "Все",
-                          item.profile_id or "Все", status)
+                values = (
+                    ", ".join(item.spoken_variants),
+                    item.canonical_text,
+                    item.language or "Все",
+                    item.profile_id or "Все",
+                    status,
+                )
             else:
                 values = (item.name, item.trigger_phrase, item.category or "—", status)
             rows.append((str(index), values))
@@ -950,7 +1317,7 @@ class ProfessionalWindow(QDialog):
 
     def _edit_processing_options(self) -> None:
         settings = self.controller.professional_content.snapshot()
-        dialog = QDialog(self)
+        dialog = VoxDialog(self)
         dialog.setWindowTitle("Параметры обработки")
         form = QFormLayout(dialog)
         activation = QLineEdit(settings.activation, dialog)
@@ -967,8 +1334,12 @@ class ProfessionalWindow(QDialog):
         form.addRow(row)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             value, limit = activation.text(), budget.value()
-            self._persist(lambda: self.controller.professional_content.save_options(value, limit)
-                          or self.profiles.default_id)
+            self._persist(
+                lambda: (
+                    self.controller.professional_content.save_options(value, limit)
+                    or self.profiles.default_id
+                )
+            )
 
     def _command_document(self) -> dict | None:
         editor = self.collection_editors["commands"]
@@ -987,7 +1358,9 @@ class ProfessionalWindow(QDialog):
             self.feedback.setText("Список команд пуст")
             return None
         labels = [f"{item['trigger']} · {item['id']}" for item in entries]
-        label, selected = QInputDialog.getItem(self, "Голосовая команда", "Команда", labels, editable=False)
+        label, selected = QInputDialog.getItem(
+            self, "Голосовая команда", "Команда", labels, editable=False
+        )
         return labels.index(label) if selected else None
 
     def _edit_command(self, *, new: bool) -> None:
@@ -998,10 +1371,16 @@ class ProfessionalWindow(QDialog):
         index = None if new else self._choose_command(entries)
         if not new and index is None:
             return
-        entry = entries[index] if index is not None else {
-            "id": uuid4().hex, "action_type": "InsertLiteralText", "payload": {},
-        }
-        dialog = QDialog(self)
+        entry = (
+            entries[index]
+            if index is not None
+            else {
+                "id": uuid4().hex,
+                "action_type": "InsertLiteralText",
+                "payload": {},
+            }
+        )
+        dialog = VoxDialog(self)
         dialog.setWindowTitle("Голосовая команда")
         form = QFormLayout(dialog)
         trigger = QLineEdit(entry.get("trigger", ""), dialog)
@@ -1019,9 +1398,13 @@ class ProfessionalWindow(QDialog):
         confirm = QCheckBox(dialog)
         confirm.setChecked(entry.get("confirmation_required", False))
         for label, widget in (
-            ("Фраза", trigger), ("ID набора", command_set), ("Действие", action),
-            ("Имя или текст", parameter), ("Панель VoxType", panel),
-            ("Включена", enabled), ("С запросом подтверждения", confirm),
+            ("Фраза", trigger),
+            ("ID набора", command_set),
+            ("Действие", action),
+            ("Имя или текст", parameter),
+            ("Панель VoxType", panel),
+            ("Включена", enabled),
+            ("С запросом подтверждения", confirm),
         ):
             form.addRow(label, widget)
 
@@ -1042,9 +1425,13 @@ class ProfessionalWindow(QDialog):
         key = ACTION_PARAMETERS.get(kind)
         value = panel.currentText() if key == "panel" else parameter.toPlainText()
         updated = {
-            "id": entry["id"], "trigger": trigger.text().strip(), "action_type": kind,
-            "payload": {key: value} if key else {}, "command_set_id": command_set.text().strip(),
-            "enabled": enabled.isChecked(), "confirmation_required": confirm.isChecked(),
+            "id": entry["id"],
+            "trigger": trigger.text().strip(),
+            "action_type": kind,
+            "payload": {key: value} if key else {},
+            "command_set_id": command_set.text().strip(),
+            "enabled": enabled.isChecked(),
+            "confirmation_required": confirm.isChecked(),
         }
         if index is None:
             entries.append(updated)
@@ -1055,7 +1442,9 @@ class ProfessionalWindow(QDialog):
         except (ValueError, TypeError) as exc:
             self.feedback.setText(str(exc))
             return
-        self.collection_editors["commands"].setPlainText(json.dumps(data, ensure_ascii=False, indent=2))
+        self.collection_editors["commands"].setPlainText(
+            json.dumps(data, ensure_ascii=False, indent=2)
+        )
         self._commit_collection("commands")
 
     def _delete_command(self) -> None:
@@ -1064,31 +1453,54 @@ class ProfessionalWindow(QDialog):
             return
         entries = data["commands"]
         index = self._choose_command(entries)
-        if index is not None and QMessageBox.question(
-            self, "Удалить голосовую команду?", entries[index]["trigger"],
-            defaultButton=QMessageBox.StandardButton.No,
-        ) == QMessageBox.StandardButton.Yes:
+        if (
+            index is not None
+            and QMessageBox.question(
+                self,
+                "Удалить голосовую команду?",
+                entries[index]["trigger"],
+                defaultButton=QMessageBox.StandardButton.No,
+            )
+            == QMessageBox.StandardButton.Yes
+        ):
             del entries[index]
-            self.collection_editors["commands"].setPlainText(json.dumps(data, ensure_ascii=False, indent=2))
+            self.collection_editors["commands"].setPlainText(
+                json.dumps(data, ensure_ascii=False, indent=2)
+            )
             self._commit_collection("commands")
 
     def _edit_collection_item(self, key: str, *, new: bool) -> None:
         editor = self.collection_editors[key]
         try:
             data = json.loads(editor.toPlainText())
-            entries = [asdict(item) for item in self.controller.professional_content.parse(key, data[key])]
+            entries = [
+                asdict(item) for item in self.controller.professional_content.parse(key, data[key])
+            ]
         except (ValueError, TypeError, KeyError, AttributeError):
             self.feedback.setText("Исправьте JSON в редакторе")
             return
         fields = {
-            "dictionary": (("canonical_text", "Написание"), ("spoken_variants", "Произношения, по одному на строку"),
-                           ("language", "Язык: ru или en"), ("profile_id", "ID профиля"),
-                           ("executable", "Имя или путь EXE"), ("vocabulary_id", "ID словаря")),
-            "snippets": (("name", "Название"), ("trigger_phrase", "Фраза"), ("content", "Текст"),
-                         ("category", "Категория"), ("profile_id", "ID профиля"),
-                         ("snippet_set_id", "ID набора")),
-            "replacements": (("pattern", "Что заменить"), ("replacement", "На что заменить"),
-                             ("scope", "Область: ID профиля, app:EXE или lang:ru")),
+            "dictionary": (
+                ("canonical_text", "Написание"),
+                ("spoken_variants", "Произношения, по одному на строку"),
+                ("language", "Язык: ru или en"),
+                ("profile_id", "ID профиля"),
+                ("executable", "Имя или путь EXE"),
+                ("vocabulary_id", "ID словаря"),
+            ),
+            "snippets": (
+                ("name", "Название"),
+                ("trigger_phrase", "Фраза"),
+                ("content", "Текст"),
+                ("category", "Категория"),
+                ("profile_id", "ID профиля"),
+                ("snippet_set_id", "ID набора"),
+            ),
+            "replacements": (
+                ("pattern", "Что заменить"),
+                ("replacement", "На что заменить"),
+                ("scope", "Область: ID профиля, app:EXE или lang:ru"),
+            ),
         }[key]
         index = None
         if not new:
@@ -1100,14 +1512,25 @@ class ProfessionalWindow(QDialog):
             if marked:
                 index = int(marked)
             else:
-                label, accepted = QInputDialog.getItem(self, "Выберите запись", "Запись", labels, editable=False)
+                label, accepted = QInputDialog.getItem(
+                    self, "Выберите запись", "Запись", labels, editable=False
+                )
                 if not accepted:
                     return
                 index = labels.index(label)
-        entry = entries[index] if index is not None else ({} if key == "dictionary" else {"id": uuid4().hex})
-        dialog = QDialog(self)
-        dialog.setWindowTitle({"dictionary": "Словарь", "snippets": "Шаблон AutoText",
-                               "replacements": "Правило замены"}[key])
+        entry = (
+            entries[index]
+            if index is not None
+            else ({} if key == "dictionary" else {"id": uuid4().hex})
+        )
+        dialog = VoxDialog(self)
+        dialog.setWindowTitle(
+            {
+                "dictionary": "Словарь",
+                "snippets": "Шаблон AutoText",
+                "replacements": "Правило замены",
+            }[key]
+        )
         form = QFormLayout(dialog)
         if key == "dictionary" and entry.get("origin") == "organization":
             form.addRow("Источник", QLabel("Локальный пакет организации", dialog))
@@ -1166,16 +1589,29 @@ class ProfessionalWindow(QDialog):
         else:
             updated = {**entry, "enabled": enabled.isChecked()}
             for field, widget in widgets.items():
-                updated[field] = widget.toPlainText() if isinstance(widget, QPlainTextEdit) else widget.text().strip()
+                updated[field] = (
+                    widget.toPlainText()
+                    if isinstance(widget, QPlainTextEdit)
+                    else widget.text().strip()
+                )
             if key == "dictionary":
                 updated.update(
-                    spoken_variants=tuple(part.strip() for part in updated["spoken_variants"].splitlines() if part.strip()),
-                    priority=priority.value(), match_mode=match_mode.currentText(),
+                    spoken_variants=tuple(
+                        part.strip()
+                        for part in updated["spoken_variants"].splitlines()
+                        if part.strip()
+                    ),
+                    priority=priority.value(),
+                    match_mode=match_mode.currentText(),
                     case_policy=case_policy.currentText(),
                 )
             elif key == "replacements":
-                updated.update(match_type="literal", priority=priority.value(),
-                               case_sensitive=case_sensitive.isChecked(), whole_word=whole_word.isChecked())
+                updated.update(
+                    match_type="literal",
+                    priority=priority.value(),
+                    case_sensitive=case_sensitive.isChecked(),
+                    whole_word=whole_word.isChecked(),
+                )
             if index is None:
                 entries.append(updated)
             else:
@@ -1227,11 +1663,15 @@ class ProfessionalWindow(QDialog):
 
     def _export_collection(self, key: str) -> None:
         filters = "JSON (*.json);;CSV (*.csv)" if key == "dictionary" else "JSON (*.json)"
-        path, selected_filter = QFileDialog.getSaveFileName(self, "Экспорт коллекции", key + ".json", filters)
+        path, selected_filter = QFileDialog.getSaveFileName(
+            self, "Экспорт коллекции", key + ".json", filters
+        )
         if not path:
             return
         try:
-            if key == "dictionary" and (Path(path).suffix.casefold() == ".csv" or selected_filter.startswith("CSV")):
+            if key == "dictionary" and (
+                Path(path).suffix.casefold() == ".csv" or selected_filter.startswith("CSV")
+            ):
                 data = self.controller.professional_content.dictionary_to_csv()
             else:
                 data = self.controller.professional_content.export_json(key)
@@ -1251,7 +1691,9 @@ class ProfessionalWindow(QDialog):
             return
         if key == "snippets":
             names = [f"{item.name} ({item.id})" for item in items]
-            name, accepted = QInputDialog.getItem(self, "Шаблон", "Выберите шаблон", names, editable=False)
+            name, accepted = QInputDialog.getItem(
+                self, "Шаблон", "Выберите шаблон", names, editable=False
+            )
             if accepted and name in names:
                 text = self.render_snippet(items[names.index(name)])
                 if text is not None:
@@ -1259,11 +1701,15 @@ class ProfessionalWindow(QDialog):
             return
         original, accepted = QInputDialog.getMultiLineText(self, "Предпросмотр замен", "До")
         if accepted:
-            pipeline = replace(self.controller.professional_content.snapshot(), replacements=items, dictionary=())
+            pipeline = replace(
+                self.controller.professional_content.snapshot(), replacements=items, dictionary=()
+            )
             profile = replace(profile, formatting_mode="verbatim")
-            request = RecognitionRequest(0, profile.language or "ru", profile.id, "", DictationContext(), (), None)
+            request = RecognitionRequest(
+                0, profile.language or "ru", profile.id, "", DictationContext(), (), None
+            )
             result = pipeline.process(request, original, profile, allow_commands=False)
-            result_box = QDialog(self)
+            result_box = VoxDialog(self)
             result_box.setWindowTitle("После")
             layout = QVBoxLayout(result_box)
             value = QPlainTextEdit(result.final_text, result_box)
@@ -1279,12 +1725,25 @@ class ProfessionalWindow(QDialog):
                 return None
             fields[key] = value
         rendered = snippet.render(fields)
-        text, accepted = QInputDialog.getMultiLineText(self, "Подтвердить вставку", "Текст", rendered)
+        text, accepted = QInputDialog.getMultiLineText(
+            self, "Подтвердить вставку", "Текст", rendered
+        )
         return text if accepted and text else None
 
     def _add_text_editor(self) -> None:
         page = QWidget(self)
         self.tabs.addTab(page, "Редактор текста")
+        self._editor_page = page
+        self._correction_origin: RecognitionResult | None = None
+        self._correction_baseline = ""
+        self._editor_draft_id = None
+        self._draft_timer = QTimer(self, interval=1000, singleShot=True)
+        self._draft_timer.timeout.connect(self.flush_editor_draft)
+        self._corrections = CorrectionSuggestionService(
+            self.controller.settings_repository,
+            self.controller.professional_content,
+        )
+        self.correction_ready.connect(self._offer_correction, Qt.ConnectionType.QueuedConnection)
         layout = QVBoxLayout(page)
         self.editor = TextEditService()
         self._selection: SelectedText | None = None
@@ -1292,20 +1751,33 @@ class ProfessionalWindow(QDialog):
         self._preview_result: str | None = None
         self.edit_original = QPlainTextEdit(page)
         self.edit_original.setPlaceholderText("Вставьте текст сюда или запросите выделение")
+        self.edit_original.textChanged.connect(self._debounce_editor_draft)
         self.edit_preview = QPlainTextEdit(page)
         self.edit_preview.setPlaceholderText("Предпросмотр")
         self.edit_preview.setReadOnly(True)
         self.edit_operation = QComboBox(page)
-        self.edit_operation.addItems((
-            "Uppercase", "Lowercase", "Sentence case", "Remove duplicate spaces",
-            "Replace literal phrase", "Insert bullet list formatting", "Normalize line breaks",
-        ))
+        self.edit_operation.addItems(
+            (
+                "Uppercase",
+                "Lowercase",
+                "Sentence case",
+                "Remove duplicate spaces",
+                "Replace literal phrase",
+                "Insert bullet list formatting",
+                "Normalize line breaks",
+            )
+        )
         self.edit_source = QLineEdit(page)
         self.edit_source.setPlaceholderText("Исходная фраза для замены")
         self.edit_replacement = QLineEdit(page)
         self.edit_replacement.setPlaceholderText("Новая фраза")
-        for widget in (self.edit_operation, self.edit_source, self.edit_replacement,
-                       self.edit_original, self.edit_preview):
+        for widget in (
+            self.edit_operation,
+            self.edit_source,
+            self.edit_replacement,
+            self.edit_original,
+            self.edit_preview,
+        ):
             layout.addWidget(widget)
         row = QHBoxLayout()
         selection_button = self._button("Прочитать выделение", self._read_selection, row)
@@ -1316,12 +1788,198 @@ class ProfessionalWindow(QDialog):
         self._button("Применить локально", self._apply_edit, row)
         self._button("Отменить предпросмотр", self._clear_preview, row)
         self._button("Отменить правку", self._undo_edit, row)
+        self.suggest_button = self._button(
+            "Учесть исправление в словаре", self._suggest_correction, row
+        )
+        self.suggest_button.setEnabled(False)
         layout.addLayout(row)
+        scratchpad = QHBoxLayout()
+        self.scratchpad_button = self._button(
+            "Диктовать в блокнот",
+            self.scratchpad_toggle_requested.emit,
+            scratchpad,
+        )
+        self._button(
+            "Скопировать",
+            lambda: (
+                self.edit_original.copy()
+                if self.edit_original.textCursor().hasSelection()
+                else self._copy_scratchpad()
+            ),
+            scratchpad,
+        )
+        self._button("Сохранить черновик", self._save_scratchpad, scratchpad)
+        self._button("Экспорт TXT", self._export_scratchpad, scratchpad)
+        layout.addLayout(scratchpad)
         row = QHBoxLayout()
-        self._button("Заменить выделение", self._replace_selection, row).setEnabled(selection.available)
+        self._button("Заменить выделение", self._replace_selection, row).setEnabled(
+            selection.available
+        )
         layout.addLayout(row)
 
+    def open_scratchpad(self) -> None:
+        self.tabs.setCurrentWidget(self._editor_page)
+        self.edit_original.setFocus()
+
+    def set_scratchpad_recording(self, recording: bool) -> None:
+        self.scratchpad_button.setText(
+            "Остановить диктовку" if recording else "Диктовать в блокнот"
+        )
+
+    def append_scratchpad_result(self, result: RecognitionResult) -> None:
+        if not result.text.strip():
+            return
+        self._clear_preview()
+        self._selection = None
+        self._editor_draft_id = self._editor_draft_id or uuid4().hex
+        self.edit_original.appendPlainText(result.text)
+        self._correction_origin = result
+        self._correction_baseline = self.edit_original.toPlainText()
+        self.suggest_button.setEnabled(True)
+
+    def _copy_scratchpad(self) -> None:
+        from PySide6.QtWidgets import QApplication
+
+        QApplication.clipboard().setText(self.edit_original.toPlainText())
+
+    def _save_scratchpad(self) -> None:
+        if (
+            self.controller.policy.disable_history
+            or not self.controller.settings.privacy.recover_unsaved_drafts
+        ):
+            self.feedback.setText("Включите восстановление черновиков, чтобы сохранять этот текст.")
+            return
+        text = self.edit_original.toPlainText()
+        if text.strip():
+            self._editor_draft_id = self._editor_draft_id or uuid4().hex
+            language = self.controller.snapshot().language.value
+            self.editor_draft_requested.emit((self._editor_draft_id, language, text))
+
+    def _export_scratchpad(self) -> None:
+        text = self.edit_original.toPlainText()
+        if not text.strip():
+            return
+        filename, _ = QFileDialog.getSaveFileName(
+            self, "Экспорт блокнота", "VoxType.txt", "Текст (*.txt)"
+        )
+        if filename:
+            target = QSaveFile(filename)
+            payload = text.encode("utf-8")
+            if (
+                not target.open(QIODevice.OpenModeFlag.WriteOnly)
+                or target.write(payload) != len(payload)
+                or not target.commit()
+            ):
+                self.feedback.setText("Не удалось сохранить файл.")
+
+    def open_recognition_editor(
+        self,
+        result: RecognitionResult,
+        *,
+        edited_text: str | None = None,
+    ) -> None:
+        if self._draft_timer.isActive():
+            self.flush_editor_draft()
+        self._correction_origin = None
+        self._selection = None
+        self._clear_preview()
+        self._correction_baseline = result.text or result.raw_text
+        self.edit_original.setPlainText(
+            self._correction_baseline if edited_text is None else edited_text
+        )
+        self._correction_origin = result
+        self._editor_draft_id = uuid4().hex
+        self.suggest_button.setEnabled(True)
+        self.tabs.setCurrentWidget(self._editor_page)
+        if edited_text is not None and edited_text != self._correction_baseline:
+            self._debounce_editor_draft()
+
+    def open_restored_draft(self, text: str) -> None:
+        if self._draft_timer.isActive():
+            self.flush_editor_draft()
+        self._correction_origin = None
+        self._editor_draft_id = None
+        self._selection = None
+        self._clear_preview()
+        self.edit_original.setPlainText(text)
+        self.suggest_button.setEnabled(False)
+        self.tabs.setCurrentWidget(self._editor_page)
+
+    def _debounce_editor_draft(self) -> None:
+        if (
+            self._editor_draft_id is not None
+            and self._correction_origin is not None
+            and self.controller.settings.privacy.recover_unsaved_drafts
+            and not self.controller.policy.disable_history
+        ):
+            self._draft_timer.start()
+
+    def flush_editor_draft(self) -> None:
+        self._draft_timer.stop()
+        result = self._correction_origin
+        text = self.edit_original.toPlainText()
+        if (
+            result is not None
+            and self._editor_draft_id is not None
+            and text.strip()
+            and text != self._correction_baseline
+            and self.controller.settings.privacy.recover_unsaved_drafts
+            and not self.controller.policy.disable_history
+        ):
+            self.editor_draft_requested.emit((self._editor_draft_id, result.language.value, text))
+
+    def _suggest_correction(self) -> None:
+        original = self._correction_origin
+        if original is None:
+            return
+        edited = self.edit_original.toPlainText()
+        baseline = self._correction_baseline
+        identifier = self._editor_draft_id
+        self.suggest_button.setEnabled(False)
+
+        def find() -> None:
+            try:
+                suggestion = self._corrections.suggest(
+                    baseline, edited, original.language.value, original.profile_id
+                )
+            except (OSError, ValueError, TypeError):
+                suggestion = None
+            self.correction_ready.emit((identifier, edited, suggestion))
+
+        Thread(target=find, name="voxtype-correction-preview", daemon=True).start()
+
+    def _offer_correction(self, result: tuple) -> None:
+        identifier, edited, suggestion = result
+        if self._editor_draft_id != identifier:
+            return
+        self.suggest_button.setEnabled(self._correction_origin is not None)
+        if self.edit_original.toPlainText() != edited:
+            return
+        if suggestion is None:
+            self.feedback.setText("Подходящего короткого исправления не найдено.")
+            return
+        dialog = QMessageBox(self)
+        dialog.setTextFormat(Qt.TextFormat.PlainText)
+        dialog.setWindowTitle("Исправление для словаря")
+        dialog.setText(f"Произнесено: {suggestion.spoken}\nПравильно: {suggestion.canonical}")
+        save = dialog.addButton("Сохранить исправление", QMessageBox.ButtonRole.AcceptRole)
+        never = dialog.addButton(
+            "Больше не предлагать эту пару", QMessageBox.ButtonRole.DestructiveRole
+        )
+        ignore = dialog.addButton("Пропустить", QMessageBox.ButtonRole.RejectRole)
+        dialog.setDefaultButton(ignore)
+        dialog.exec()
+        if dialog.clickedButton() is save:
+            self._persist(lambda: self._corrections.save(suggestion) or "organization")
+        elif dialog.clickedButton() is never:
+            self._persist(lambda: self._corrections.ignore_permanently(suggestion))
+
     def _read_selection(self) -> None:
+        if self._draft_timer.isActive():
+            self.flush_editor_draft()
+        self._correction_origin = None
+        self._editor_draft_id = None
+        self.suggest_button.setEnabled(False)
         self._selection = None
         self._clear_preview()
         self.tabs.setEnabled(False)
@@ -1351,7 +2009,9 @@ class ProfessionalWindow(QDialog):
         original = self.edit_original.toPlainText()
         try:
             value = self.editor.preview(
-                original, self.edit_operation.currentText(), self.edit_source.text(),
+                original,
+                self.edit_operation.currentText(),
+                self.edit_source.text(),
                 self.edit_replacement.text(),
             )
         except ValueError as exc:
@@ -1382,9 +2042,12 @@ class ProfessionalWindow(QDialog):
         if selection is None or self._preview_source != selection.text or not text:
             self.feedback.setText("Считайте выделение заново и создайте предпросмотр")
             return
-        if QMessageBox.question(
-            self, "Замена выделения", "Отправить подготовленный текст в исходный редактор?"
-        ) != QMessageBox.StandardButton.Yes:
+        if (
+            QMessageBox.question(
+                self, "Замена выделения", "Отправить подготовленный текст в исходный редактор?"
+            )
+            != QMessageBox.StandardButton.Yes
+        ):
             return
         self.tabs.setEnabled(False)
 
@@ -1394,7 +2057,10 @@ class ProfessionalWindow(QDialog):
             except (OSError, RuntimeError):
                 sent = False
             self.selection_finished.emit(
-                None, "Команда вставки отправлена" if sent else "Выделение изменилось или цель недоступна",
+                None,
+                "Команда вставки отправлена"
+                if sent
+                else "Выделение изменилось или цель недоступна",
             )
 
         self._selection = None

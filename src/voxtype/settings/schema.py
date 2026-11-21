@@ -11,15 +11,17 @@ from voxtype.constants import (
     DEFAULT_PAUSE_HOTKEY,
     SETTINGS_SCHEMA_VERSION,
 )
-from voxtype.version import ReleaseChannel
 from voxtype.core.compute_budget import DecodingPreset, MemoryPolicy
+from voxtype.core.gestures import DictationMode, SilenceAutoStopSettings
 from voxtype.core.models import (
+    AudioProcessingMode,
     InjectionMode,
     Language,
     ModelProfile,
     PreprocessingProfile,
     TargetMode,
 )
+from voxtype.version import ReleaseChannel
 
 
 @dataclass(slots=True)
@@ -41,7 +43,12 @@ class DictationSettings:
     # only adds the lazy turbo retry when that optional model is installed.
     model_profile: ModelProfile = ModelProfile.BALANCED
     voice_commands: bool = False
+    user_text_transformations: bool = True
     live_preview: bool = False
+    safe_terminal_input: bool = True
+    caret_overlay: bool = False
+    mode: DictationMode = DictationMode.TOGGLE
+    auto_stop: SilenceAutoStopSettings = field(default_factory=SilenceAutoStopSettings)
     auto_insert: bool = True
     copy_full_text_on_complete: bool = False
     auto_hide_completed_result: bool = False
@@ -58,8 +65,11 @@ class DictationSettings:
 @dataclass(slots=True)
 class AudioSettings:
     device_id: int | None = None
+    device_fingerprint: str = ""
+    startup_pre_roll: bool = False
     vad_sensitivity: float = 0.5
     preprocessing_profile: PreprocessingProfile = PreprocessingProfile.RAW
+    preprocessing_mode: AudioProcessingMode = AudioProcessingMode.LEGACY
     noise_suppression: bool = False
     normalization: bool = False
 

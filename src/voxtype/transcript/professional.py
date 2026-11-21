@@ -11,9 +11,14 @@ import unicodedata
 from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, ClassVar
 
-from voxtype.core.profiles import DictationContext, DictationProfile, normalized_executable
+from voxtype.core.profiles import (
+    DictationContext,
+    DictationProfile,
+    OutputLanguagePolicy,
+    normalized_executable,
+)
 from voxtype.settings.repository import SettingsRepository
 
 _PROTECTED = re.compile(
@@ -29,11 +34,19 @@ _PROTECTED = re.compile(
 )
 _PARAMETER = re.compile(r"\{(date|time|input:[A-Za-z][A-Za-z0-9_]{0,39})\}")
 VOICE_ACTION_TYPES = (
-    "InsertSnippet", "InsertLiteralText", "SwitchProfile", "CopyLastResult",
-    "OpenVoxTypePanel", "CancelCurrentSession", "InsertParagraph", "InsertNewline",
+    "InsertSnippet",
+    "InsertLiteralText",
+    "SwitchProfile",
+    "CopyLastResult",
+    "OpenVoxTypePanel",
+    "CancelCurrentSession",
+    "InsertParagraph",
+    "InsertNewline",
 )
 ACTION_PARAMETERS = {
-    "InsertSnippet": "name", "InsertLiteralText": "text", "SwitchProfile": "name",
+    "InsertSnippet": "name",
+    "InsertLiteralText": "text",
+    "SwitchProfile": "name",
     "OpenVoxTypePanel": "panel",
 }
 MAX_HINT_CHARACTERS = 300
@@ -92,9 +105,13 @@ class Snippet:
     snippet_set_id: str = ""
 
     def input_names(self) -> tuple[str, ...]:
-        return tuple(dict.fromkeys(
-            value[6:] for value in _PARAMETER.findall(self.content) if value.startswith("input:")
-        ))
+        return tuple(
+            dict.fromkeys(
+                value[6:]
+                for value in _PARAMETER.findall(self.content)
+                if value.startswith("input:")
+            )
+        )
 
     def render(self, inputs: Mapping[str, str] | None = None) -> str:
         now = datetime.now().astimezone()
@@ -148,10 +165,60 @@ def _outside_protected(text: str, change) -> str:
     parts = []
     index = 0
     for match in _PROTECTED.finditer(text):
-        parts.extend((change(text[index:match.start()]), match[0]))
+        parts.extend((change(text[index : match.start()]), match[0]))
         index = match.end()
     parts.append(change(text[index:]))
     return "".join(parts)
+
+
+class TechnicalTermProtection:
+    """Protect public syntax and exact approved spellings without guessing casing."""
+
+    def __init__(self, terms: Iterable[str]) -> None:
+        distinct = tuple(dict.fromkeys(term for term in terms if 0 < len(term) <= 128))[:128]
+        alternatives = "|".join(re.escape(term) for term in sorted(distinct, key=len, reverse=True))
+        word = chr(92) + "w"
+        self._exact = (
+            re.compile(f"(?<!{word})(?:{alternatives})(?!{word})") if alternatives else None
+        )
+        self._syntax = re.compile(
+            r"(?<![A-Za-z0-9_])(?:[A-Za-z_][A-Za-z0-9_]*(?:(?:[.]|::)[A-Za-z_][A-Za-z0-9_]*)+"
+            r"|[A-Za-z0-9]+(?:_[A-Za-z0-9]+)+|[a-z]+[A-Za-z0-9]*[A-Z][A-Za-z0-9]*"
+            r"|[.][A-Za-z][A-Za-z0-9]{1,7})(?![A-Za-z0-9_])"
+        )
+
+    def apply(self, text: str, change) -> str:
+        patterns = (
+            (_PROTECTED, self._syntax)
+            if self._exact is None
+            else (_PROTECTED, self._syntax, self._exact)
+        )
+        spans = sorted(
+            (match.start(), match.end()) for pattern in patterns for match in pattern.finditer(text)
+        )
+        result: list[str] = []
+        offset = 0
+        start = end = None
+        for left, right in spans:
+            if end is not None and left <= end:
+                end = max(end, right)
+                continue
+            if start is not None and end is not None:
+                result.extend((change(text[offset:start]), text[start:end]))
+                offset = end
+            start, end = left, right
+        if start is not None and end is not None:
+            result.extend((change(text[offset:start]), text[start:end]))
+            offset = end
+        result.append(change(text[offset:]))
+        return "".join(result)
+
+
+def _unambiguous(rules):
+    replacements: dict[str, set[str]] = {}
+    for pattern, replacement, *_rest in rules:
+        replacements.setdefault(pattern.casefold(), set()).add(replacement)
+    return [rule for rule in rules if len(replacements[rule[0].casefold()]) == 1]
 
 
 class FormattingPolicy:
@@ -173,20 +240,33 @@ class FormattingPolicy:
         return value
 
 
-def _applies(entry: DictionaryEntry, language: str, profile: DictationProfile, context: DictationContext) -> bool:
+def _applies(
+    entry: DictionaryEntry, language: str, profile: DictationProfile, context: DictationContext
+) -> bool:
     application = normalized_executable(entry.executable)
     return (
         entry.enabled
-        and (not entry.language or entry.language == language)
+        and (
+            not entry.language
+            or entry.language == language
+            or profile.output_language == OutputLanguagePolicy.PRESERVE_SPOKEN_LANGUAGE
+        )
         and (not entry.profile_id or entry.profile_id == profile.id)
         and (not entry.vocabulary_id or entry.vocabulary_id == profile.vocabulary_id)
-        and (not application or application in {
-            normalized_executable(context.executable_name), normalized_executable(context.process_path or "")
-        })
+        and (
+            not application
+            or application
+            in {
+                normalized_executable(context.executable_name),
+                normalized_executable(context.process_path or ""),
+            }
+        )
     )
 
 
-def _matches_scope(scope: str, language: str, profile: DictationProfile, context: DictationContext) -> bool:
+def _matches_scope(
+    scope: str, language: str, profile: DictationProfile, context: DictationContext
+) -> bool:
     if not scope:
         return True
     if scope.startswith("lang:"):
@@ -194,7 +274,8 @@ def _matches_scope(scope: str, language: str, profile: DictationProfile, context
     if scope.startswith("app:"):
         executable = normalized_executable(scope[4:])
         return bool(executable) and executable in {
-            normalized_executable(context.executable_name), normalized_executable(context.process_path or ""),
+            normalized_executable(context.executable_name),
+            normalized_executable(context.process_path or ""),
         }
     return scope.removeprefix("profile:") == profile.id
 
@@ -203,7 +284,13 @@ _PROFILE_TERMS = {
     "business": ("договор поставки", "счёт-фактура", "commercial proposal"),
     "developer": ("PostgreSQL", "Python", "PySide6", "CTranslate2", "snake_case", "CamelCase"),
     "legal": ("доверенность", "подсудность", "контрагент", "affidavit", "jurisdiction"),
-    "medical": ("анамнез", "аускультация", "электрокардиограмма", "auscultation", "electrocardiogram"),
+    "medical": (
+        "анамнез",
+        "аускультация",
+        "электрокардиограмма",
+        "auscultation",
+        "electrocardiogram",
+    ),
 }
 
 
@@ -224,7 +311,11 @@ class VocabularyPromptBuilder:
         return tuple(result)
 
 
-def _literal_rules(text: str, rules: Iterable[tuple[str, str, bool, bool, int, bool]]) -> str:
+def _literal_rules(
+    text: str,
+    rules: Iterable[tuple[str, str, bool, bool, int, bool]],
+    protected: TechnicalTermProtection | None = None,
+) -> str:
     ordered = sorted(rules, key=lambda rule: (-len(rule[0]), -rule[4]))
     if not ordered:
         return text
@@ -254,7 +345,8 @@ def _literal_rules(text: str, rules: Iterable[tuple[str, str, bool, bool, int, b
             raise TextExpansionLimit("Слишком большой результат замены")
         return value
 
-    return _outside_protected(text, lambda value: regex.sub(substitute, value))
+    apply = protected.apply if protected is not None else _outside_protected
+    return apply(text, lambda value: regex.sub(substitute, value))
 
 
 def _trigger(text: str) -> str:
@@ -264,12 +356,17 @@ def _trigger(text: str) -> str:
 class VoiceCommandRouter:
     @staticmethod
     def route(
-        text: str, profile: DictationProfile, commands: tuple[VoiceAction, ...],
-        *, activation: str, command_mode: bool, snippets: tuple[Snippet, ...] = (),
+        text: str,
+        profile: DictationProfile,
+        commands: tuple[VoiceAction, ...],
+        *,
+        activation: str,
+        command_mode: bool,
+        snippets: tuple[Snippet, ...] = (),
     ) -> VoiceAction | None:
         phrase = _trigger(text)
         prefix = _trigger(activation)
-        tail = phrase[len(prefix):] if prefix and phrase.startswith(prefix) else ""
+        tail = phrase[len(prefix) :] if prefix and phrase.startswith(prefix) else ""
         if tail and tail[0] in " ,:;—-":
             phrase = tail.lstrip(" ,:;—-")
         elif not command_mode:
@@ -284,23 +381,35 @@ class VoiceCommandRouter:
         }
         if profile.formatting_mode == "code":
             for key, symbol in {
-                "нижнее подчёркивание": "_", "открывающая скобка": "(",
-                "закрывающая скобка": ")", "двоеточие": ":",
+                "нижнее подчёркивание": "_",
+                "открывающая скобка": "(",
+                "закрывающая скобка": ")",
+                "двоеточие": ":",
             }.items():
                 fixed[key] = ("InsertLiteralText", {"text": symbol})
         candidates = [
-            item for item in commands if item.enabled and _trigger(item.trigger) == phrase
+            item
+            for item in commands
+            if item.enabled
+            and _trigger(item.trigger) == phrase
             and (not item.command_set_id or item.command_set_id == profile.command_set_id)
         ]
         if phrase in fixed:
             action, payload = fixed[phrase]
             candidates.append(VoiceAction("builtin", phrase, action, payload))
-        for key, action in (("вставить шаблон ", "InsertSnippet"), ("выбрать профиль ", "SwitchProfile")):
+        for key, action in (
+            ("вставить шаблон ", "InsertSnippet"),
+            ("выбрать профиль ", "SwitchProfile"),
+        ):
             if phrase.startswith(key):
-                candidates.append(VoiceAction("builtin", phrase, action, {"name": phrase[len(key):]}))
+                candidates.append(
+                    VoiceAction("builtin", phrase, action, {"name": phrase[len(key) :]})
+                )
         candidates.extend(
             VoiceAction(f"snippet:{item.id}", phrase, "InsertSnippet", {"name": item.id})
-            for item in snippets if item.enabled and item.trigger_phrase
+            for item in snippets
+            if item.enabled
+            and item.trigger_phrase
             and _trigger(item.trigger_phrase) == phrase
             and (not item.profile_id or item.profile_id == profile.id)
             and (not item.snippet_set_id or item.snippet_set_id == profile.snippet_set_id)
@@ -322,7 +431,9 @@ class TextPipeline:
         if not key:
             return None
         matches = [
-            item for item in self.snippets if item.enabled
+            item
+            for item in self.snippets
+            if item.enabled
             and (not item.profile_id or item.profile_id == profile.id)
             and (not item.snippet_set_id or item.snippet_set_id == profile.snippet_set_id)
             and key in {_trigger(item.name), _trigger(item.trigger_phrase), _trigger(item.id)}
@@ -345,59 +456,139 @@ class TextPipeline:
         return None
 
     def process(
-        self, request: RecognitionRequest, text: str, profile: DictationProfile,
-        *, command_mode: bool = False, allow_commands: bool = True,
+        self,
+        request: RecognitionRequest,
+        text: str,
+        profile: DictationProfile,
+        *,
+        command_mode: bool = False,
+        allow_commands: bool = True,
     ) -> ProcessedDictation:
-        normalized = _outside_protected(text, _normalize)
+        preserve_language = profile.output_language == OutputLanguagePolicy.PRESERVE_SPOKEN_LANGUAGE
+        entries = tuple(
+            item
+            for item in self.dictionary
+            if _applies(item, request.language, profile, request.context)
+        )
+        protection = (
+            TechnicalTermProtection(
+                (
+                    *_PROFILE_TERMS.get(profile.vocabulary_id, ()),
+                    *(item.canonical_text for item in entries),
+                )
+            )
+            if preserve_language
+            else None
+        )
+        normalized = text if preserve_language else _outside_protected(text, _normalize)
         actions = ["unicode"] if normalized != text else []
         warnings = []
         try:
-            adjusted = _literal_rules(normalized, (
-                (spoken, entry.canonical_text, entry.match_mode == "case_sensitive",
-                 entry.match_mode != "literal", entry.priority, entry.case_policy == "preserve")
-                for entry in self.dictionary if _applies(entry, request.language, profile, request.context)
+            vocabulary = [
+                (
+                    _normalize(spoken),
+                    entry.canonical_text,
+                    entry.match_mode == "case_sensitive",
+                    entry.match_mode != "literal",
+                    entry.priority + (20_001 if entry.profile_id else 0),
+                    entry.case_policy == "preserve",
+                )
+                for entry in entries
                 for spoken in entry.spoken_variants
-            ))
+            ]
+            adjusted = _literal_rules(
+                normalized,
+                _unambiguous(vocabulary) if preserve_language else vocabulary,
+                protection,
+            )
         except TextExpansionLimit:
             adjusted = normalized
             warnings.append("vocabulary_expansion_limit")
         if adjusted != normalized:
             actions.append("vocabulary")
-        action = VoiceCommandRouter.route(
-            adjusted, profile, self.commands, activation=self.activation,
-            command_mode=command_mode, snippets=self.snippets,
-        ) if allow_commands else None
-        if action is not None and action.action_type == "InsertSnippet":
-            if self.find_snippet(action.payload["name"], profile) is None:
-                action = None
+        action = (
+            VoiceCommandRouter.route(
+                adjusted,
+                profile,
+                self.commands,
+                activation=self.activation,
+                command_mode=command_mode,
+                snippets=self.snippets,
+            )
+            if allow_commands
+            else None
+        )
+        if (
+            action is not None
+            and action.action_type == "InsertSnippet"
+            and (self.find_snippet(action.payload["name"], profile) is None)
+        ):
+            action = None
         if action is not None:
             return ProcessedDictation(
-                request.session_id, text, normalized, "", request.language,
-                profile.id, (*actions, "voice_command"), tuple(warnings), voice_action=action,
+                request.session_id,
+                text,
+                normalized,
+                "",
+                request.language,
+                profile.id,
+                (*actions, "voice_command"),
+                tuple(warnings),
+                voice_action=action,
             )
-        formatted = FormattingPolicy.apply(adjusted, profile.formatting_mode)
+        formatted = (
+            adjusted
+            if preserve_language
+            else FormattingPolicy.apply(adjusted, profile.formatting_mode)
+        )
         if formatted != adjusted:
             actions.append("format")
         try:
-            final = _literal_rules(formatted, (
-                (rule.pattern, rule.replacement, rule.case_sensitive, rule.whole_word, rule.priority, False)
-                for rule in self.replacements if rule.enabled and _matches_scope(
-                    rule.scope, request.language, profile, request.context,
+            rules = [
+                (
+                    rule.pattern,
+                    rule.replacement,
+                    rule.case_sensitive,
+                    rule.whole_word,
+                    rule.priority,
+                    False,
                 )
-            ))
+                for rule in self.replacements
+                if rule.enabled
+                and _matches_scope(
+                    rule.scope,
+                    request.language,
+                    profile,
+                    request.context,
+                )
+            ]
+            final = _literal_rules(
+                formatted, _unambiguous(rules) if preserve_language else rules, protection
+            )
         except TextExpansionLimit:
             final = formatted
             warnings.append("replacement_expansion_limit")
         if final != formatted:
             actions.append("replacements")
         return ProcessedDictation(
-            request.session_id, text, normalized, final, request.language, profile.id,
-            tuple(actions), tuple(warnings),
+            request.session_id,
+            text,
+            normalized,
+            final,
+            request.language,
+            profile.id,
+            tuple(actions),
+            tuple(warnings),
         )
 
     def request(
-        self, session_id: int, language: str, model_id: str, profile: DictationProfile,
-        context: DictationContext, personal: Iterable[str],
+        self,
+        session_id: int,
+        language: str,
+        model_id: str,
+        profile: DictationProfile,
+        context: DictationContext,
+        personal: Iterable[str],
     ) -> RecognitionRequest:
         entries = sorted(
             (item for item in self.dictionary if _applies(item, language, profile, context)),
@@ -406,21 +597,32 @@ class TextPipeline:
         words = VocabularyPromptBuilder.build(
             (
                 *_PROFILE_TERMS.get(profile.vocabulary_id, ()),
-                *(item.canonical_text for item in entries if item.origin == "personal" and not item.executable),
+                *(
+                    item.canonical_text
+                    for item in entries
+                    if item.origin == "personal" and not item.executable
+                ),
                 *personal,
-                *(item.canonical_text for item in entries if item.origin == "personal" and item.executable),
+                *(
+                    item.canonical_text
+                    for item in entries
+                    if item.origin == "personal" and item.executable
+                ),
                 *(item.canonical_text for item in entries if item.origin == "organization"),
             ),
             self.prompt_budget,
         )
-        return RecognitionRequest(session_id, language, profile.id, model_id, context, words,
-                                  ", ".join(words) or None)
+        return RecognitionRequest(
+            session_id, language, profile.id, model_id, context, words, ", ".join(words) or None
+        )
 
 
 class ProfessionalContent:
-    TYPES = {
-        "dictionary": DictionaryEntry, "snippets": Snippet,
-        "commands": VoiceAction, "replacements": ReplacementRule,
+    TYPES: ClassVar[dict[str, type[Any]]] = {
+        "dictionary": DictionaryEntry,
+        "snippets": Snippet,
+        "commands": VoiceAction,
+        "replacements": ReplacementRule,
     }
 
     def __init__(self, repository: SettingsRepository, configuration: dict[str, Any]) -> None:
@@ -440,7 +642,9 @@ class ProfessionalContent:
             return TextPipeline(
                 **self._collections,
                 activation=str(self._configuration.get("command_activation", "вокстайп"))[:64],
-                prompt_budget=min(budget, MAX_HINT_CHARACTERS) if type(budget) is int and budget >= 0 else 240,
+                prompt_budget=min(budget, MAX_HINT_CHARACTERS)
+                if type(budget) is int and budget >= 0
+                else 240,
             )
 
     def save_options(self, activation: str, budget: int) -> None:
@@ -467,7 +671,10 @@ class ProfessionalContent:
                 variants = row.get("spoken_variants", ())
                 if not isinstance(variants, (list, tuple)) or len(variants) > 8:
                     raise ValueError("Допустимо до восьми вариантов произношения")
-                if any(not isinstance(item, str) or not item.strip() or len(item) > 120 for item in variants):
+                if any(
+                    not isinstance(item, str) or not item.strip() or len(item) > 120
+                    for item in variants
+                ):
                     raise ValueError("Некорректный вариант произношения")
                 row["spoken_variants"] = tuple(variants)
             if any(isinstance(v, str) and len(v) > 20000 for v in row.values()):
@@ -488,12 +695,20 @@ class ProfessionalContent:
             if collection == "dictionary":
                 if not isinstance(item.canonical_text, str) or not item.canonical_text.strip():
                     raise ValueError("Написание термина обязательно")
-                if (item.language not in {"", "ru", "en"}
-                        or item.match_mode not in {"word", "case_sensitive", "literal"}
-                        or item.case_policy not in {"canonical", "preserve"}
-                        or item.origin not in {"personal", "organization"}):
+                if (
+                    item.language not in {"", "ru", "en"}
+                    or item.match_mode not in {"word", "case_sensitive", "literal"}
+                    or item.case_policy not in {"canonical", "preserve"}
+                    or item.origin not in {"personal", "organization"}
+                ):
                     raise ValueError("Неверный язык, сопоставление или регистр словаря")
-                key = (item.canonical_text.casefold(), item.language, item.profile_id, item.executable, item.vocabulary_id)
+                key = (
+                    item.canonical_text.casefold(),
+                    item.language,
+                    item.profile_id,
+                    item.executable,
+                    item.vocabulary_id,
+                )
             else:
                 if not isinstance(item.id, str) or not item.id.strip():
                     raise ValueError("ID обязателен")
@@ -513,19 +728,32 @@ class ProfessionalContent:
                 if parameter and not item.payload[parameter].strip():
                     raise ValueError("Заполните параметр команды")
                 if item.action_type == "OpenVoxTypePanel" and item.payload["panel"] not in {
-                    "settings", "dictionary", "snippets", "commands", "replacements",
+                    "settings",
+                    "dictionary",
+                    "snippets",
+                    "commands",
+                    "replacements",
                 }:
                     raise ValueError("Выберите существующую панель VoxType")
                 trigger = ("trigger", item.command_set_id, _trigger(item.trigger))
                 builtin = VoiceCommandRouter.route(
-                    item.trigger, DictationProfile("developer", "Developer", formatting_mode="code"),
-                    (), activation="", command_mode=True,
+                    item.trigger,
+                    DictationProfile("developer", "Developer", formatting_mode="code"),
+                    (),
+                    activation="",
+                    command_mode=True,
                 )
-                if item.enabled and (builtin is not None or any(
-                    isinstance(entry, tuple) and len(entry) == 3 and entry[0] == "trigger"
-                    and entry[2] == trigger[2] and (not entry[1] or not trigger[1] or entry[1] == trigger[1])
-                    for entry in seen
-                )):
+                if item.enabled and (
+                    builtin is not None
+                    or any(
+                        isinstance(entry, tuple)
+                        and len(entry) == 3
+                        and entry[0] == "trigger"
+                        and entry[2] == trigger[2]
+                        and (not entry[1] or not trigger[1] or entry[1] == trigger[1])
+                        for entry in seen
+                    )
+                ):
                     raise ValueError("Конфликт голосовых фраз")
                 if item.enabled:
                     seen.add(trigger)
@@ -552,28 +780,39 @@ class ProfessionalContent:
             raise ValueError("Ожидается схема коллекции версии 1")
         rows = self.parse(collection, document.get(collection))
         with self._lock:
-            self._repository.update({"professional": {
-                "schema_version": 1, collection: [asdict(item) for item in rows],
-            }})
+            self._repository.update(
+                {
+                    "professional": {
+                        "schema_version": 1,
+                        collection: [asdict(item) for item in rows],
+                    }
+                }
+            )
             self._collections[collection] = rows
 
     @staticmethod
     def dictionary_from_csv(text: str) -> str:
         rows = []
         for row in csv.DictReader(io.StringIO(text)):
-            rows.append({
-                "canonical_text": row.get("canonical_text", ""),
-                "spoken_variants": [word.strip() for word in (row.get("spoken_variants") or "").split("|") if word.strip()],
-                "language": row.get("language") or "",
-                "profile_id": row.get("profile_id") or "",
-                "match_mode": row.get("match_mode") or "word",
-                "case_policy": row.get("case_policy") or "canonical",
-                "priority": int(row.get("priority") or 0),
-                "enabled": (row.get("enabled") or "true").casefold() not in {"false", "0"},
-                "executable": row.get("executable") or "",
-                "vocabulary_id": row.get("vocabulary_id") or "",
-                "origin": row.get("origin") or "personal",
-            })
+            rows.append(
+                {
+                    "canonical_text": row.get("canonical_text", ""),
+                    "spoken_variants": [
+                        word.strip()
+                        for word in (row.get("spoken_variants") or "").split("|")
+                        if word.strip()
+                    ],
+                    "language": row.get("language") or "",
+                    "profile_id": row.get("profile_id") or "",
+                    "match_mode": row.get("match_mode") or "word",
+                    "case_policy": row.get("case_policy") or "canonical",
+                    "priority": int(row.get("priority") or 0),
+                    "enabled": (row.get("enabled") or "true").casefold() not in {"false", "0"},
+                    "executable": row.get("executable") or "",
+                    "vocabulary_id": row.get("vocabulary_id") or "",
+                    "origin": row.get("origin") or "personal",
+                }
+            )
         return json.dumps({"schema_version": 1, "dictionary": rows}, ensure_ascii=False, indent=2)
 
     def dictionary_to_csv(self) -> str:
