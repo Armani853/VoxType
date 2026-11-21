@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 import ntpath
 import os
+import sqlite3
 import tempfile
+from contextlib import closing
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -54,6 +56,47 @@ def export_configuration(repository: SettingsRepository, path: Path) -> None:
         os.replace(tmp, path)
     finally:
         tmp.unlink(missing_ok=True)
+
+
+def export_archive(database: Path, category: str, path: Path) -> None:
+    """Export one explicitly selected data category without copying whole databases."""
+    if category not in ("history", "transcripts"):
+        raise ValueError("Unsupported archive category")
+    descriptor, name = tempfile.mkstemp(prefix=".voxtype-archive-", dir=path.parent)
+    temp = Path(name)
+    try:
+        with (
+            os.fdopen(descriptor, "w", encoding="utf-8", newline="") as stream,
+            closing(sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True, timeout=3)) as db,
+        ):
+            db.row_factory = sqlite3.Row
+            db.execute("BEGIN")
+            stream.write('{"schema_version":1,"category":' + json.dumps(category) + ',"records":[')
+            if category == "history":
+                rows = db.execute(
+                    """SELECT session_id, started_at, finished_at, language, model, profile_id,
+                              status, committed_text, audio_duration_s FROM sessions
+                       WHERE source_type='dictation' AND finished_at IS NOT NULL AND committed_text<>''
+                       ORDER BY started_at"""
+                )
+            elif db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='transcription_jobs'").fetchone():
+                rows = db.execute(
+                    """SELECT id, language, profile_id, created_at, finished_at, result
+                       FROM transcription_jobs WHERE status='COMPLETED' AND result IS NOT NULL ORDER BY created_at"""
+                )
+            else:
+                rows = ()
+            for index, row in enumerate(rows):
+                if index:
+                    stream.write(",")
+                record = dict(row)
+                if category == "transcripts":
+                    record["result"] = json.loads(record["result"])
+                json.dump(record, stream, ensure_ascii=False)
+            stream.write("]}")
+        os.replace(temp, path)
+    finally:
+        temp.unlink(missing_ok=True)
 
 
 def stage_configuration(repository: SettingsRepository, path: Path) -> tuple[dict[str, Any], tuple[str, ...]]:

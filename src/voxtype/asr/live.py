@@ -40,6 +40,7 @@ class LiveTranscript:
     language: LanguageCode
     updated_at_monotonic: float
     revision: int
+    partial_segment: SpeechSegment | None = None
 
 
 class LiveSpeechSession:
@@ -59,6 +60,7 @@ class LiveSpeechSession:
         self._interval = 1.5
         self._previous_start = -1
         self._previous_words: tuple[tuple[str, float, float], ...] = ()
+        self._stable: deque[SpeechSegment] = deque(maxlen=24)
         self.processed_offset = 0
         self.revision = 0
         self.canceled = False
@@ -113,17 +115,35 @@ class LiveSpeechSession:
         self._previous_start = start
         self._previous_words = tuple((self._token(w.word), w.start, w.end) for w in words)
         self.revision += 1
-        stable = ()
-        if stable_count:
-            matched = words[:stable_count]
-            stable = (SpeechSegment(
-                f"{self.session_id}:{start}", self.session_id,
-                round(matched[0].start * self.sample_rate),
-                round(matched[-1].end * self.sample_rate),
-                "".join(word.word for word in matched).strip(), SpeechKind.STABLE, self.revision,
-            ),)
-        tail = "".join(word.word for word in words[stable_count:]).strip() if stable else result.text
-        self.snapshot = LiveTranscript(self.session_id, stable, tail, self.language, now, self.revision)
+        last_stable = self._stable[-1].end_sample if self._stable else -1
+        matched = tuple(
+            word for word in words[:stable_count]
+            if round(word.start * self.sample_rate) >= last_stable - round(0.05 * self.sample_rate)
+            and round(word.end * self.sample_rate) > last_stable
+        )
+        if matched:
+            stable_text = "".join(word.word for word in matched).strip()
+            last_stable = round(matched[-1].end * self.sample_rate)
+            self._stable.append(SpeechSegment(
+                f"{self.session_id}:stable:{self.revision}", self.session_id,
+                round(matched[0].start * self.sample_rate), last_stable,
+                stable_text, SpeechKind.STABLE, self.revision,
+            ))
+        if self._stable:
+            tail = "".join(
+                word.word for word in words
+                if round(word.end * self.sample_rate) > last_stable + round(0.1 * self.sample_rate)
+            ).strip()
+        else:
+            tail = result.text
+        partial = SpeechSegment(
+            f"{self.session_id}:partial:{self.revision}", self.session_id,
+            max(0, start, last_stable), self.processed_offset,
+            tail, SpeechKind.PARTIAL, self.revision,
+        ) if tail else None
+        self.snapshot = LiveTranscript(
+            self.session_id, tuple(self._stable), tail, self.language, now, self.revision, partial,
+        )
 
     def finish_segment(self, speech_samples: int) -> None:
         self._chunks.clear()
@@ -131,6 +151,7 @@ class LiveSpeechSession:
         self._speech_mark = speech_samples
         self._previous_start = -1
         self._previous_words = ()
+        self._stable.clear()
         self.snapshot = None
 
     @staticmethod
