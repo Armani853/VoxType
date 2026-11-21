@@ -1488,7 +1488,10 @@ class ApplicationController:
     def snapshot(self) -> ControllerSnapshot:
         with self._lock:
             capture = self._capture
-            stats = capture.stats() if capture is not None else self._last_stats
+            stats = (
+                capture.try_stats() if isinstance(capture, AudioCaptureService)
+                else capture.stats() if capture is not None else self._last_stats
+            )
             started = self._session_started_monotonic
             stopped = self._session_stopped_monotonic
             elapsed = (

@@ -90,6 +90,10 @@ class SileroVAD:
     def _ensure_loaded(self) -> None:
         with self._lock:
             if self._load_attempted:
+                if self.strict and self.using_fallback:
+                    raise VADUnavailable(
+                        "Не удалось загрузить локальную модель Silero VAD."
+                    ) from self._load_error
                 return
             self._load_attempted = True
             try:
@@ -201,6 +205,11 @@ class SileroVAD:
             self._last_sample_rate = 0
             return self.fallback.speech_probability(original_audio, sample_rate)
         return min(1.0, max(0.0, probability))
+
+    @staticmethod
+    def release_cached_session() -> None:
+        with _onnx_load_lock:
+            _load_onnx_session.cache_clear()
 
     def reset(self) -> None:
         with self._lock:

@@ -329,11 +329,22 @@ class LosslessAudioQueue:
         self._current_rms = 0.0
         self._clipping = 0.0
         self._last_sequence = spool.highest_sequence if spool else -1
+        self._next_sample_offset = 0
+        self._last_snapshot = AudioQueueStats(
+            queued_audio_seconds=self._queued_seconds,
+            queue_high_watermark=self._high_watermark,
+            spilling_to_disk=self._spilling,
+        )
 
     @property
     def next_sequence(self) -> int:
         with self._condition:
             return self._last_sequence + 1
+
+    @property
+    def next_sample_offset(self) -> int:
+        with self._condition:
+            return self._next_sample_offset
 
     def put(self, chunk: AudioChunk) -> Literal["memory", "disk"]:
         with self._condition:
@@ -359,6 +370,8 @@ class LosslessAudioQueue:
                 self._ram.append(chunk)
                 destination = "memory"
             self._last_sequence = chunk.sequence
+            offset = self._next_sample_offset if chunk.sample_offset is None else chunk.sample_offset
+            self._next_sample_offset = max(self._next_sample_offset, offset + chunk.frames)
             self._queued_seconds += chunk.duration_seconds
             depth = len(self._ram) + (spool.count if spool else 0) + len(self._inflight)
             self._high_watermark = max(self._high_watermark, depth)
@@ -451,9 +464,18 @@ class LosslessAudioQueue:
             self._current_rms = max(rms, 0.0)
             self._clipping = min(100.0, max(clipping_percentage, 0.0))
 
+    def try_snapshot(self) -> AudioQueueStats:
+        """Let the UI read the last sample while a worker flushes the spool."""
+        if not self._condition.acquire(blocking=False):
+            return self._last_snapshot
+        try:
+            return self.snapshot()
+        finally:
+            self._condition.release()
+
     def snapshot(self) -> AudioQueueStats:
         with self._condition:
-            return AudioQueueStats(
+            self._last_snapshot = AudioQueueStats(
                 captured_frames=self._captured_frames,
                 dropped_frames=self._dropped_frames,
                 queued_audio_seconds=self._queued_seconds,
@@ -467,6 +489,7 @@ class LosslessAudioQueue:
                 spooled_bytes=self.spool.bytes_on_disk if self.spool else 0,
                 spilling_to_disk=self._spilling,
             )
+            return self._last_snapshot
 
     def wait_until_empty(self, timeout: float | None = None) -> bool:
         deadline = None if timeout is None else monotonic() + max(timeout, 0.0)

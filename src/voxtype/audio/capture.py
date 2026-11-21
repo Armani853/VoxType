@@ -101,7 +101,7 @@ class AudioCaptureService:
         self._running = False
         self._accept_callbacks = False
         self._next_sequence = output_queue.next_sequence
-        self._sample_offset = 0
+        self._sample_offset = output_queue.next_sample_offset
         # Callback-owned integer updates stay lock-free; the dispatcher publishes
         # their deltas into the synchronized public metrics object.
         self._captured_frames = 0
@@ -345,6 +345,15 @@ class AudioCaptureService:
     ) -> tuple[_CallbackBlock, Queue[_CallbackBlock]] | None:
         # Primary blocks are always older: emergency mode is one-way.
         try:
+            if not self._emergency_mode:
+                return self._callback_queue.get(timeout=timeout), self._callback_queue
+            return self._callback_queue.get_nowait(), self._callback_queue
+        except Empty:
+            if not self._emergency_mode:
+                return None
+        # A switch may have occurred just after the timed primary read.
+        # Once switched, no newer block can be written to the primary queue.
+        try:
             return self._callback_queue.get_nowait(), self._callback_queue
         except Empty:
             try:
@@ -410,6 +419,9 @@ class AudioCaptureService:
                 self._dispatcher = None
             self._running = not stopped
         return stopped
+
+    def try_stats(self) -> AudioQueueStats:
+        return self.output_queue.try_snapshot()
 
     def stats(self) -> AudioQueueStats:
         self._publish_callback_metrics()

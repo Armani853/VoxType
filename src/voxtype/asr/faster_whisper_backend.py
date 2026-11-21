@@ -155,8 +155,8 @@ class FasterWhisperBackend:
             except (RuntimeError, ValueError, OSError) as exc:
                 raise ASRModelUnavailable(f"Inference failed for model '{self.model_id}'.") from exc
             elapsed = perf_counter() - started
+            del raw_segments, info, engine
         text = "".join(segment.text for segment in segments).strip()
-        del info
         language: LanguageCode = request.language
         return TranscriptionResult(
             text=text,

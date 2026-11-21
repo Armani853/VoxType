@@ -238,6 +238,7 @@ class RuntimeBundle:
             retry_backend = self.controller.retry_backend
             if retry_backend is not None and retry_backend is not self.controller.backend:
                 retry_backend.unload()
+        SileroVAD.release_cached_session()
         self.session_repository.close()
         return True
 
