@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from queue import Empty, Full, Queue
@@ -61,6 +62,46 @@ class _CallbackBlock:
     samples: FloatAudio
     captured_at: float
     input_overflow: bool
+    pre_roll: bool = False
+
+
+class AudioPreRollBuffer:
+    """Dispatcher-owned window bound to one capture format and lifetime."""
+
+    def __init__(self, sample_rate: int) -> None:
+        self._rate = sample_rate
+        self._limit = max(1, round(sample_rate * 0.350))
+        self._frames = 0
+        self._blocks: deque[_CallbackBlock] = deque()
+
+    def append(self, block: _CallbackBlock) -> None:
+        self._blocks.append(block)
+        self._frames += len(block.samples)
+        while self._frames > self._limit:
+            oldest = self._blocks.popleft()
+            trim = min(len(oldest.samples), self._frames - self._limit)
+            self._frames -= trim
+            if trim < len(oldest.samples):
+                self._blocks.appendleft(_CallbackBlock(
+                    oldest.samples[trim:], oldest.captured_at + trim / self._rate,
+                    oldest.input_overflow, pre_roll=True,
+                ))
+
+    def take(self) -> tuple[_CallbackBlock, ...]:
+        blocks = tuple(self._blocks)
+        self._blocks.clear()
+        self._frames = 0
+        return blocks
+
+
+@dataclass(frozen=True, slots=True)
+class CaptureFinalization:
+    last_accepted_sample: int
+    last_consumed_sample: int
+    last_published_sample: int
+    dropped_samples: int
+    device_error: str | None
+    complete: bool
 
 
 class AudioIngressOverflowError(RuntimeError):
@@ -85,6 +126,9 @@ class AudioCaptureService:
             self.config.input_sample_rate, self.config.target_sample_rate
         )
         self._stream_factory = stream_factory
+        self._pre_roll: AudioPreRollBuffer | None = None
+        self._session_active = Event()
+        self._session_active.set()
         self._callback_queue: Queue[_CallbackBlock] = Queue(
             maxsize=self.config.callback_queue_chunks
         )
@@ -111,6 +155,9 @@ class AudioCaptureService:
         self._published_dropped = 0
         self._published_overflows = 0
         self._fatal_error: Exception | None = None
+        self._accepted_frames = 0
+        self._consumed_frames = 0
+        self.finalization: CaptureFinalization | None = None
 
     @property
     def running(self) -> bool:
@@ -121,14 +168,15 @@ class AudioCaptureService:
     def fatal_error(self) -> Exception | None:
         return self._fatal_error
 
-    def start(self) -> None:
+    def start(self, *, cancel: Event | None = None) -> None:
         with self._lifecycle_lock:
-            if self._running:
+            if self._running or (cancel is not None and cancel.is_set()):
                 return
             self._stop_requested.clear()
             self._abort_dispatch.clear()
             self._fatal_error = None
             self._emergency_mode = False
+            self.finalization = None
             self._accept_callbacks = True
             self._dispatcher = Thread(
                 target=self._dispatch_loop, name="voxtype-audio-dispatch", daemon=True
@@ -164,6 +212,19 @@ class AudioCaptureService:
                 raise
             self._running = True
 
+    def arm_pre_roll(self) -> None:
+        if self.running or self.output_queue.spool is not None:
+            raise RuntimeError("Pre-roll requires a fresh capture and an in-memory queue")
+        self._pre_roll = AudioPreRollBuffer(self.config.input_sample_rate)
+        self._session_active.clear()
+
+    @property
+    def pre_roll_armed(self) -> bool:
+        return not self._session_active.is_set()
+
+    def activate_session(self) -> None:
+        self._session_active.set()
+
     def audio_callback(
         self, indata: npt.NDArray[np.float32], frames: int, time_info: Any, status: Any
     ) -> None:
@@ -183,7 +244,10 @@ class AudioCaptureService:
         copied = np.array(indata, dtype=np.float32, copy=True, order="C")
         if self.config.input_channels == 1:
             copied = copied.reshape(-1)
-        if not self._enqueue_callback_block(_CallbackBlock(copied, time(), overflow)):
+        block = _CallbackBlock(copied, time(), overflow, not self._session_active.is_set())
+        if self._enqueue_callback_block(block):
+            self._accepted_frames += len(copied)
+        else:
             self._dropped_frames += max(int(frames), 0)
             if self._fatal_error is None:
                 self._fatal_error = AudioIngressOverflowError(
@@ -208,7 +272,7 @@ class AudioCaptureService:
         if input_overflow:
             self._dropped_frames += max(int(audio.size), 1)
         if not self._enqueue_callback_block(
-            _CallbackBlock(audio, captured_at or time(), input_overflow)
+            _CallbackBlock(audio, captured_at or time(), input_overflow, self.pre_roll_armed)
         ):
             self._dropped_frames += int(audio.size)
             if self._fatal_error is None:
@@ -217,6 +281,7 @@ class AudioCaptureService:
                 )
             self._accept_callbacks = False
             return False
+        self._accepted_frames += len(audio)
         return True
 
     def _enqueue_callback_block(self, block: _CallbackBlock) -> bool:
@@ -265,55 +330,77 @@ class AudioCaptureService:
                     continue
                 block, source_queue = queued
                 try:
-                    mono = (
-                        block.samples.mean(axis=1, dtype=np.float32)
-                        if block.samples.ndim == 2
-                        else block.samples
-                    )
-                    resampled = self.resampler.process(mono)
-                    if resampled.size:
-                        processed = self.preprocessor.process(resampled)
-                        self.output_queue.update_levels(
-                            processed.input_levels.rms,
-                            processed.input_levels.clipping_percentage,
-                        )
-                        chunk = AudioChunk(
-                            self._next_sequence,
-                            processed.samples,
-                            self.config.target_sample_rate,
-                            block.captured_at,
-                            block.input_overflow,
-                            self.output_queue.session_id,
-                            self._sample_offset,
-                        )
-                        self._sample_offset += chunk.frames
-                        if self._put_with_backpressure(chunk):
-                            self._next_sequence += 1
+                    pre_roll = self._pre_roll
+                    if block.pre_roll and pre_roll is not None:
+                        pre_roll.append(block)
+                        self._consumed_frames += len(block.samples)
+                        continue
+                    if pre_roll is not None:
+                        for earlier in pre_roll.take():
+                            self._process_callback_block(earlier)
+                        self._pre_roll = None
+                    self._process_callback_block(block)
+                    self._consumed_frames += len(block.samples)
                     self._publish_callback_metrics()
                 except Exception:
                     self._dropped_frames += int(block.samples.shape[0])
                     raise
                 finally:
                     source_queue.task_done()
-            tail = self.resampler.flush()
-            if tail.size:
-                processed = self.preprocessor.process(tail)
-                chunk = AudioChunk(
-                    self._next_sequence, processed.samples, self.config.target_sample_rate, time(),
-                    session_id=self.output_queue.session_id,
-                    sample_offset=self._sample_offset,
-                )
-                self._sample_offset += chunk.frames
-                if self._put_with_backpressure(chunk):
-                    self._next_sequence += 1
+            if self._pre_roll is not None:
+                if self._session_active.is_set():
+                    for earlier in self._pre_roll.take():
+                        self._process_callback_block(earlier)
+                self._pre_roll = None
+            self._flush_capture_tail()
         except Exception as exc:
             self._fatal_error = exc
             self._accept_callbacks = False
             self._stop_requested.set()
             self._discard_callback_backlog()
         finally:
+            self._pre_roll = None
             self._publish_callback_metrics()
             self._running = False
+
+    def _process_callback_block(self, block: _CallbackBlock) -> None:
+        mono = (
+            block.samples.mean(axis=1, dtype=np.float32)
+            if block.samples.ndim == 2
+            else block.samples
+        )
+        resampled = self.resampler.process(mono)
+        if resampled.size:
+            processed = self.preprocessor.process(resampled)
+            self.output_queue.update_levels(
+                processed.input_levels.rms,
+                processed.input_levels.clipping_percentage,
+            )
+            chunk = AudioChunk(
+                self._next_sequence,
+                processed.samples,
+                self.config.target_sample_rate,
+                block.captured_at,
+                block.input_overflow,
+                self.output_queue.session_id,
+                self._sample_offset,
+            )
+            self._sample_offset += chunk.frames
+            if self._put_with_backpressure(chunk):
+                self._next_sequence += 1
+
+    def _flush_capture_tail(self) -> None:
+        tail = self.resampler.flush()
+        if tail.size:
+            processed = self.preprocessor.process(tail)
+            chunk = AudioChunk(
+                self._next_sequence, processed.samples, self.config.target_sample_rate, time(),
+                session_id=self.output_queue.session_id,
+                sample_offset=self._sample_offset,
+            )
+            self._sample_offset += chunk.frames
+            if self._put_with_backpressure(chunk):
+                self._next_sequence += 1
 
     def _put_with_backpressure(self, chunk: AudioChunk) -> bool:
         while True:
@@ -418,6 +505,13 @@ class AudioCaptureService:
             if stopped:
                 self._dispatcher = None
             self._running = not stopped
+            error = self._fatal_error
+            self.finalization = CaptureFinalization(
+                self._accepted_frames, self._consumed_frames, self.output_queue.next_sample_offset,
+                self._dropped_frames, type(error).__name__ if error is not None else None,
+                stopped and error is None and not self._dropped_frames
+                and self._accepted_frames == self._consumed_frames,
+            )
         return stopped
 
     def try_stats(self) -> AudioQueueStats:

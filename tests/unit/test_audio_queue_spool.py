@@ -124,6 +124,33 @@ def test_spill_migrates_ram_prefix_so_crash_recovery_has_no_fifo_gap(tmp_path: P
     assert sequences == list(range(6))
 
 
+def test_startup_preroll_keeps_latest_350ms_before_session_boundary() -> None:
+    queue = LosslessAudioQueue(max_ram_chunks=32, spool=None, session_id=17)
+    service = AudioCaptureService(
+        queue, AudioCaptureConfig(input_sample_rate=1_000, target_sample_rate=1_000),
+    )
+    service.arm_pre_roll()
+    service.start_dispatcher_for_tests()
+    try:
+        assert service.submit_test_audio(np.full(200, 0.1, dtype=np.float32))
+        assert service.submit_test_audio(np.full(200, 0.2, dtype=np.float32))
+        service.activate_session()
+        assert service.submit_test_audio(np.full(120, 0.3, dtype=np.float32))
+    finally:
+        assert service.stop()
+    chunks = []
+    while (lease := queue.acquire(timeout=0)) is not None:
+        chunks.append(lease.chunk)
+        queue.ack(lease)
+
+    assert [chunk.frames for chunk in chunks] == [150, 200, 120]
+    assert [chunk.sample_offset for chunk in chunks] == [0, 150, 350]
+    assert [chunk.session_id for chunk in chunks] == [17, 17, 17]
+    final = service.finalization
+    assert final is not None and final.complete
+    assert (final.last_accepted_sample, final.last_consumed_sample, final.last_published_sample) == (520, 520, 470)
+
+
 def test_callback_ingress_is_bounded_and_turns_exhaustion_into_fatal_error(tmp_path: Path) -> None:
     output = LosslessAudioQueue(max_ram_chunks=2, spool=DiskSpool(tmp_path / "spool"))
     service = AudioCaptureService(
