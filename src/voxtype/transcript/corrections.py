@@ -7,6 +7,7 @@ import json
 import re
 from dataclasses import asdict, dataclass
 from difflib import SequenceMatcher
+from unicodedata import category
 
 from voxtype.settings.repository import SettingsRepository
 from voxtype.transcript.professional import DictionaryEntry, ProfessionalContent
@@ -46,10 +47,18 @@ class CorrectionSuggestionService:
         if tag != "replace" or not (1 <= b-a <= 3 and 1 <= d-c <= 3):
             return None
         before, after = " ".join(old[a:b]), " ".join(new[c:d])
+        # Boundary punctuation shared by both selections is context, not part
+        # of the spoken form that would be stored in the dictionary.
+        while before and after and before[0] == after[0] and category(before[0]).startswith("P"):
+            before, after = before[1:], after[1:]
+        while before and after and before[-1] == after[-1] and category(before[-1]).startswith("P"):
+            before, after = before[:-1], after[:-1]
+        if before == after:
+            return None
         pattern = r"[^\W\d_]+(?:[-'][^\W\d_]+)*(?: [^\W\d_]+(?:[-'][^\W\d_]+)*){0,2}"
         if not re.fullmatch(pattern, before) or not re.fullmatch(pattern, after):
             return None
-        words = {word.casefold() for word in (*old[a:b], *new[c:d])}
+        words = {word.casefold() for word in (*before.split(), *after.split())}
         if words & {"not", "no", "never", "не", "нет", "никогда", "без"}:
             return None
         if SequenceMatcher(None, before.casefold(), after.casefold(), autojunk=False).ratio() < 0.55:

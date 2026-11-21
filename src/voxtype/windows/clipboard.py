@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ctypes
+import hashlib
 import secrets
 import struct
 import threading
@@ -51,6 +52,20 @@ class ClipboardItem:
     format_id: int
     data: bytes
     format_name: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _TextLeaseMarker(ClipboardItem):
+    unicode_hash: bytes
+    allowed_formats: frozenset[int]
+
+
+def _unicode_hash(data: bytes) -> bytes:
+    terminator = bytes(2)
+    end = data.find(terminator)
+    while end >= 0 and end % 2:
+        end = data.find(terminator, end + 1)
+    return hashlib.sha256(data if end < 0 else data[:end]).digest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -283,16 +298,28 @@ class Win32ClipboardBackend:
                 expected_sequence_number is not None
                 and self.sequence_number() != expected_sequence_number
             )
-            # Word and some Chromium controls enrich the paste clipboard and
-            # increment its sequence while retaining our private lease marker.
-            # The marker proves ownership; without it, a sequence change is
-            # treated as a user clipboard change and is never overwritten.
-            if sequence_changed and expected_marker is None:
+            if sequence_changed and not isinstance(expected_marker, _TextLeaseMarker):
                 return None
             if expected_marker is not None:
                 marker_data = self._read_hglobal(expected_marker.format_id)
                 if marker_data != expected_marker.data:
                     return None
+            if sequence_changed and isinstance(expected_marker, _TextLeaseMarker):
+                # Some applications add a format while reading a paste. Restore
+                # only when both the private marker and our Unicode payload survive.
+                payload = self._read_hglobal(CF_UNICODETEXT)
+                if payload is None or _unicode_hash(payload) != expected_marker.unicode_hash:
+                    return None
+                format_id = 0
+                while True:
+                    clear_last_error()
+                    format_id = int(user32.EnumClipboardFormats(format_id))
+                    if not format_id:
+                        if last_error():
+                            return None
+                        break
+                    if format_id not in expected_marker.allowed_formats:
+                        return None
             if not user32.EmptyClipboard():
                 raise ClipboardError(f"EmptyClipboard failed (Win32 error {last_error()})")
             for item in items:
@@ -416,6 +443,10 @@ class ClipboardManager:
     def backend(self) -> ClipboardBackend:
         return self._backend
 
+    def owns_sequence(self, sequence: int) -> bool:
+        with self._lock:
+            return sequence in self._lease_markers and self._backend.sequence_number() == sequence
+
     def snapshot(self) -> ClipboardSnapshot:
         with self._lock:
             return self._backend.snapshot(
@@ -428,7 +459,6 @@ class ClipboardManager:
         text: str,
         *,
         private: bool,
-        lease_marker: ClipboardItem | None,
     ) -> tuple[ClipboardItem, ...]:
         encoded = text.encode("utf-16-le", errors="strict") + b"\x00\x00"
         items = [ClipboardItem(CF_UNICODETEXT, encoded)]
@@ -441,8 +471,6 @@ class ClipboardManager:
                     ClipboardItem(self._backend.register_format(_MONITOR_FORMAT), b"\x00"),
                 )
             )
-        if lease_marker is not None:
-            items.append(lease_marker)
         return tuple(items)
 
     def set_text(
@@ -453,20 +481,17 @@ class ClipboardManager:
         private: bool = True,
         rollback_snapshot: ClipboardSnapshot | None = None,
     ) -> int:
+        items = self._text_items(text, private=private)
         lease_marker = None
         if expected_sequence_number is not None:
-            lease_marker = ClipboardItem(
-                self._backend.register_format(_LEASE_FORMAT), secrets.token_bytes(16)
+            marker_format = self._backend.register_format(_LEASE_FORMAT)
+            lease_marker = _TextLeaseMarker(
+                marker_format, secrets.token_bytes(16), _unicode_hash(items[0].data),
+                frozenset((marker_format, 1, 7, 16, *(item.format_id for item in items))),
             )
+            items += (lease_marker,)
         with self._lock:
-            result = self._backend.replace(
-                self._text_items(
-                    text,
-                    private=private,
-                    lease_marker=lease_marker,
-                ),
-                expected_sequence_number=expected_sequence_number,
-            )
+            result = self._backend.replace(items, expected_sequence_number=expected_sequence_number)
         if result is None:
             raise ClipboardChangedError(
                 "Clipboard changed before VoxType could place temporary text"

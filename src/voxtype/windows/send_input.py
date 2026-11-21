@@ -280,12 +280,14 @@ class SendInputController:
             self._sleep(min(0.01, max(0.0, deadline - self._monotonic())))
         return True
 
-    def send_paste_shortcut(self) -> int:
+    def send_paste_shortcut(self, *, before_send: Callable[[], None] | None = None) -> int:
         """Send Ctrl+V only after physical hotkey modifiers are released."""
 
         with self._lock:
             if not self.wait_for_modifiers_released():
                 raise ModifierStillPressedError
+            if before_send is not None:
+                before_send()
             return self._send_exact(build_ctrl_v_events())
 
 

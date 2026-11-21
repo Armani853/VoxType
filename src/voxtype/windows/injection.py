@@ -389,11 +389,15 @@ class TextInjectionService:
             expected_sequence_number=snapshot.sequence_number,
             rollback_snapshot=snapshot,
         )
-        send_error: SendInputError | None = None
-        try:
+        def check_delivery() -> None:
             if not self._same_target_is_ready(target):
                 raise _TargetChanged("Target changed while preparing clipboard paste")
-            self._sender.send_paste_shortcut()
+            if not self._clipboard.owns_sequence(temporary_sequence):
+                raise ClipboardError("Clipboard changed before the paste shortcut")
+
+        send_error: SendInputError | None = None
+        try:
+            self._sender.send_paste_shortcut(before_send=check_delivery)
             delay = self._paste_delay
             if target.process_name.casefold() in _ASYNC_CLIPBOARD_READERS:
                 delay = max(delay, _ASYNC_PASTE_MIN_DELAY_SECONDS)
