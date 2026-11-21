@@ -33,20 +33,24 @@ class WindowsSystemEventBridge:
     def __init__(self, notify: Callable[[str | DeviceEvent], None]) -> None:
         self._notify = notify
         self._hwnd = 0
+        self._registered = False
         self._core_audio = None
 
     def start(self, hwnd: int) -> None:
         if sys.platform != "win32" or not hwnd or self._hwnd:
             return
         self._hwnd = hwnd
-        wts = ctypes.WinDLL("wtsapi32", use_last_error=True)
-        register = wts.WTSRegisterSessionNotification
-        register.argtypes = (ctypes.c_void_p, ctypes.c_uint)
-        register.restype = ctypes.c_int
-        self._unregister = wts.WTSUnRegisterSessionNotification
-        self._unregister.argtypes = (ctypes.c_void_p,)
-        self._unregister.restype = ctypes.c_int
-        self._registered = bool(register(hwnd, 0))
+        try:
+            wts = ctypes.WinDLL("wtsapi32", use_last_error=True)
+            register = wts.WTSRegisterSessionNotification
+            register.argtypes = (ctypes.c_void_p, ctypes.c_uint)
+            register.restype = ctypes.c_int
+            self._unregister = wts.WTSUnRegisterSessionNotification
+            self._unregister.argtypes = (ctypes.c_void_p,)
+            self._unregister.restype = ctypes.c_int
+            self._registered = bool(register(hwnd, 0))
+        except (OSError, AttributeError):
+            logging.getLogger(__name__).debug("wts_session_notifications_unavailable")
         try:
             self._core_audio = self._register_core_audio()
         except (ImportError, OSError, RuntimeError, ValueError, TypeError, AttributeError) as exc:
@@ -68,6 +72,7 @@ class WindowsSystemEventBridge:
             self._core_audio = None
         if self._hwnd and self._registered:
             self._unregister(self._hwnd)
+        self._registered = False
         self._hwnd = 0
 
     def _register_core_audio(self):
