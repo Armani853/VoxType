@@ -112,8 +112,9 @@ class FileTranscriptionQueue:
         self._publish_change()
 
     def cancel(self, job_id: str, *, active: bool = False) -> None:
-        if active and self._cancel is not None and job_id == self.active_id:
-            self._cancel.set()
+        cancel = self._cancel
+        if active and cancel is not None and job_id == self.active_id:
+            cancel.set()
             return
         with self._connect() as db:
             db.execute("""UPDATE transcription_jobs SET status = 'CANCELED', finished_at = ?
@@ -128,8 +129,9 @@ class FileTranscriptionQueue:
 
     def begin_shutdown(self) -> None:
         self._request_shutdown = True
-        if self._cancel is not None:
-            self._cancel.set()
+        cancel = self._cancel
+        if cancel is not None:
+            cancel.set()
 
     def wait_for_worker(self, timeout: float) -> None:
         if self._worker is not None:
