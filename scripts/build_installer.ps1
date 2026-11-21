@@ -140,3 +140,34 @@ $Checksum = "$ReleaseInstaller.sha256"
 Set-Content -LiteralPath $Checksum -Encoding ascii -Value "$($Hash.Hash.ToLowerInvariant())  $($Installer.Name)"
 Write-Host "Installer: $ReleaseInstaller"
 Write-Host "Checksum:  $Checksum"
+
+if ($Installer.Name -notmatch "^VoxType-(?<version>[0-9]+\.[0-9]+\.[0-9]+)-$BuildCommit-win64-setup\.exe$") {
+    throw "Installer filename does not identify the product version: $($Installer.Name)"
+}
+$ProductVersion = $Matches['version']
+$PortableHash = Get-FileHash -Algorithm SHA256 -LiteralPath $ExpectedPortableArchive
+$Manifest = [ordered]@{
+    schema_version = 1
+    product = 'VoxType'
+    version = $ProductVersion
+    git_commit = $ExpectedFullCommit
+    build_timestamp_utc = [DateTime]::UtcNow.ToString('o')
+    installer_smoke_passed = -not $SkipInstallerSmoke
+    artifacts = @(
+        [ordered]@{
+            name = [IO.Path]::GetFileName($ExpectedPortableArchive)
+            bytes = (Get-Item -LiteralPath $ExpectedPortableArchive).Length
+            sha256 = $PortableHash.Hash.ToLowerInvariant()
+        },
+        [ordered]@{
+            name = $Installer.Name
+            bytes = (Get-Item -LiteralPath $ReleaseInstaller).Length
+            sha256 = $Hash.Hash.ToLowerInvariant()
+        }
+    )
+}
+$ManifestPath = Join-Path $ReleaseRoot "VoxType-$ProductVersion-$BuildCommit-manifest.json"
+$ManifestTemporary = "$ManifestPath.$([Guid]::NewGuid().ToString('N')).tmp"
+[IO.File]::WriteAllText($ManifestTemporary, ($Manifest | ConvertTo-Json -Depth 4), [Text.UTF8Encoding]::new($false))
+Move-Item -LiteralPath $ManifestTemporary -Destination $ManifestPath
+Write-Host "Manifest:  $ManifestPath"

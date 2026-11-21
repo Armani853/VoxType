@@ -7,7 +7,7 @@ import json
 import re
 from dataclasses import asdict, dataclass
 from difflib import SequenceMatcher
-from unicodedata import category
+from unicodedata import category, normalize
 
 from voxtype.settings.repository import SettingsRepository
 from voxtype.transcript.professional import DictionaryEntry, ProfessionalContent
@@ -18,10 +18,12 @@ class CorrectionSuggestion:
     spoken: str
     canonical: str
     language: str
+    profile_id: str = ""
 
     @property
     def key(self) -> str:
-        pair = "\0".join((self.language, self.spoken.casefold(), self.canonical))
+        fields = (self.language, self.spoken.casefold(), self.canonical)
+        pair = "\0".join((*fields, self.profile_id) if self.profile_id else fields)
         return hashlib.sha256(pair.encode("utf-8")).hexdigest()
 
 
@@ -30,8 +32,13 @@ class CorrectionSuggestionService:
         self.repository = repository
         self.vocabulary = vocabulary
 
-    def suggest(self, raw: str, edited: str, language: str) -> CorrectionSuggestion | None:
-        if raw == edited or max(len(raw), len(edited)) > 16_000:
+    def suggest(
+        self, raw: str, edited: str, language: str, profile_id: str = "",
+    ) -> CorrectionSuggestion | None:
+        if max(len(raw), len(edited)) > 16_000:
+            return None
+        raw, edited = normalize("NFC", raw), normalize("NFC", edited)
+        if raw == edited:
             return None
         old = raw.split()
         new = edited.split()
@@ -63,7 +70,7 @@ class CorrectionSuggestionService:
             return None
         if SequenceMatcher(None, before.casefold(), after.casefold(), autojunk=False).ratio() < 0.55:
             return None
-        suggestion = CorrectionSuggestion(before, after, language)
+        suggestion = CorrectionSuggestion(before, after, language, profile_id)
         ignored = self.repository.load().professional.get("ignored_corrections", [])
         return None if suggestion.key in ignored else suggestion
 
@@ -75,13 +82,26 @@ class CorrectionSuggestionService:
 
     def save(self, suggestion: CorrectionSuggestion) -> None:
         entry = DictionaryEntry(
-            canonical_text=suggestion.canonical, spoken_variants=(suggestion.spoken,), language=suggestion.language,
+            canonical_text=suggestion.canonical, spoken_variants=(suggestion.spoken,),
+            language=suggestion.language, profile_id=suggestion.profile_id,
         )
         with self.vocabulary._lock:
             document = json.loads(self.vocabulary.export_json("dictionary"))
             rows = document["dictionary"]
             serialized = json.loads(json.dumps(asdict(entry), ensure_ascii=False))
-            if serialized in rows:
-                return
-            rows.append(serialized)
+            for row in rows:
+                if (
+                    row["canonical_text"].casefold() == entry.canonical_text.casefold()
+                    and row["language"] == entry.language and row["profile_id"] == entry.profile_id
+                    and not row["executable"] and not row["vocabulary_id"]
+                ):
+                    variants = row["spoken_variants"]
+                    if any(value.casefold() == suggestion.spoken.casefold() for value in variants):
+                        return
+                    if len(variants) >= 8:
+                        raise ValueError("У термина уже восемь вариантов произношения")
+                    variants.append(suggestion.spoken)
+                    break
+            else:
+                rows.append(serialized)
             self.vocabulary.save("dictionary", json.dumps(document, ensure_ascii=False))

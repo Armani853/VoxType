@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from hashlib import sha256
 import os
 import sqlite3
 import threading
@@ -36,6 +37,16 @@ class SessionRecord:
     status: str
     profile_id: str = "general"
     source_type: str = "dictation"
+
+
+@dataclass(frozen=True, slots=True)
+class OutboxItem:
+    delivery_id: str
+    session_id: str
+    created_at: float
+    text: str
+    target_executable: str
+    status: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,6 +178,31 @@ class SessionRepository:
                        OR (finished_at IS NULL AND committed_text!='')"""
                 )
                 self._connection.execute("PRAGMA user_version=1")
+            if version < 2:
+                self._connection.execute("""
+                    CREATE TABLE IF NOT EXISTS delivery_outbox (
+                        delivery_id TEXT PRIMARY KEY,
+                        session_id TEXT NOT NULL REFERENCES sessions(session_id),
+                        created_at REAL NOT NULL,
+                        updated_at REAL NOT NULL,
+                        text_start INTEGER NOT NULL,
+                        text_length INTEGER NOT NULL,
+                        text_sha256 TEXT NOT NULL,
+                        target_executable TEXT NOT NULL,
+                        requested_strategy TEXT NOT NULL,
+                        status TEXT NOT NULL DEFAULT 'pending',
+                        attempt_count INTEGER NOT NULL DEFAULT 0,
+                        last_error_code TEXT
+                    )
+                """)
+                self._connection.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_outbox_status ON delivery_outbox(status, created_at)"
+                )
+                self._connection.execute("""
+                    CREATE TRIGGER IF NOT EXISTS session_delete_outbox AFTER DELETE ON sessions
+                    BEGIN DELETE FROM delivery_outbox WHERE session_id=OLD.session_id; END
+                """)
+                self._connection.execute("PRAGMA user_version=2")
             self._initialize_search()
 
     def _initialize_search(self) -> None:
@@ -307,6 +343,88 @@ class SessionRepository:
                     (text, session_id),
                 )
         return cursor.rowcount == 1
+
+    def queue_delivery(
+        self, delivery_id: str, session_id: str, text: str, strategy: str, *, whole_result: bool,
+    ) -> bool:
+        if not text:
+            return False
+        digest = sha256(text.encode("utf-8")).hexdigest()
+        now = time.time()
+        with self._lock, self._connection:
+            row = self._connection.execute(
+                "SELECT committed_text, target_application FROM sessions WHERE session_id=?", (session_id,),
+            ).fetchone()
+            if row is None:
+                return False
+            committed = row["committed_text"]
+            start = 0 if whole_result else len(committed) - len(text)
+            if start < 0 or committed[start:start + len(text)] != text:
+                return False
+            cursor = self._connection.execute("""
+                INSERT INTO delivery_outbox (
+                    delivery_id, session_id, created_at, updated_at, text_start,
+                    text_length, text_sha256, target_executable, requested_strategy
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(delivery_id) DO NOTHING
+            """, (delivery_id, session_id, now, now, start, len(text), digest, row["target_application"], strategy))
+            return cursor.rowcount == 1
+
+    def claim_delivery(self, delivery_id: str, *, explicit: bool = False) -> bool:
+        with self._lock, self._connection:
+            cursor = self._connection.execute("""
+                UPDATE delivery_outbox SET status='attempting', updated_at=?, attempt_count=attempt_count+1
+                WHERE delivery_id=? AND (status='pending' OR (? AND status IN (
+                    'failed', 'submitted_unconfirmed'
+                )))
+            """, (time.time(), delivery_id, explicit))
+            return cursor.rowcount == 1
+
+    def finish_delivery(self, delivery_id: str, status: str, error: str | None = None) -> None:
+        if status not in {"submitted_unconfirmed", "confirmed", "failed", "cancelled"}:
+            raise ValueError("Unsupported delivery status")
+        with self._lock, self._connection:
+            self._connection.execute(
+                """UPDATE delivery_outbox SET status=?, updated_at=?, last_error_code=?
+                   WHERE delivery_id=? AND (status='attempting' OR (?='confirmed'
+                   AND status IN ('submitted_unconfirmed','attempting','failed')) OR (?='cancelled' AND status='pending'))""",
+                (status, time.time(), error, delivery_id, status, status),
+            )
+
+    def queued_retry_ids(self, session_id: str) -> tuple[str, ...]:
+        with self._lock:
+            rows = self._connection.execute("""
+                SELECT delivery_id FROM delivery_outbox
+                WHERE session_id=? AND status='failed' AND last_error_code IN ('queued','blocked')
+                ORDER BY created_at DESC LIMIT 256
+            """, (session_id,)).fetchall()
+        return tuple(row[0] for row in rows)
+
+    def settle_queued_retry(self, delivery_ids: tuple[str, ...]) -> None:
+        with self._lock, self._connection:
+            self._connection.executemany("""
+                UPDATE delivery_outbox SET status='submitted_unconfirmed', updated_at=?, last_error_code=NULL
+                WHERE delivery_id=? AND status='failed' AND last_error_code IN ('queued','blocked')
+            """, ((time.time(), delivery_id) for delivery_id in delivery_ids))
+
+    def pending_deliveries(self, limit: int = 40) -> tuple[OutboxItem, ...]:
+        with self._lock:
+            rows = self._connection.execute("""
+                SELECT d.*, substr(s.committed_text, d.text_start + 1, d.text_length) AS fragment
+                FROM delivery_outbox d JOIN sessions s USING(session_id)
+                WHERE d.status NOT IN ('confirmed','cancelled')
+                ORDER BY d.created_at DESC LIMIT ?
+            """, (max(1, min(100, limit)),)).fetchall()
+        return tuple(
+            OutboxItem(row["delivery_id"], row["session_id"], row["created_at"], row["fragment"],
+                       row["target_executable"], row["status"])
+            for row in rows
+            if sha256(row["fragment"].encode("utf-8")).hexdigest() == row["text_sha256"]
+        )
+
+    def delete_delivery(self, delivery_id: str) -> None:
+        with self._lock, self._connection:
+            self._connection.execute("DELETE FROM delivery_outbox WHERE delivery_id=?", (delivery_id,))
 
     def update_metrics(
         self,
@@ -466,7 +584,7 @@ class SessionRepository:
     def search(
         self, *, text: str = "", profile: str = "", application: str = "",
         since: float | None = None, until: float | None = None, page: int = 0,
-        language: str = "", status: str = "", include_drafts: bool = False,
+        language: str = "", status: str = "", include_drafts: bool = False, source_type: str = "",
     ) -> tuple[tuple[SessionRecord, ...], bool]:
         clauses: list[str] = [] if include_drafts else ["source_type != 'draft'"]
         values: list[str | float | int] = []
@@ -487,6 +605,9 @@ class SessionRepository:
         if language:
             clauses.append("language = ?")
             values.append(language)
+        if source_type:
+            clauses.append("source_type = ?")
+            values.append(source_type)
         if status == "incomplete":
             clauses.append("status NOT IN ('completed', 'recovered')")
         elif status:
