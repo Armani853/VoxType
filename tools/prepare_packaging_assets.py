@@ -4,25 +4,31 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import shutil
 import struct
 from pathlib import Path
 from typing import Any, cast
 
-from platformdirs import user_data_path
 from PySide6.QtCore import QBuffer, QByteArray, QIODevice, Qt
 from PySide6.QtGui import QColor, QImage, QPainter
 from PySide6.QtSvg import QSvgRenderer
 
-from voxtype.constants import APP_AUTHOR, APP_NAME
-from voxtype.runtime import install_silero_vad
+from voxtype.runtime import SILERO_VAD_SHA256, install_silero_vad
 
 
-def prepare(output: Path, icon_svg: Path) -> tuple[Path, Path]:
+def prepare(output: Path, icon_svg: Path, vad_source: Path | None = None) -> tuple[Path, Path]:
     output.mkdir(parents=True, exist_ok=True)
-    installed_vad = install_silero_vad(user_data_path(APP_NAME, APP_AUTHOR))
+    if vad_source is None:
+        vad_source = install_silero_vad(output / "pinned-vad")
+    if vad_source is None:
+        raise RuntimeError("Pinned Silero VAD asset is unavailable")
     packaged_vad = output / "silero_vad.onnx"
-    shutil.copy2(installed_vad, packaged_vad)
+    with vad_source.open("rb") as stream:
+        digest = hashlib.file_digest(stream, "sha256").hexdigest()
+    if digest != SILERO_VAD_SHA256:
+        raise RuntimeError("Pinned Silero VAD checksum does not match")
+    shutil.copy2(vad_source, packaged_vad)
 
     renderer = QSvgRenderer(str(icon_svg))
     if not renderer.isValid():
@@ -79,8 +85,11 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--icon-svg", type=Path, required=True)
+    parser.add_argument("--vad-source", type=Path)
     arguments = parser.parse_args()
-    vad, icon = prepare(arguments.output.resolve(), arguments.icon_svg.resolve())
+    vad, icon = prepare(
+        arguments.output.resolve(), arguments.icon_svg.resolve(), arguments.vad_source
+    )
     print(vad)
     print(icon)
     return 0

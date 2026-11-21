@@ -5,7 +5,9 @@ from __future__ import annotations
 import argparse
 import json
 import threading
+import time
 import wave
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -35,11 +37,22 @@ def main() -> int:
     silence = np.zeros((24_000, 2), dtype=np.float32)
     samples = np.concatenate((silence, output, silence), axis=0)
     if args.playback_only:
+        started_wall = datetime.now().astimezone().isoformat(timespec="milliseconds")
+        started = time.perf_counter()
         with sd.OutputStream(
             samplerate=48_000, channels=2, dtype="float32", device=args.output_device
         ) as stream:
             stream.write(samples)
-        print(json.dumps({"played_seconds": round(len(samples) / 48_000, 3)}))
+        print(
+            json.dumps(
+                {
+                    "started_local": started_wall,
+                    "ended_local": datetime.now().astimezone().isoformat(timespec="milliseconds"),
+                    "wall_seconds": round(time.perf_counter() - started, 3),
+                    "played_seconds": round(len(samples) / 48_000, 3),
+                }
+            )
+        )
         return 0
     captured = np.empty((len(samples), args.input_channels), dtype=np.float32)
     failure: list[str] = []

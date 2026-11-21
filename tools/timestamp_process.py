@@ -34,8 +34,9 @@ def main() -> int:
             elapsed = time.perf_counter() - started
             output.write(f"{elapsed:.3f}\t{line}")
             output.flush()
-            sys.stdout.write(line)
-            sys.stdout.flush()
+            if not line.startswith("<clcache> "):
+                sys.stdout.write(line)
+                sys.stdout.flush()
         return process.wait()
 
 

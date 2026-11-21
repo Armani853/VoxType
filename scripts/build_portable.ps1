@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
-    [switch]$SkipChecks
+    [switch]$SkipChecks,
+    [string]$PinnedVadSource
 )
 
 $ErrorActionPreference = 'Stop'
@@ -57,7 +58,9 @@ New-Item -ItemType Directory -Path $BuildRoot, $DistRoot, $ReleaseRoot -Force | 
 
 Write-Host '[3/6] Preparing pinned VAD and native icon assets'
 $AssetStopwatch = [Diagnostics.Stopwatch]::StartNew()
-& $Python (Join-Path $RepoRoot 'tools\prepare_packaging_assets.py') --output $AssetRoot --icon-svg $IconSvg
+$AssetArguments = @('--output', $AssetRoot, '--icon-svg', $IconSvg)
+if ($PinnedVadSource) { $AssetArguments += @('--vad-source', $PinnedVadSource) }
+& $Python (Join-Path $RepoRoot 'tools\prepare_packaging_assets.py') @AssetArguments
 $AssetStopwatch.Stop()
 Write-Host ("[build] Asset preparation: {0:N3} s" -f $AssetStopwatch.Elapsed.TotalSeconds)
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
