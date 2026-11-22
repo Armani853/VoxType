@@ -94,6 +94,17 @@ class VoiceAction:
 
 
 @dataclass(frozen=True, slots=True)
+class CommandResolution:
+    session_id: str
+    revision: int
+    is_command: bool
+    command_id: str | None
+    arguments: tuple[str, ...]
+    remaining_text: str
+    requires_confirmation: bool
+
+
+@dataclass(frozen=True, slots=True)
 class Snippet:
     id: str
     name: str
@@ -378,7 +389,15 @@ class VoiceCommandRouter:
             "отменить диктовку": ("CancelCurrentSession", {}),
             "открыть словарь": ("OpenVoxTypePanel", {"panel": "dictionary"}),
             "открыть настройки": ("OpenVoxTypePanel", {"panel": "settings"}),
+            "открой редактор": ("OpenVoxTypePanel", {"panel": "transcript_editor"}),
         }
+        if profile.formatting_mode in {"general", "business", "email", "notes", "chat"}:
+            from voxtype.transcript.structured import STRUCTURED_COMMANDS
+
+            fixed.update(
+                (phrase, ("FormatStructured", {"command": operation}))
+                for phrase, operation in STRUCTURED_COMMANDS.items()
+            )
         if profile.formatting_mode == "code":
             for key, symbol in {
                 "нижнее подчёркивание": "_",
@@ -396,7 +415,7 @@ class VoiceCommandRouter:
         ]
         if phrase in fixed:
             action, payload = fixed[phrase]
-            candidates.append(VoiceAction("builtin", phrase, action, payload))
+            candidates.append(VoiceAction(f"builtin:{action}:{phrase}", phrase, action, payload))
         for key, action in (
             ("вставить шаблон ", "InsertSnippet"),
             ("выбрать профиль ", "SwitchProfile"),

@@ -17,6 +17,7 @@ from platformdirs import user_data_path
 
 from voxtype.constants import APP_AUTHOR, APP_NAME, SESSION_SCHEMA_VERSION
 from voxtype.core.models import Language, ModelProfile
+from voxtype.transcript.editing import RevisionSource, TranscriptRevision
 
 
 @dataclass(frozen=True, slots=True)
@@ -209,6 +210,23 @@ class SessionRepository:
                     BEGIN DELETE FROM delivery_outbox WHERE session_id=OLD.session_id; END
                 """)
                 self._connection.execute("PRAGMA user_version=2")
+            if version < 3:
+                self._connection.execute("""
+                    CREATE TABLE IF NOT EXISTS transcript_revisions (
+                        revision_id TEXT PRIMARY KEY,
+                        transcript_id TEXT NOT NULL REFERENCES sessions(session_id),
+                        revision_number INTEGER NOT NULL,
+                        created_at_utc TEXT NOT NULL,
+                        source TEXT NOT NULL,
+                        text_payload TEXT NOT NULL,
+                        UNIQUE(transcript_id, revision_number)
+                    )
+                """)
+                self._connection.execute("""
+                    CREATE TRIGGER IF NOT EXISTS session_delete_revisions AFTER DELETE ON sessions
+                    BEGIN DELETE FROM transcript_revisions WHERE transcript_id=OLD.session_id; END
+                """)
+                self._connection.execute("PRAGMA user_version=3")
             self._initialize_search()
 
     def _initialize_search(self) -> None:
@@ -579,11 +597,18 @@ class SessionRepository:
             )
             self._prune_drafts(limit)
 
-    def save_editor_draft(self, session_id: str, language: str, text: str, touched: float) -> None:
-        if language not in ("ru", "en") or not text.strip():
+    def save_editor_draft(
+        self,
+        session_id: str,
+        language: str,
+        text: str,
+        touched: float,
+        revisions: tuple[TranscriptRevision, ...] = (),
+    ) -> None:
+        if language not in ("ru", "en") or (not text.strip() and not revisions):
             return
         with self._lock, self._connection:
-            self._connection.execute(
+            write = self._connection.execute(
                 """INSERT INTO sessions(session_id, started_at, finished_at, language, model, profile,
                 target_application, source_type, status, committed_text, recovery_allowed, updated_at)
                 VALUES (?, ?, ?, ?, '', '', '', 'draft', 'draft', ?, 1, ?)
@@ -592,7 +617,42 @@ class SessionRepository:
                 WHERE sessions.source_type='draft' AND sessions.updated_at <= excluded.updated_at""",
                 (session_id, touched, touched, language, text, touched),
             )
+            if write.rowcount and revisions:
+                self._connection.executemany(
+                    """INSERT INTO transcript_revisions VALUES (?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(transcript_id, revision_number) DO NOTHING""",
+                    (
+                        (
+                            revision.id,
+                            session_id,
+                            revision.number,
+                            revision.created_at_utc,
+                            revision.source.value,
+                            revision.text,
+                        )
+                        for revision in revisions
+                    ),
+                )
+                self._connection.execute(
+                    """DELETE FROM transcript_revisions
+                       WHERE transcript_id=? AND source!='raw_asr' AND revision_number NOT IN (
+                         SELECT revision_number FROM transcript_revisions WHERE transcript_id=?
+                         ORDER BY revision_number DESC LIMIT 31)""",
+                    (session_id, session_id),
+                )
             self._prune_drafts(20)
+
+    def editor_revisions(self, session_id: str) -> tuple[TranscriptRevision, ...]:
+        with self._lock:
+            rows = self._connection.execute(
+                """SELECT revision_id, revision_number, created_at_utc, source, text_payload
+                   FROM transcript_revisions WHERE transcript_id=? ORDER BY revision_number""",
+                (session_id,),
+            ).fetchall()
+        return tuple(
+            TranscriptRevision(row[0], row[1], row[2], RevisionSource(row[3]), row[4])
+            for row in rows
+        )
 
     def _prune_drafts(self, limit: int) -> None:
         self._connection.execute(

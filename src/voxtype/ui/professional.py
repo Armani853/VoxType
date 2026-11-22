@@ -47,7 +47,13 @@ from voxtype.core.profiles import (
 )
 from voxtype.settings.organization_pack import OrganizationProfilePack
 from voxtype.transcript.corrections import CorrectionSuggestionService
-from voxtype.transcript.editing import TextEditService
+from voxtype.transcript.editing import (
+    RevisionSource,
+    TextEditService,
+    TranscriptRevision,
+    TranscriptRevisions,
+    VoiceEditCommandInterpreter,
+)
 from voxtype.transcript.enhancer import OPERATIONS, LlamaCppTextEnhancer, LocalTextEnhancer
 from voxtype.transcript.professional import (
     ACTION_PARAMETERS,
@@ -86,6 +92,7 @@ class ProfessionalWindow(QDialog):
     profiles_refreshed = Signal()
     editor_draft_requested = Signal(object)
     scratchpad_toggle_requested = Signal()
+    voice_edit_toggle_requested = Signal()
     correction_ready = Signal(object)
 
     def __init__(self, controller, parent: QWidget | None = None) -> None:
@@ -1737,6 +1744,8 @@ class ProfessionalWindow(QDialog):
         self._correction_origin: RecognitionResult | None = None
         self._correction_baseline = ""
         self._editor_draft_id = None
+        self._revisions = TranscriptRevisions()
+        self._voice_edit_anchor: tuple[str, int] | None = None
         self._draft_timer = QTimer(self, interval=1000, singleShot=True)
         self._draft_timer.timeout.connect(self.flush_editor_draft)
         self._corrections = CorrectionSuggestionService(
@@ -1799,6 +1808,12 @@ class ProfessionalWindow(QDialog):
             self.scratchpad_toggle_requested.emit,
             scratchpad,
         )
+        self.voice_edit_button = self._button(
+            "Голосовая правка", self.voice_edit_toggle_requested.emit, scratchpad
+        )
+        self.voice_edit_button.setEnabled(self.controller.policy.allow_voice_commands)
+        self.voice_edit_button.setToolTip("Например: «удали последнее слово»")
+        self._button("Версии", self._show_editor_versions, scratchpad)
         self._button(
             "Скопировать",
             lambda: (
@@ -1821,26 +1836,111 @@ class ProfessionalWindow(QDialog):
         self.tabs.setCurrentWidget(self._editor_page)
         self.edit_original.setFocus()
 
-    def set_scratchpad_recording(self, recording: bool) -> None:
+    def set_scratchpad_recording(self, recording: bool, *, voice_edit: bool = False) -> None:
         self.scratchpad_button.setText(
-            "Остановить диктовку" if recording else "Диктовать в блокнот"
+            "Остановить диктовку" if recording and not voice_edit else "Диктовать в блокнот"
         )
+        self.scratchpad_button.setEnabled(not recording or not voice_edit)
+        self.voice_edit_button.setText(
+            "Завершить голосовую правку" if recording and voice_edit else "Голосовая правка"
+        )
+        self.voice_edit_button.setEnabled(
+            self.controller.policy.allow_voice_commands and (not recording or voice_edit)
+        )
+
+    def prepare_voice_edit(self) -> None:
+        self._record_editor_text()
+        self._voice_edit_anchor = self._revisions.id, self._revisions.number
+
+    def apply_voice_edit(self, result: RecognitionResult) -> None:
+        anchor, self._voice_edit_anchor = self._voice_edit_anchor, None
+        if anchor is None or not self.controller.policy.allow_voice_commands:
+            return
+        self._record_editor_text()
+        try:
+            request = VoiceEditCommandInterpreter.parse(result.raw_text, *anchor)
+            text = VoiceEditCommandInterpreter.apply(
+                request, self._revisions, self.edit_original.toPlainText()
+            )
+        except ValueError as exc:
+            self.feedback.setText(str(exc))
+            return
+        if request.operation == "open":
+            self.open_scratchpad()
+            return
+        self._write_editor_revision(
+            text,
+            RevisionSource.RESTORED if request.operation == "undo" else RevisionSource.VOICE_EDIT,
+        )
+        self.feedback.setText("Голосовая правка применена в блокноте")
+
+    def _record_editor_text(self) -> None:
+        self._revisions.append(self.edit_original.toPlainText(), RevisionSource.USER_EDIT)
+
+    def _write_editor_revision(self, text: str, source: RevisionSource) -> None:
+        self._clear_preview()
+        self._selection = None
+        self._revisions.append(text, source)
+        self.edit_original.setPlainText(text)
+
+    def _show_editor_versions(self) -> None:
+        self._record_editor_text()
+        history = tuple(reversed(self._revisions.entries))
+        dialog = VoxDialog(self)
+        dialog.setWindowTitle("Версии текста")
+        dialog.resize(610, 430)
+        layout = QVBoxLayout(dialog)
+        versions = QListWidget(dialog)
+        preview = QPlainTextEdit(dialog, readOnly=True)
+        layout.addWidget(versions)
+        layout.addWidget(preview, 1)
+        for version in history:
+            versions.addItem(
+                f"{version.number} · {version.created_at_utc[:19]} UTC · {version.source}"
+            )
+
+        def load(row: int) -> None:
+            preview.setPlainText(history[row].text if row >= 0 else "")
+
+        def restore() -> None:
+            if versions.currentRow() >= 0:
+                self._write_editor_revision(
+                    history[versions.currentRow()].text, RevisionSource.RESTORED
+                )
+                dialog.accept()
+
+        versions.currentRowChanged.connect(load)
+        versions.setCurrentRow(0)
+        row = QHBoxLayout()
+        self._button("Скопировать версию", lambda: self._copy_text(preview.toPlainText()), row)
+        self._button("Восстановить версию", restore, row)
+        layout.addLayout(row)
+        dialog.exec()
 
     def append_scratchpad_result(self, result: RecognitionResult) -> None:
         if not result.text.strip():
             return
         self._clear_preview()
         self._selection = None
-        self._editor_draft_id = self._editor_draft_id or uuid4().hex
-        self.edit_original.appendPlainText(result.text)
+        self._editor_draft_id = self._editor_draft_id or self._revisions.id
+        previous = self.edit_original.toPlainText()
+        if not previous and not self._revisions.entries:
+            self._revisions.append(result.raw_text, RevisionSource.RAW_ASR)
+        self._write_editor_revision(
+            f"{previous}\n{result.text}" if previous else result.text, RevisionSource.FORMATTED
+        )
         self._correction_origin = result
         self._correction_baseline = self.edit_original.toPlainText()
         self.suggest_button.setEnabled(True)
 
     def _copy_scratchpad(self) -> None:
+        self._copy_text(self.edit_original.toPlainText())
+
+    @staticmethod
+    def _copy_text(text: str) -> None:
         from PySide6.QtWidgets import QApplication
 
-        QApplication.clipboard().setText(self.edit_original.toPlainText())
+        QApplication.clipboard().setText(text)
 
     def _save_scratchpad(self) -> None:
         if (
@@ -1849,11 +1949,8 @@ class ProfessionalWindow(QDialog):
         ):
             self.feedback.setText("Включите восстановление черновиков, чтобы сохранять этот текст.")
             return
-        text = self.edit_original.toPlainText()
-        if text.strip():
-            self._editor_draft_id = self._editor_draft_id or uuid4().hex
-            language = self.controller.snapshot().language.value
-            self.editor_draft_requested.emit((self._editor_draft_id, language, text))
+        self._editor_draft_id = self._editor_draft_id or self._revisions.id
+        self.flush_editor_draft()
 
     def _export_scratchpad(self) -> None:
         text = self.edit_original.toPlainText()
@@ -1884,49 +1981,59 @@ class ProfessionalWindow(QDialog):
         self._selection = None
         self._clear_preview()
         self._correction_baseline = result.text or result.raw_text
-        self.edit_original.setPlainText(
-            self._correction_baseline if edited_text is None else edited_text
-        )
+        self._revisions = TranscriptRevisions()
+        if result.raw_text:
+            self._revisions.append(result.raw_text, RevisionSource.RAW_ASR)
+        self._write_editor_revision(self._correction_baseline, RevisionSource.FORMATTED)
+        if edited_text is not None:
+            self._write_editor_revision(edited_text, RevisionSource.USER_EDIT)
         self._correction_origin = result
-        self._editor_draft_id = uuid4().hex
+        self._editor_draft_id = self._revisions.id
         self.suggest_button.setEnabled(True)
         self.tabs.setCurrentWidget(self._editor_page)
         if edited_text is not None and edited_text != self._correction_baseline:
             self._debounce_editor_draft()
 
-    def open_restored_draft(self, text: str) -> None:
+    def open_restored_draft(
+        self, identifier: str, text: str, versions: tuple[TranscriptRevision, ...]
+    ) -> None:
         if self._draft_timer.isActive():
             self.flush_editor_draft()
         self._correction_origin = None
-        self._editor_draft_id = None
+        self._editor_draft_id = identifier
         self._selection = None
         self._clear_preview()
-        self.edit_original.setPlainText(text)
+        self._revisions = TranscriptRevisions(identifier, list(versions))
+        self._write_editor_revision(text, RevisionSource.RESTORED)
         self.suggest_button.setEnabled(False)
         self.tabs.setCurrentWidget(self._editor_page)
 
     def _debounce_editor_draft(self) -> None:
-        if (
-            self._editor_draft_id is not None
-            and self._correction_origin is not None
-            and self.controller.settings.privacy.recover_unsaved_drafts
-            and not self.controller.policy.disable_history
-        ):
-            self._draft_timer.start()
+        self._draft_timer.start()
 
     def flush_editor_draft(self) -> None:
         self._draft_timer.stop()
         result = self._correction_origin
         text = self.edit_original.toPlainText()
+        self._record_editor_text()
         if (
-            result is not None
-            and self._editor_draft_id is not None
-            and text.strip()
-            and text != self._correction_baseline
+            self._editor_draft_id is not None
+            and (text.strip() or len(self._revisions.entries) > 1)
             and self.controller.settings.privacy.recover_unsaved_drafts
             and not self.controller.policy.disable_history
         ):
-            self.editor_draft_requested.emit((self._editor_draft_id, result.language.value, text))
+            language = (
+                result.language if result is not None else self.controller.snapshot().language
+            )
+            versions = tuple(
+                revision
+                for revision in self._revisions.entries
+                if revision.source is not RevisionSource.RAW_ASR
+                or self.controller.settings.privacy.save_history
+            )
+            self.editor_draft_requested.emit(
+                (self._editor_draft_id, language.value, text, versions)
+            )
 
     def _suggest_correction(self) -> None:
         original = self._correction_origin
@@ -2000,6 +2107,7 @@ class ProfessionalWindow(QDialog):
         self.tabs.setEnabled(True)
         if isinstance(selection, SelectedText):
             self._selection = selection
+            self._revisions = TranscriptRevisions()
             self.edit_original.setPlainText(selection.text)
             self.show()
             self.raise_()
@@ -2030,12 +2138,15 @@ class ProfessionalWindow(QDialog):
         if self._preview_source != original or self._preview_result is None:
             self.feedback.setText("Сначала создайте актуальный предпросмотр")
             return
-        self.edit_original.setPlainText(self.editor.apply(original, self._preview_result))
-        self._clear_preview()
+        self._record_editor_text()
+        self._write_editor_revision(
+            self.editor.apply(original, self._preview_result), RevisionSource.USER_EDIT
+        )
 
     def _undo_edit(self) -> None:
-        self.edit_original.setPlainText(self.editor.undo(self.edit_original.toPlainText()))
-        self._clear_preview()
+        self._write_editor_revision(
+            self.editor.undo(self.edit_original.toPlainText()), RevisionSource.RESTORED
+        )
 
     def _replace_selection(self) -> None:
         selection, text = self._selection, self._preview_result

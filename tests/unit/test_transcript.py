@@ -6,6 +6,11 @@ import pytest
 
 from voxtype.core.models import Language, TranscriptFragment, WordStamp
 from voxtype.transcript.commands import VoiceCommandProcessor
+from voxtype.transcript.editing import (
+    RevisionSource,
+    TranscriptRevisions,
+    VoiceEditCommandInterpreter,
+)
 from voxtype.transcript.formatter import format_fragment_boundary
 from voxtype.transcript.merger import (
     TranscriptMerger,
@@ -13,6 +18,23 @@ from voxtype.transcript.merger import (
     normalize_token,
 )
 from voxtype.transcript.vocabulary import Vocabulary
+
+
+def test_voice_edit_checks_revision_and_keeps_original() -> None:
+    history = TranscriptRevisions()
+    original = "Первое, второе и третье."
+    history.append(original, RevisionSource.RAW_ASR)
+    request = VoiceEditCommandInterpreter.parse(
+        "замени последнее слово на четвёртое", history.id, history.number
+    )
+    edited = VoiceEditCommandInterpreter.apply(request, history, original)
+    assert edited == "Первое, второе и четвёртое."
+    history.append(edited, RevisionSource.VOICE_EDIT)
+    with pytest.raises(ValueError, match="Текст изменился"):
+        VoiceEditCommandInterpreter.apply(request, history, edited)
+    undo = VoiceEditCommandInterpreter.parse("undo last correction", history.id, history.number)
+    assert VoiceEditCommandInterpreter.apply(undo, history, edited) == original
+    assert history.entries[0].text == original
 
 
 def fragment(

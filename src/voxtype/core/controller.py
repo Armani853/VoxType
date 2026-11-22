@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import sqlite3
 import threading
 import time
@@ -62,16 +63,23 @@ from voxtype.settings.schema import AppSettings
 from voxtype.transcript.formatter import format_fragment_boundary
 from voxtype.transcript.merger import TranscriptMerger, deduplicate_text_boundary
 from voxtype.transcript.professional import (
+    CommandResolution,
     ProcessedDictation,
     ProfessionalContent,
     TextPipeline,
     VoiceAction,
 )
+from voxtype.transcript.structured import FormattingState, StructuredDictationFormatter
 from voxtype.transcript.vocabulary import Vocabulary
 from voxtype.transcript.workflows import WorkflowService
 from voxtype.vad.segmenter import AudioSegment, StreamingSegmenter
 from voxtype.windows.adaptive_input import InputTargetClassifier, InputTargetKind
-from voxtype.windows.foreground import WindowMetadata, focused_control_type, get_foreground_hwnd
+from voxtype.windows.foreground import (
+    WindowMetadata,
+    focused_control_type,
+    get_foreground_hwnd,
+    get_window_process_id,
+)
 from voxtype.windows.injection import DeliveryStatus, InjectionStatus, TextInjectionService
 from voxtype.windows.input_context import ForegroundContext, ForegroundContextProvider
 from voxtype.windows.selection import SelectedText, SelectionProvider, SelectionUnavailable
@@ -164,7 +172,9 @@ class ApplicationController:
         self.workflows = WorkflowService(
             settings_repository, session_repository, loaded_settings.professional
         )
-        self.professional_action: Callable[[int, VoiceAction, DictationProfile], None] | None = None
+        self.professional_action: (
+            Callable[[int, VoiceAction, DictationProfile, CommandResolution | None], None] | None
+        ) = None
         self.profile_backend_factory: Callable[[str], ASRBackend] | None = None
         self._session_profile = self.profiles.resolve(DictationContext())
         self._session_context = DictationContext()
@@ -177,6 +187,10 @@ class ApplicationController:
         self._audio_quality: AudioQualitySnapshot | None = None
         self._audio_monitor_active = False
         self._live_session: LiveSpeechSession | None = None
+        self._live_command_text: str | None = ""
+        self._live_command_resolution: CommandResolution | None = None
+        self._live_command_claimed = False
+        self._live_text_committed = False
         self._live_transcript: LiveTranscript | None = None
         self._live_final: SpeechSegment | None = None
         self._audio_review_required = False
@@ -186,6 +200,7 @@ class ApplicationController:
         self._professional_session_number = 0
         self._session_text_pipeline = self.professional_content.snapshot()
         self._command_mode = False
+        self._formatting_state = FormattingState()
         self._last_processed: ProcessedDictation | None = None
         self._recognition_result: RecognitionResult | None = None
         self._raw_asr_parts: list[str] = []
@@ -212,6 +227,7 @@ class ApplicationController:
         self._segmenter: StreamingSegmenter | None = None
         self._journal: SessionJournal | None = None
         self._session_id: str | None = None
+        self._selection_provider = SelectionProvider()
         self._session_started_monotonic: float | None = None
         self._session_stopped_monotonic: float | None = None
         self._completed_duration_s = 0.0
@@ -351,6 +367,10 @@ class ApplicationController:
             self._live_session = None
             self._live_transcript = None
             self._live_final = None
+            self._live_command_text = ""
+            self._live_command_resolution = None
+            self._live_command_claimed = False
+            self._live_text_committed = False
             self._audio_review_required = False
             self._audio_quality = None
             self._session_interrupted = False
@@ -416,6 +436,7 @@ class ApplicationController:
             if not self.policy.allow_user_snippets:
                 self._session_text_pipeline = replace(self._session_text_pipeline, snippets=())
             self._command_mode = self.settings.dictation.voice_commands
+            self._formatting_state = FormattingState()
             self._last_processed = None
             self._recognition_result = None
             self._raw_asr_parts.clear()
@@ -774,9 +795,14 @@ class ApplicationController:
         audio_queue: LosslessAudioQueue | None,
     ) -> None:
         if capture is not None:
-            stopped = capture.stop(drain_timeout=10.0)
+            try:
+                stopped = capture.stop(drain_timeout=10.0)
+                stats = capture.stats()
+            except Exception as exc:
+                self._handle_runtime_error("Не удалось безопасно остановить микрофон", exc)
+                return
             with self._lock:
-                self._last_stats = capture.stats()
+                self._last_stats = stats
             if not stopped:
                 self._handle_runtime_error(
                     "Не удалось безопасно остановить микрофон",
@@ -827,6 +853,11 @@ class ApplicationController:
                 pipeline.join(timeout=0.25)
                 if self._shutdown_requested.is_set() and pipeline.is_alive():
                     self._status_message = "Ожидаю завершения локального inference"
+        try:
+            action = self._queue_live_final()
+        except (OSError, RuntimeError, sqlite3.Error) as exc:
+            self._handle_runtime_error("Не удалось сохранить итог диктовки", exc)
+            return
         journal = self._journal
         if journal is not None and not self._processing_cancelled.is_set():
             try:
@@ -835,7 +866,6 @@ class ApplicationController:
                 )
             except (OSError, RuntimeError, sqlite3.Error):
                 self.logger.warning("session_finalization_journal_failed")
-        self._queue_live_final()
         self._delivery_queue.join()
         with self._lock:
             cancelled = self._processing_cancelled.is_set() and self._session_id is not None
@@ -855,6 +885,11 @@ class ApplicationController:
         # A temporarily inactive target must not mark recognized speech as an
         # errored history session.
         self._complete_session("interrupted" if self._session_interrupted else "completed")
+        resolution = self._live_command_resolution
+        if action is not None and resolution is not None and self.professional_action is not None:
+            self.professional_action(
+                self._professional_session_number, action, self._session_profile, resolution
+            )
 
     def set_system_unavailable(self, unavailable: bool) -> None:
         with self._lock:
@@ -874,7 +909,7 @@ class ApplicationController:
                 self.target_manager.on_suspend()
         self.stop_dictation()
 
-    def _queue_live_final(self) -> None:
+    def _queue_live_final(self) -> VoiceAction | None:
         with self._lock:
             live = self._live_session
             if (
@@ -883,11 +918,35 @@ class ApplicationController:
                 or self._session_interrupted
                 or self._processing_cancelled.is_set()
             ):
-                return
+                return None
             text = self.merger.committed_text
             self._live_transcript = None
-            if not text.strip():
-                return
+            final_revision = live.revision + 1
+            action = self._resolve_live_command(live)
+            if action is not None:
+                inline = self._inline_command(action, "", live.language)
+                if inline is not None or (
+                    self.professional_action is not None
+                    and action.action_type != "FormatStructured"
+                ):
+                    text = inline if inline is not None else ""
+                    self.merger.set_final_text(text)
+                    self._live_command_resolution = CommandResolution(
+                        live.session_id,
+                        final_revision,
+                        True,
+                        action.id,
+                        tuple(action.payload.values()),
+                        "",
+                        action.confirmation_required,
+                    )
+                    if inline is not None:
+                        self._live_command_claimed = True
+                        action = None
+                else:
+                    action = None
+            if not text and self._live_command_resolution is None:
+                return None
             self._live_final = SpeechSegment(
                 f"{live.session_id}:final",
                 live.session_id,
@@ -895,16 +954,54 @@ class ApplicationController:
                 live.processed_offset,
                 text,
                 SpeechKind.FINAL,
-                live.revision + 1,
+                final_revision,
             )
+            journal = self._journal
+            if text and journal is not None and not self._live_text_committed:
+                journal.commit_text(text)
+                self._live_text_committed = True
+            if action is not None:
+                return action
             if (
                 not self.settings.dictation.auto_insert
                 or self._audio_review_required
                 or self._local_only
+                or not text
             ):
-                return
+                return None
             delivery_id = self._live_final.segment_id
         self._enqueue_delivery(delivery_id, text, whole_result=True)
+        return None
+
+    def _resolve_live_command(self, live: LiveSpeechSession) -> VoiceAction | None:
+        if (
+            not self._live_command_text
+            or not self.policy.allow_voice_commands
+            or self._terminal_input
+            or self._local_only
+            or self._audio_review_required
+            or self._system_unavailable
+            or self._shutdown_requested.is_set()
+        ):
+            return None
+        request = self._session_text_pipeline.request(
+            self._professional_session_number,
+            live.language,
+            live.model_id,
+            self._session_profile,
+            self._session_context,
+            (),
+        )
+        return self._session_text_pipeline.process(
+            request, self._live_command_text, self._session_profile, command_mode=self._command_mode
+        ).voice_action
+
+    def _inline_command(self, action: VoiceAction, previous: str, language: str) -> str | None:
+        if action.action_type == "FormatStructured":
+            return StructuredDictationFormatter.apply(
+                self._formatting_state, action.payload["command"], previous, language
+            )
+        return self._session_text_pipeline.inline_action(action, self._session_profile)
 
     def _enqueue_delivery(self, delivery_id: str, text: str, *, whole_result: bool = False) -> None:
         journal = self._journal
@@ -1002,6 +1099,8 @@ class ApplicationController:
                     input_overflow_reported = True
                     self.logger.warning("audio_input_overflow session_id=%s", self._session_id)
                     with self._lock:
+                        self._audio_review_required = True
+                        self._delivery_status = "copy_required"
                         self._status_message = "Микрофон потерял часть звука; запись продолжается"
                     if self._session_id is not None:
                         self.session_repository.add_warning(self._session_id, "AudioInputOverflow")
@@ -1062,7 +1161,7 @@ class ApplicationController:
                     raise AudioIngressOverflowError(
                         "The VAD did not receive the complete published audio"
                     )
-                if not finalization.complete:
+                if not finalization.complete or input_overflow_reported:
                     with self._lock:
                         self._audio_review_required = True
                         self._error_message = (
@@ -1244,6 +1343,10 @@ class ApplicationController:
 
         def transform(novel_text: str) -> str:
             nonlocal processed, deferred_action
+            live = self._live_session is not None
+            if live and self._live_command_text is not None:
+                candidate = f"{self._live_command_text} {novel_text}".strip()
+                self._live_command_text = candidate if len(candidate) <= 2048 else None
             processed = self._session_text_pipeline.process(
                 professional_request,
                 novel_text,
@@ -1254,6 +1357,7 @@ class ApplicationController:
                     and self._practice_language is None
                     and not self._terminal_input
                     and not self._local_only
+                    and not live
                 ),
             )
             action = processed.voice_action
@@ -1261,9 +1365,11 @@ class ApplicationController:
                 return processed.final_text
             if action.action_type == "InsertSnippet" and not self.policy.allow_user_snippets:
                 return processed.normalized_text
-            inline = self._session_text_pipeline.inline_action(action, self._session_profile)
+            inline = self._inline_command(action, committed, language.value)
             if inline is not None:
                 return inline
+            if action.action_type == "FormatStructured":
+                return processed.normalized_text
             if self.professional_action is not None and self._live_session is None:
                 deferred_action = action
                 return ""
@@ -1320,7 +1426,7 @@ class ApplicationController:
             )
         if deferred_action is not None and self.professional_action is not None:
             self.professional_action(
-                professional_request.session_id, deferred_action, self._session_profile
+                professional_request.session_id, deferred_action, self._session_profile, None
             )
         if guarded.assessment.suspicious and journal is not None:
             warning = ",".join(issue.value for issue in guarded.assessment.issues)
@@ -1330,7 +1436,8 @@ class ApplicationController:
         if outcome.insertion_text:
             if journal is None:
                 raise RuntimeError("committed text has no active journal")
-            journal.commit_text(outcome.insertion_text)
+            if self._live_session is None:
+                journal.commit_text(outcome.insertion_text)
             with self._lock:
                 self._last_fragment = outcome.insertion_text.strip()
                 self._provisional = ""
@@ -1411,6 +1518,7 @@ class ApplicationController:
                         self._processing_cancelled.is_set()
                         or self._session_interrupted
                         or self._system_unavailable
+                        or self._audio_review_required
                         or self._session_id != fragment_id.rsplit(":", 1)[0]
                     ):
                         continue
@@ -2465,14 +2573,17 @@ class ApplicationController:
             audio_queue = self._audio_queue
             session_id = self._session_id
         if capture is not None:
-            capture.stop(drain_timeout=2.0)
+            try:
+                capture.stop(drain_timeout=2.0)
+            except Exception as exc:
+                self.logger.warning("audio_cleanup_failed kind=%s", type(exc).__name__)
         if audio_queue is not None:
             audio_queue.close()
         if session_id is not None:
             try:
                 self.session_repository.add_warning(session_id, type(error).__name__)
-            except (KeyError, OSError):
-                self.logger.exception("session_warning_failed")
+            except (KeyError, OSError, sqlite3.Error) as exc:
+                self.logger.warning("session_warning_failed kind=%s", type(exc).__name__)
         target_state = AppState.ERROR_RECOVERABLE
         if self.state not in {
             AppState.ERROR_RECOVERABLE,
@@ -2546,6 +2657,17 @@ class ApplicationController:
                 and not self._shutdown_requested.is_set()
                 and not self._processing_cancelled.is_set()
             )
+
+    def claim_live_command(self, number: int, resolution: CommandResolution) -> bool:
+        with self._lock:
+            if (
+                not self.professional_session_is_current(number)
+                or self._live_command_resolution != resolution
+                or self._live_command_claimed
+            ):
+                return False
+            self._live_command_claimed = True
+            return True
 
     def cancel_professional_session(self, number: int) -> bool:
         if not self.professional_session_is_current(number):
@@ -2671,6 +2793,7 @@ class ApplicationController:
         with self._lock:
             if (
                 self._delivery_busy
+                or self._system_unavailable
                 or self._shutdown_requested.is_set()
                 or self.state
                 not in {
@@ -2686,10 +2809,17 @@ class ApplicationController:
             if (
                 decision.target is None
                 or self.policy.blocked(DictationContext.capture(decision.target, "selection"))
-                or not (decision.can_inject or self.target_manager.try_restore_focus())
+                or not (
+                    decision.can_inject
+                    or (
+                        decision.foreground is not None
+                        and decision.foreground.process_id == os.getpid()
+                        and self.target_manager.try_restore_focus()
+                    )
+                )
             ):
                 raise SelectionUnavailable("Не удалось вернуть фокус в исходный редактор")
-            return SelectionProvider.read(decision.target)
+            return self._selection_provider.read(decision.target)
         finally:
             with self._lock:
                 self._delivery_busy = False
@@ -2698,6 +2828,7 @@ class ApplicationController:
         with self._lock:
             if (
                 self._delivery_busy
+                or self._system_unavailable
                 or self._shutdown_requested.is_set()
                 or self.state
                 not in {
@@ -2711,17 +2842,28 @@ class ApplicationController:
         try:
             if self.policy.blocked(DictationContext.capture(selection.target, "selection")):
                 return False
+            foreground = get_foreground_hwnd()
+            if not foreground or (
+                foreground != selection.target.hwnd
+                and get_window_process_id(foreground) != os.getpid()
+            ):
+                return False
             self.target_manager.set_locked_target(selection.target)
-            if not self.target_manager.try_restore_focus():
+            if foreground != selection.target.hwnd and not self.target_manager.try_restore_focus():
                 return False
-            try:
-                current = SelectionProvider.read(selection.target)
-            except SelectionUnavailable:
-                return False
-            return (
-                current.text == selection.text
-                and current.control_id == selection.control_id
-                and self.injection_service.dispatch_explicit(text, selection.target)
+
+            def verify_selection() -> bool:
+                with self._lock:
+                    if self._system_unavailable or self._shutdown_requested.is_set():
+                        return False
+                try:
+                    current = self._selection_provider.read(selection.target)
+                except SelectionUnavailable:
+                    return False
+                return current.text == selection.text and current.control_id == selection.control_id
+
+            return self.injection_service.dispatch_explicit(
+                text, selection.target, verify_selection=verify_selection
             )
         finally:
             with self._lock:
@@ -2921,6 +3063,10 @@ class ApplicationController:
             self._audio_archive = None
             stats = capture.stats() if capture is not None else self._last_stats
             completed_text = self.merger.committed_text
+            live_command = self._live_command_resolution
+            save_unsent_live = (
+                self._live_session is not None and not self._live_text_committed and completed_text
+            )
             started = self._session_started_monotonic
             stopped = self._session_stopped_monotonic or time.monotonic()
         if session_id is not None:
@@ -2942,6 +3088,8 @@ class ApplicationController:
                 self.session_repository.save_draft(session_id, completed_text)
             if journal is not None:
                 try:
+                    if save_unsent_live:
+                        journal.commit_text(completed_text)
                     event = "session_completed" if status == "completed" else "session_interrupted"
                     journal.append(event, {"status": status})
                 except (OSError, RuntimeError, sqlite3.Error):
@@ -2972,11 +3120,14 @@ class ApplicationController:
         # Retain the original window identity while committed fragments still
         # await delivery. Otherwise a completed session can never flush when
         # the user returns to that window.
-        if int(getattr(self.injection_service, "pending_fragments", 0)) == 0:
+        if (
+            not (live_command and not self._live_command_claimed)
+            and not self._pending_insertion_count
+        ):
             self.target_manager.end_session()
         if audio_archive is not None:
             audio_archive.close()
-        no_result = status == "completed" and not completed_text.strip()
+        no_result = status == "completed" and not completed_text.strip() and live_command is None
         capture_empty = stats is not None and stats.processed_audio_seconds == 0
         if no_result:
             self.logger.info(
@@ -3044,6 +3195,9 @@ class ApplicationController:
                 self._status_message = (
                     "Сеанс прерван. Скопируйте текст или выберите новое целевое окно."
                 )
+            elif live_command is not None and not completed_text:
+                self._delivery_status = "no_result"
+                self._status_message = "Распознана голосовая команда"
             elif (
                 not self.settings.dictation.auto_insert
                 or self._practice_language is not None
@@ -3052,7 +3206,7 @@ class ApplicationController:
                 self._delivery_status = "pending"
             elif self._delivery_status == "pending" and self._pending_insertion_count:
                 self._delivery_status = "queued_target_inactive"
-            if status == "completed" and not no_result and self._delivery_status == "pending":
+            if status == "completed" and completed_text and self._delivery_status == "pending":
                 self._status_message = "Результат готов"
             self._user_paused = False
         if (

@@ -612,6 +612,7 @@ class TextInjectionService:
         *,
         context: ForegroundContext | None = None,
         attempt_id: str = "",
+        verify_selection: Callable[[], bool] | None = None,
     ) -> tuple[InjectionStrategy, bool | None, str]:
         def verify_native() -> bool:
             if context is None:
@@ -624,6 +625,8 @@ class TextInjectionService:
             )
 
         def verify_paste() -> bool:
+            if verify_selection is not None and not verify_selection():
+                return False
             if not self._same_target_is_ready(target) or not verify_native():
                 return False
             if context is None or not context.runtime_id or self.context_provider is None:
@@ -773,7 +776,13 @@ class TextInjectionService:
 
     inject = submit
 
-    def dispatch_explicit(self, text: str, target: WindowMetadata) -> bool:
+    def dispatch_explicit(
+        self,
+        text: str,
+        target: WindowMetadata,
+        *,
+        verify_selection: Callable[[], bool] | None = None,
+    ) -> bool:
         """Dispatch once to the selected target without draining dictation FIFO."""
         if not text:
             return False
@@ -789,7 +798,20 @@ class TextInjectionService:
                     if plan.strategy in {InputStrategy.LOCAL_PREVIEW, InputStrategy.COPY_ONLY}:
                         return False
                     strategy = InjectionStrategy(plan.strategy.value)
-                self._inject_once(text, target, strategy, context=context, attempt_id=uuid4().hex)
+                if verify_selection is not None:
+                    # A replacement must be one paste. Unicode chunks would
+                    # invalidate the selection after the first chunk.
+                    if strategy not in {InjectionStrategy.AUTO, InjectionStrategy.CLIPBOARD}:
+                        return False
+                    strategy = InjectionStrategy.CLIPBOARD
+                self._inject_once(
+                    text,
+                    target,
+                    strategy,
+                    context=context,
+                    attempt_id=uuid4().hex,
+                    verify_selection=verify_selection,
+                )
             except (_TargetChanged, SendInputError, ClipboardError, OSError):
                 return False
             return True

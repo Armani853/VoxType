@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import re
 
-_NO_SPACE_BEFORE = frozenset(",.!?:;%)]}»…")
-_NO_SPACE_AFTER = frozenset("([{«")
+_NO_SPACE_BEFORE = frozenset(",.!?:;%)]}»”…")
+_NO_SPACE_AFTER = frozenset("([{«“")
 
 
 def normalize_internal_spacing(text: str) -> str:

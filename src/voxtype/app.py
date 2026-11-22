@@ -64,7 +64,7 @@ from voxtype.audio.resampler import resample_audio
 from voxtype.audio.spool import LosslessAudioQueue
 from voxtype.core.compute_budget import MemoryPolicy, PerformanceProfile, ResourcePhase
 from voxtype.core.gestures import DictationGestureController, DictationMode
-from voxtype.core.models import AppPhase, AppReadiness, Language
+from voxtype.core.models import AppPhase, AppReadiness, Language, RecognitionStatus
 from voxtype.core.profiles import DictationProfile
 from voxtype.monitoring.hardware import probe_hardware
 from voxtype.monitoring.health import run_health_checks
@@ -81,7 +81,8 @@ from voxtype.sessions.backup import BackupManager
 from voxtype.settings.defaults import create_default_settings
 from voxtype.settings.schema import AppSettings
 from voxtype.settings.updates import StagedUpdate, UpdateMetadataClient, UpdatesUnavailable
-from voxtype.transcript.professional import VoiceAction
+from voxtype.transcript.editing import RevisionSource, TranscriptRevision
+from voxtype.transcript.professional import CommandResolution, VoiceAction
 from voxtype.transcript.vocabulary import Vocabulary
 from voxtype.ui import (
     DiagnosticsWindow,
@@ -122,7 +123,7 @@ _LOGGER = logging.getLogger("voxtype.app")
 class _WorkerSignals(QObject):
     startup_ready = Signal(object)
     startup_failed = Signal(str)
-    professional_action = Signal(int, object, object)
+    professional_action = Signal(int, object, object, object)
     professional_delivery_failed = Signal()
     dashboard_copied = Signal(bool)
     dashboard_delivery_finished = Signal()
@@ -152,7 +153,7 @@ class _WorkerSignals(QObject):
     settings_status = Signal(str, object)
     audio_level = Signal(float, float, str)
     recovery_ready = Signal(str, bool, str)
-    draft_restored = Signal(str)
+    draft_restored = Signal(str, str, object)
     history_ready = Signal(int, object)
     delivery_outbox_ready = Signal(object)
     pending_flush_ready = Signal()
@@ -296,6 +297,7 @@ class DesktopApplication:
         self._dashboard_delivery_pending = False
         self._manual_delivery_epoch = 0
         self._scratchpad_session: int | None = None
+        self._scratchpad_voice_edit = False
         self._interactive_asr = threading.Event()
         self._professional_timer = QTimer(self.main, interval=750)
         self._professional_timer.timeout.connect(self._poll_professional)
@@ -1486,6 +1488,9 @@ class DesktopApplication:
             self._professional_window.profiles_refreshed.connect(self._refresh_header_profile)
             self._professional_window.editor_draft_requested.connect(self._save_editor_draft)
             self._professional_window.scratchpad_toggle_requested.connect(self._toggle_scratchpad)
+            self._professional_window.voice_edit_toggle_requested.connect(
+                lambda: self._toggle_scratchpad(voice_edit=True)
+            )
             self._start_professional_queue()
             if self._file_queue is not None:
                 self._professional_window.bind_transcription_queue(self._file_queue)
@@ -1518,18 +1523,27 @@ class DesktopApplication:
         if self._professional_window is not None:
             self._professional_window.open_scratchpad()
 
-    def _toggle_scratchpad(self) -> None:
+    def _toggle_scratchpad(self, *, voice_edit: bool = False) -> None:
         window = self._professional_window
         if window is None or self._closing:
+            return
+        if voice_edit and not self.controller.policy.allow_voice_commands:
             return
         if self._scratchpad_session is not None:
             self.controller.stop_dictation()
         elif self.controller.start_dictation(local_only=True):
-            self._scratchpad_session = self.controller.snapshot().readiness.session_id
-            window.set_scratchpad_recording(True)
+            readiness = self.controller.snapshot().readiness
+            self._scratchpad_session = readiness.session_id if readiness is not None else None
+            self._scratchpad_voice_edit = voice_edit
+            if voice_edit:
+                window.prepare_voice_edit()
+            window.set_scratchpad_recording(True, voice_edit=voice_edit)
         else:
+            readiness = self.controller.snapshot().readiness
             self._notify_desktop(
-                "scratchpad-start", self.controller.snapshot().readiness.message, "warning"
+                "scratchpad-start",
+                readiness.message if readiness is not None else "Диктовка недоступна",
+                "warning",
             )
 
     def _observe_scratchpad(self, snapshot: object) -> None:
@@ -1540,19 +1554,28 @@ class DesktopApplication:
         state = getattr(snapshot, "state", "")
         window = self._professional_window
         if result is not None and result.session_id == identifier:
+            voice_edit = self._scratchpad_voice_edit
+            self._scratchpad_voice_edit = False
             self._scratchpad_session = None
             if window is not None:
                 window.set_scratchpad_recording(False)
-                window.append_scratchpad_result(result)
+                if voice_edit:
+                    if result.status is RecognitionStatus.COMPLETED:
+                        window.apply_voice_edit(result)
+                else:
+                    window.append_scratchpad_result(result)
         elif state in {"COMPLETED", "ERROR_RECOVERABLE", "ERROR_FATAL"} and not (
             self._system_locked or self._system_sleeping
         ):
             self._scratchpad_session = None
+            self._scratchpad_voice_edit = False
             if window is not None:
                 window.set_scratchpad_recording(False)
 
-    def _save_editor_draft(self, draft: tuple[str, str, str]) -> None:
-        identifier, language, text = draft
+    def _save_editor_draft(
+        self, draft: tuple[str, str, str, tuple[TranscriptRevision, ...]]
+    ) -> None:
+        identifier, language, text, revisions = draft
         touched = time.time()
 
         def save() -> None:
@@ -1566,8 +1589,17 @@ class DesktopApplication:
                         False,
                     )
                     return
+                allowed_revisions = tuple(
+                    version
+                    for version in revisions
+                    if len(version.text) <= 250_000
+                    and (
+                        version.source is not RevisionSource.RAW_ASR
+                        or self.runtime.settings.privacy.save_history
+                    )
+                )
                 self.runtime.session_repository.save_editor_draft(
-                    identifier, language, text, touched
+                    identifier, language, text, touched, allowed_revisions
                 )
 
         self._run_background("voxtype-save-editor-draft", save, finish_on_close=True)
@@ -1728,13 +1760,19 @@ class DesktopApplication:
         dialog.open()
 
     def _on_professional_action(
-        self, session: int, action: VoiceAction, profile: DictationProfile
+        self,
+        session: int,
+        action: VoiceAction,
+        profile: DictationProfile,
+        resolution: CommandResolution | None = None,
     ) -> None:
         if (
             self._closing
             or not self.controller.policy.allow_voice_commands
             or not self.controller.professional_session_is_current(session)
         ):
+            return
+        if resolution is not None and not self.controller.claim_live_command(session, resolution):
             return
         from PySide6.QtWidgets import QMessageBox
 
@@ -1754,6 +1792,8 @@ class DesktopApplication:
         elif kind == "OpenVoxTypePanel":
             if payload.get("panel") == "settings":
                 self.show_settings()
+            elif payload.get("panel") == "transcript_editor":
+                self._open_scratchpad()
             elif payload.get("panel") in {"dictionary", "snippets", "commands", "replacements"}:
                 self.show_professional_tools(
                     payload["panel"]
@@ -2643,12 +2683,14 @@ class DesktopApplication:
         else:
             self._refresh_history()
 
-    def _open_restored_draft(self, text: str) -> None:
+    def _open_restored_draft(
+        self, identifier: str, text: str, versions: tuple[TranscriptRevision, ...]
+    ) -> None:
         if self._closing or not text:
             return
         self.show_professional_tools()
         if self._professional_window is not None:
-            self._professional_window.open_restored_draft(text)
+            self._professional_window.open_restored_draft(identifier, text, versions)
 
     def _recover_history_session(self, session_id: str) -> None:
         def worker() -> None:
@@ -2656,7 +2698,8 @@ class DesktopApplication:
                 source = self.runtime.session_repository.get(session_id)
                 text = self.controller.recover_session(session_id)
                 if source is not None and source.source_type == "draft":
-                    self.signals.draft_restored.emit(text)
+                    versions = self.runtime.session_repository.editor_revisions(session_id)
+                    self.signals.draft_restored.emit(session_id, text, versions)
                 else:
                     self.signals.recovery_ready.emit(session_id, True, text)
             except Exception as exc:

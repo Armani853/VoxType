@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -867,6 +868,55 @@ def test_live_preview_keeps_vad_draining_and_yields_to_final(
         assert injection.fragments == ["Привет мир"]
     finally:
         preview_release.set()
+        controller.shutdown()
+
+
+def test_live_final_claims_voice_command_once_without_inserting_trigger(tmp_path: Path) -> None:
+    class CommandBackend(DeterministicBackend):
+        def transcribe(self, request: TranscriptionRequest) -> TranscriptionResult:
+            result = super().transcribe(request)
+            text = "Вокстайп, открыть настройки."
+            return replace(
+                result, text=text, segments=(replace(result.segments[0], text=text, words=()),)
+            )
+
+    settings = _settings_with_recovery(tmp_path)
+    settings.update({"dictation": {"live_preview": True}})
+    injection = FixtureInjection()
+    controller = ApplicationController(
+        settings_repository=settings,
+        session_repository=SessionRepository(tmp_path / "sessions.sqlite3"),
+        backend=CommandBackend(),
+        capture_factory=lambda queue: FixtureCapture(queue),  # type: ignore[arg-type,return-value]
+        segmenter_factory=lambda: StreamingSegmenter(AlwaysSpeech()),
+        target_manager=FixtureTargetManager(),  # type: ignore[arg-type]
+        injection_service=injection,  # type: ignore[arg-type]
+        spool_root=tmp_path / "spool",
+    )
+    emitted: list[tuple] = []
+    returned = threading.Event()
+
+    def dispatch(*args: object) -> None:
+        emitted.append(args)
+        returned.set()
+
+    controller.professional_action = dispatch
+    try:
+        controller.initialize()
+        assert controller.start_dictation()
+        wait_for_state(controller, AppState.LISTENING)
+        assert not emitted
+        assert controller.stop_dictation()
+        assert returned.wait(5)
+        assert len(emitted) == 1
+        generation, action, _profile, resolution = emitted[0]
+        assert action.payload == {"panel": "settings"}
+        assert controller.claim_live_command(generation, resolution)
+        assert not controller.claim_live_command(generation, resolution)
+        assert not injection.fragments
+        assert not controller.session_repository.recent()[0].committed_text
+        assert controller.snapshot().recognition_result.raw_text == "Вокстайп, открыть настройки."
+    finally:
         controller.shutdown()
 
 

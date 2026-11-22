@@ -25,7 +25,25 @@ from voxtype.settings.migration import migrate_settings
 from voxtype.settings.organization_pack import OrganizationPackService, OrganizationProfilePack
 from voxtype.settings.repository import SettingsRepository
 from voxtype.settings.schema import AppSettings
+from voxtype.transcript.editing import RevisionSource, TranscriptRevisions
 from voxtype.transcript.professional import ProfessionalContent
+
+
+def test_editor_revisions_survive_reopen_and_follow_draft_deletion(tmp_path: Path) -> None:
+    path = tmp_path / "sessions.sqlite3"
+    history = TranscriptRevisions()
+    history.append("raw", RevisionSource.RAW_ASR)
+    history.append("edited", RevisionSource.VOICE_EDIT)
+    repository = SessionRepository(path)
+    repository.save_editor_draft(history.id, "en", "edited", time.time(), tuple(history.entries))
+    repository.close()
+    repository = SessionRepository(path)
+    try:
+        assert repository.editor_revisions(history.id) == tuple(history.entries)
+        assert repository.delete(history.id)
+        assert repository.editor_revisions(history.id) == ()
+    finally:
+        repository.close()
 
 
 def test_organization_vocabulary_is_scoped_and_keeps_its_prompt_priority(tmp_path: Path) -> None:

@@ -85,6 +85,11 @@ class TranscriptMerger:
         with self._lock:
             return tuple(self._words)
 
+    def set_final_text(self, text: str) -> None:
+        """Replace the display text after final routing, retaining raw word timings."""
+        with self._lock:
+            self._text = text
+
     def reset(self) -> None:
         with self._lock:
             self._words.clear()
