@@ -29,6 +29,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--diagnostics", action="store_true")
     parser.add_argument("--no-ui", action="store_true")
     parser.add_argument("--ui-smoke-test", action="store_true")
+    parser.add_argument("--ui-smoke-duration-ms", type=int)
     parser.add_argument("--inference-smoke-test", action="store_true")
     parser.add_argument("--install-model", choices=("fast", "balanced", "maximum_accuracy"))
     return parser
@@ -58,7 +59,17 @@ def _diagnostics() -> dict[str, object]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    arguments = _parser().parse_args(argv)
+    parser = _parser()
+    arguments = parser.parse_args(argv)
+    duration = arguments.ui_smoke_duration_ms
+    if duration is not None and (
+        not arguments.ui_smoke_test
+        or not os.environ.get("VOXTYPE_DATA_DIRECTORY", "").strip()
+        or not 750 <= duration <= 120_000
+    ):
+        parser.error(
+            "--ui-smoke-duration-ms requires an isolated UI smoke profile and 750–120000 ms"
+        )
     if arguments.install_model:
         profile = ASRProfile(arguments.install_model)
         manager = ModelManager(data_directory_path() / "models")
@@ -112,7 +123,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         try:
             runtime = build_runtime(verbose=arguments.verbose)
-            return run_desktop(runtime, smoke_after_ms=750)
+            return run_desktop(runtime, smoke_after_ms=duration if duration is not None else 750)
         finally:
             guard.close()
     if arguments.self_test or arguments.diagnostics or arguments.no_ui:

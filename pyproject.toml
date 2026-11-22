@@ -12,6 +12,7 @@ license = {text = "MIT"}
 authors = [{name = "VoxType contributors"}]
 dependencies = [
   "PySide6==6.11.0",
+  "comtypes==1.5.0; sys_platform == 'win32'",
   "ctranslate2==4.8.1",
   "faster-whisper==1.2.1",
   "numpy==2.2.0",

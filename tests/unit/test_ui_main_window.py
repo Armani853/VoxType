@@ -3,7 +3,7 @@ import pytest
 pytest.importorskip("pytestqt")
 pytest.importorskip("PySide6")
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QEvent, Qt
 
 from voxtype.ui.main_window import MainWindow
 from voxtype.ui.models import AppStatus, DictationLanguage, ModelProfile, UIState
@@ -22,6 +22,16 @@ class _Controller:
 
     def switch_language(self) -> None:
         self.language_switches += 1
+
+
+def test_dashboard_viewport_reports_first_paint(qtbot) -> None:  # type: ignore[no-untyped-def]
+    window = MainWindow()
+    qtbot.addWidget(window)
+    paint = QEvent(QEvent.Type.Paint)
+    window.eventFilter(window.centralWidget(), paint)
+    assert not window._first_content_paint_seen
+    window.eventFilter(window._dashboard_scroll.viewport(), paint)
+    assert window._first_content_paint_seen
 
 
 def test_main_window_renders_snapshot_and_routes_commands(qtbot) -> None:  # type: ignore[no-untyped-def]

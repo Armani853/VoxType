@@ -141,6 +141,7 @@ if PYSIDE6_AVAILABLE:
             scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
             canvas = QWidget(scroll)
             scroll.setWidget(canvas)
+            self._dashboard_scroll = scroll
             scroll.viewport().installEventFilter(self)
             self.shell.install_page("home", scroll)
             self.shell.install_page("dictation", scroll)
@@ -372,20 +373,20 @@ if PYSIDE6_AVAILABLE:
             )
 
         def eventFilter(self, watched: QObject, event: QEvent) -> bool:
-            central = self.centralWidget()
+            dashboard = getattr(self, "_dashboard_scroll", None)
             if (
                 not self._first_content_paint_seen
-                and isinstance(central, QScrollArea)
-                and watched is central.viewport()
+                and dashboard is not None
+                and watched is dashboard.viewport()
                 and event.type() is QEvent.Type.Paint
             ):
                 self._first_content_paint_seen = True
-                canvas = central.widget()
+                canvas = dashboard.widget()
                 _LOGGER.info(
                     "first_content_paint elapsed_ms=%.1f viewport=%dx%d canvas=%dx%d visible=%s",
                     (time.perf_counter() - self._constructed_at) * 1_000.0,
-                    central.viewport().width(),
-                    central.viewport().height(),
+                    dashboard.viewport().width(),
+                    dashboard.viewport().height(),
                     canvas.width() if canvas is not None else 0,
                     canvas.height() if canvas is not None else 0,
                     self.isVisible(),
