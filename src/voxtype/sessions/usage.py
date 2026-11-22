@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from voxtype.sessions.repository import SessionRepository
 from voxtype.settings.repository import SettingsRepository
 
@@ -49,5 +51,5 @@ class UsageMetricsService:
             round(max(0.0, processing) * 1000),
         )
 
-    def summary(self, *, weekly: bool) -> tuple[dict, ...]:
+    def summary(self, *, weekly: bool) -> tuple[dict[str, Any], ...]:
         return self.repository.usage_summary(weekly=weekly)

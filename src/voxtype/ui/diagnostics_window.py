@@ -12,7 +12,7 @@ from .models import DiagnosticReport, diagnostic_report_from
 
 if PYSIDE6_AVAILABLE:
     from PySide6.QtCore import QTimer, Signal
-    from PySide6.QtGui import QColor, QGuiApplication
+    from PySide6.QtGui import QColor, QGuiApplication, QHideEvent, QShowEvent
     from PySide6.QtWidgets import (
         QCheckBox,
         QDialog,
@@ -63,11 +63,11 @@ if PYSIDE6_AVAILABLE:
                 self._resource_timer.stop()
                 self.resource_label.clear()
 
-        def showEvent(self, event: object) -> None:
+        def showEvent(self, event: QShowEvent) -> None:
             super().showEvent(event)
             self._update_resource_timer()
 
-        def hideEvent(self, event: object) -> None:
+        def hideEvent(self, event: QHideEvent) -> None:
             self._resource_timer.stop()
             super().hideEvent(event)
 

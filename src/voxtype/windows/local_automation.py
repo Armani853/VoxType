@@ -135,7 +135,7 @@ class LocalAutomation(QObject):
         if socket.bytesAvailable() > _MAX_REQUEST:
             self._reply(socket, None, error="request_too_large")
         elif socket.canReadLine():
-            frame = bytes(socket.readLine(_MAX_REQUEST + 1))
+            frame = bytes(socket.readLine(_MAX_REQUEST + 1).data())
             if socket.bytesAvailable():
                 self._reply(socket, None, error="one_request_per_connection")
             else:

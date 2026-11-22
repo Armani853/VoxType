@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import sqlite3
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Event, Lock, Thread
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from voxtype.asr.file_transcription import (
@@ -19,6 +20,9 @@ from voxtype.asr.file_transcription import (
     validate_media,
 )
 from voxtype.windows.local_paths import is_local_path
+
+if TYPE_CHECKING:
+    from voxtype.core.controller import ApplicationController
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,7 +44,7 @@ class FileTranscriptionQueue:
     def __init__(
         self,
         path: Path,
-        controller,
+        controller: ApplicationController,
         *,
         changed: Callable[[], None] | None = None,
     ) -> None:
@@ -80,7 +84,7 @@ class FileTranscriptionQueue:
             )
 
     @contextmanager
-    def _connect(self):
+    def _connect(self) -> Iterator[sqlite3.Connection]:
         db = sqlite3.connect(self.path, timeout=2)
         db.row_factory = sqlite3.Row
         try:

@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import replace
 from importlib.util import find_spec
 from pathlib import Path
 from sqlite3 import Error as SQLiteError
 from threading import Thread
+from typing import TYPE_CHECKING
 
-from PySide6.QtCore import Qt, QUrl, Signal
-from PySide6.QtGui import QTextBlockFormat, QTextCursor
+from PySide6.QtCore import QModelIndex, Qt, QUrl, Signal
+from PySide6.QtGui import QDragEnterEvent, QDropEvent, QResizeEvent, QTextBlockFormat, QTextCursor
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -29,6 +31,9 @@ from voxtype.windows.local_paths import is_local_path
 
 from .obsidian import VoxBusyIndicator, VoxButton, VoxComboBox, VoxEmptyState
 from .records_view import RecordsView
+
+if TYPE_CHECKING:
+    from PySide6.QtMultimedia import QMediaPlayer
 
 
 class TranscriptionPanel(QWidget):
@@ -50,7 +55,7 @@ class TranscriptionPanel(QWidget):
         self._segment_index = -1
         self._opening = False
         self._writing = False
-        self._player = None
+        self._player: QMediaPlayer | None = None
         root = QVBoxLayout(self)
         self.setAcceptDrops(True)
         bar = QHBoxLayout()
@@ -59,8 +64,8 @@ class TranscriptionPanel(QWidget):
             self.language.addItem(label, value)
         self.profile = VoxComboBox(self)
         self.priority = VoxComboBox(self)
-        for label, value in (("Обычный", 0), ("Высокий", 10), ("Низкий", -10)):
-            self.priority.addItem(label, value)
+        for label, rank in (("Обычный", 0), ("Высокий", 10), ("Низкий", -10)):
+            self.priority.addItem(label, rank)
         self.automatic_export = VoxComboBox(self)
         for label, suffix in (
             ("Без автоэкспорта", ""),
@@ -140,7 +145,7 @@ class TranscriptionPanel(QWidget):
         self.queue_rows_ready.connect(self._show_jobs, Qt.ConnectionType.QueuedConnection)
         self.write_finished.connect(self._finish_write)
 
-    def _button(self, row, label, action):
+    def _button(self, row: QHBoxLayout, label: str, action: Callable[[], object]) -> VoxButton:
         button = VoxButton(label, self)
         button.clicked.connect(action)
         row.addWidget(button)
@@ -226,18 +231,18 @@ class TranscriptionPanel(QWidget):
         if sources:
             self._enqueue_sources([Path(name) for name in sources])
 
-    def dragEnterEvent(self, event: object) -> None:
+    def dragEnterEvent(self, event: QDragEnterEvent) -> None:
         if self._local_audio(event):
             event.acceptProposedAction()
 
-    def dropEvent(self, event: object) -> None:
+    def dropEvent(self, event: QDropEvent) -> None:
         paths = self._local_audio(event)
         if paths:
             self._enqueue_sources(paths)
             event.acceptProposedAction()
 
     @staticmethod
-    def _local_audio(event: object) -> list[Path]:
+    def _local_audio(event: QDropEvent) -> list[Path]:
         if not event.mimeData().hasUrls():
             return []
         return [
@@ -281,7 +286,7 @@ class TranscriptionPanel(QWidget):
         self.feedback.setText("\n".join(failures[:3]) if failures else "Очередь обновлена")
         self.refresh()
 
-    def resizeEvent(self, event: object) -> None:
+    def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
         if hasattr(self, "editor_split"):
             flow = Qt.Orientation.Vertical if self.width() < 620 else Qt.Orientation.Horizontal
@@ -352,7 +357,7 @@ class TranscriptionPanel(QWidget):
             if value != current.text:
                 self._working_segments[self._segment_index] = replace(current, text=value)
 
-    def _segment_selected(self, current: object, _previous: object) -> None:
+    def _segment_selected(self, current: QModelIndex, _previous: QModelIndex) -> None:
         self._capture_page_edits()
         value = current.data(Qt.ItemDataRole.UserRole) if current.isValid() else None
         self._segment_index = int(value) if value is not None else -1
@@ -480,7 +485,9 @@ class TranscriptionPanel(QWidget):
             "Транскрипт экспортирован",
         )
 
-    def _write(self, action, saved: FileTranscript | None, message: str) -> None:
+    def _write(
+        self, action: Callable[[], object], saved: FileTranscript | None, message: str
+    ) -> None:
         self._writing = True
 
         def run() -> None:

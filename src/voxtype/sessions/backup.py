@@ -13,7 +13,7 @@ from contextlib import closing, suppress
 from pathlib import Path
 from uuid import uuid4
 
-from voxtype.sessions.repository import SESSION_SCHEMA_VERSION
+from voxtype.constants import SESSION_SCHEMA_VERSION
 from voxtype.version import __version__
 
 

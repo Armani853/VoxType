@@ -611,7 +611,7 @@ if PYSIDE6_AVAILABLE:
     def _qt_palette(mode: ThemeMode) -> QPalette:
         colors = palette(mode)
         result = QPalette()
-        for role, value in {
+        for role_name, value in {
             "Window": colors.background,
             "Base": colors.surface,
             "AlternateBase": colors.surface_subtle,
@@ -625,7 +625,7 @@ if PYSIDE6_AVAILABLE:
             "ToolTipBase": colors.surface,
             "ToolTipText": colors.text_primary,
         }.items():
-            result.setColor(getattr(QPalette.ColorRole, role), QColor(value))
+            result.setColor(getattr(QPalette.ColorRole, role_name), QColor(value))
         for role in (
             QPalette.ColorRole.WindowText,
             QPalette.ColorRole.Text,

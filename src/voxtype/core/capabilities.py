@@ -5,6 +5,12 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from importlib.util import find_spec
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from voxtype.asr.transcription_queue import FileTranscriptionQueue
+    from voxtype.core.controller import ApplicationController
+    from voxtype.transcript.enhancer import LocalTextEnhancer
 
 
 @dataclass(frozen=True, slots=True)
@@ -15,7 +21,12 @@ class Capability:
 
 class CapabilityRegistry:
     @staticmethod
-    def snapshot(controller, *, file_queue=None, enhancer=None) -> dict[str, Capability]:
+    def snapshot(
+        controller: ApplicationController,
+        *,
+        file_queue: FileTranscriptionQueue | None = None,
+        enhancer: LocalTextEnhancer | None = None,
+    ) -> dict[str, Capability]:
         policy = controller.policy
         model_id = controller.backend.model_id
         matching_model = controller._model_available and policy.model_allowed(model_id)

@@ -5,12 +5,14 @@ from __future__ import annotations
 import contextlib
 import ctypes
 import os
+from collections.abc import Callable
 from ctypes import wintypes
 from dataclasses import dataclass, replace
 from pathlib import Path
 from queue import Empty, Queue
 from threading import Lock, Thread
 from time import monotonic
+from typing import Any, cast
 
 from voxtype.windows.foreground import (
     _GUI_THREAD_INFO,
@@ -172,7 +174,7 @@ class ForegroundContextProvider:
         import comtypes
         from comtypes.client import CreateObject, GetModule
 
-        comtypes.CoInitialize()
+        cast(Callable[[], None], comtypes.CoInitialize)()
         try:
             types = GetModule(str(Path(os.environ["SYSTEMROOT"]) / "System32/UIAutomationCore.dll"))
             automation = CreateObject(types.CUIAutomation, interface=types.IUIAutomation)
@@ -185,7 +187,7 @@ class ForegroundContextProvider:
             if element.CurrentIsPassword:
                 return replace(native, is_password=True, password_checked=True)
 
-            def pattern(identifier: int):
+            def pattern(identifier: int) -> Any:
                 try:
                     return element.GetCurrentPattern(identifier)
                 except OSError:
@@ -234,4 +236,4 @@ class ForegroundContextProvider:
                 password_checked=True,
             )
         finally:
-            comtypes.CoUninitialize()
+            cast(Callable[[], None], comtypes.CoUninitialize)()

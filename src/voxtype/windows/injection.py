@@ -273,7 +273,7 @@ class PendingTextQueue:
         self._stream = self._new_stream()
         self._read_offset = 0
 
-    def _new_stream(self):
+    def _new_stream(self) -> io.BytesIO | tempfile.SpooledTemporaryFile[bytes]:
         if not self._allow_disk:
             return io.BytesIO()
         return tempfile.SpooledTemporaryFile(max_size=self._memory_limit_bytes, mode="w+b")

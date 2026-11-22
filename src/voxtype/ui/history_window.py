@@ -10,7 +10,7 @@ from .models import HistoryEntry, format_duration, history_entry_from
 
 if PYSIDE6_AVAILABLE:
     from PySide6.QtCore import Qt, QTimer, Signal
-    from PySide6.QtGui import QGuiApplication
+    from PySide6.QtGui import QGuiApplication, QResizeEvent
     from PySide6.QtWidgets import (
         QDialog,
         QHBoxLayout,
@@ -40,6 +40,11 @@ if PYSIDE6_AVAILABLE:
     from .widgets import Card
 
     class HistoryWindow(QDialog):
+        application_filter: VoxTextField
+        profile_filter: VoxTextField
+        since_filter: VoxTextField
+        until_filter: VoxTextField
+
         refresh_requested = Signal()
         outbox_requested = Signal()
         export_requested = Signal(str)
@@ -53,7 +58,7 @@ if PYSIDE6_AVAILABLE:
             self.setObjectName("historyWindow")
             self.setWindowTitle("История диктовки — VoxType")
             self.resize(1000, 650)
-            self.setMinimumSize(980, 520)
+            self.setMinimumSize(640, 480)
             self._entries: dict[str, HistoryEntry] = {}
             self._detail_session_id: str | None = None
             self._page = 0
@@ -275,7 +280,7 @@ if PYSIDE6_AVAILABLE:
             self.refresh_button.setEnabled(not loading)
             self.loading_indicator.setVisible(loading)
 
-        def resizeEvent(self, event: object) -> None:
+        def resizeEvent(self, event: QResizeEvent) -> None:
             super().resizeEvent(event)
             orientation = (
                 Qt.Orientation.Vertical if self.width() < 800 else Qt.Orientation.Horizontal

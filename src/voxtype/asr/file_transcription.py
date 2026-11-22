@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from voxtype.asr.base import ASRBackend, LanguageCode
+    from voxtype.audio.models import FloatAudio
 
 MEDIA_EXTENSIONS = {".wav", ".mp3", ".m4a", ".flac"}
 EXPORT_EXTENSIONS = {".txt", ".json", ".srt", ".vtt", ".docx"}
@@ -98,7 +99,7 @@ class FileTranscriptionService:
             if cancel.is_set():
                 raise TranscriptionCanceled()
 
-        def recognize(samples) -> None:
+        def recognize(samples: FloatAudio) -> None:
             nonlocal offset
             check_cancel()
             if offset + samples.size > SAMPLE_RATE * MAX_AUDIO_SECONDS:
@@ -119,11 +120,11 @@ class FileTranscriptionService:
                     segments.append(FileSegment(segment.start, segment.end, caption))
             offset += samples.size
 
-        def consume(frames) -> None:
+        def consume(frames: list[av.AudioFrame]) -> None:
             nonlocal fill
             for frame in frames:
                 check_cancel()
-                samples = frame.to_ndarray().reshape(-1)
+                samples: FloatAudio = frame.to_ndarray().astype(np.float32, copy=False).reshape(-1)
                 while samples.size:
                     count = min(samples.size, block.size - fill)
                     block[fill : fill + count] = samples[:count]

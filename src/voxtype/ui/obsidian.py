@@ -9,18 +9,35 @@ from functools import lru_cache
 from itertools import chain, repeat
 from typing import ClassVar
 
-from PySide6.QtCore import QEasingCurve, QEvent, QPointF, QRectF, QSize, Qt, QTimer
+from PySide6.QtCore import (
+    QDynamicPropertyChangeEvent,
+    QEasingCurve,
+    QEvent,
+    QPoint,
+    QPointF,
+    QRectF,
+    QSize,
+    Qt,
+    QTimer,
+)
 from PySide6.QtGui import (
     QBrush,
     QColor,
+    QEnterEvent,
+    QFocusEvent,
     QFont,
     QFontDatabase,
+    QHideEvent,
     QIcon,
+    QMouseEvent,
     QPainter,
     QPainterPath,
+    QPaintEvent,
     QPalette,
     QPen,
     QPixmap,
+    QResizeEvent,
+    QShowEvent,
 )
 from PySide6.QtWidgets import (
     QApplication,
@@ -248,16 +265,16 @@ class VoxButton(QPushButton):
         self._ripple = value
         self.update()
 
-    def mousePressEvent(self, event: object) -> None:
+    def mousePressEvent(self, event: QMouseEvent) -> None:
         self._press_origin = event.position()
         super().mousePressEvent(event)
         self._press_origin = None
 
-    def enterEvent(self, event: object) -> None:
+    def enterEvent(self, event: QEnterEvent) -> None:
         super().enterEvent(event)
         self._refresh_color()
 
-    def leaveEvent(self, event: object) -> None:
+    def leaveEvent(self, event: QEvent) -> None:
         super().leaveEvent(event)
         self._refresh_color()
 
@@ -268,18 +285,18 @@ class VoxButton(QPushButton):
 
     def event(self, event: QEvent) -> bool:
         if (
-            event.type() == QEvent.Type.DynamicPropertyChange
+            isinstance(event, QDynamicPropertyChangeEvent)
             and hasattr(self, "_fill")
             and event.propertyName() in (b"primary", b"danger", b"flat", b"navRow")
         ):
             self._refresh_color()
         return super().event(event)
 
-    def showEvent(self, event: object) -> None:
+    def showEvent(self, event: QShowEvent) -> None:
         super().showEvent(event)
         self._theme_changed()
 
-    def paintEvent(self, _event: object) -> None:
+    def paintEvent(self, _event: QPaintEvent) -> None:
         options = QStyleOptionButton()
         self.initStyleOption(options)
         theme = theme_manager(QApplication.instance())
@@ -399,16 +416,16 @@ class VoxToggle(QCheckBox):
             self, self._position, float(checked), self._move_thumb, motion.SWITCH, channel="thumb"
         )
 
-    def sizeHint(self):
+    def sizeHint(self) -> QSize:
         hint = super().sizeHint()
         hint.setWidth(hint.width() + 25)
         return hint
 
-    def _move_thumb(self, value: object) -> None:
+    def _move_thumb(self, value: float) -> None:
         self._position = float(value)
         self.update()
 
-    def paintEvent(self, _event: object) -> None:
+    def paintEvent(self, _event: QPaintEvent) -> None:
         manager = theme_manager(QApplication.instance())
         option = QStyleOptionButton()
         self.initStyleOption(option)
@@ -440,7 +457,7 @@ class VoxToggle(QCheckBox):
         option.rect = option.rect.adjusted(43, 0, 0, 0)
         self.style().drawControl(QStyle.ControlElement.CE_CheckBoxLabel, option, paint, self)
 
-    def hitButton(self, position: object) -> bool:
+    def hitButton(self, position: QPoint) -> bool:
         return self.rect().contains(position)
 
 
@@ -482,15 +499,15 @@ class VoxTextField(QLineEdit):
             self, "_focus_border", self._focus_border, target, coordinator.HOVER
         )
 
-    def focusInEvent(self, event: object) -> None:
+    def focusInEvent(self, event: QFocusEvent) -> None:
         super().focusInEvent(event)
         self._update_border()
 
-    def focusOutEvent(self, event: object) -> None:
+    def focusOutEvent(self, event: QFocusEvent) -> None:
         super().focusOutEvent(event)
         self._update_border()
 
-    def paintEvent(self, event: object) -> None:
+    def paintEvent(self, event: QPaintEvent) -> None:
         super().paintEvent(event)
         if not self.isEnabled():
             return
@@ -525,11 +542,11 @@ class VoxBusyIndicator(QProgressBar):
             self.setRange(0, 4)
             self.setValue(1)
 
-    def showEvent(self, event: object) -> None:
+    def showEvent(self, event: QShowEvent) -> None:
         super().showEvent(event)
         self._sync_animation()
 
-    def hideEvent(self, event: object) -> None:
+    def hideEvent(self, event: QHideEvent) -> None:
         self.setRange(0, 4)
         self.setValue(1)
         super().hideEvent(event)
@@ -561,13 +578,13 @@ class VoxSettingRow(QWidget):
         row.addLayout(captions, 1)
         row.addWidget(control, 1)
 
-    def enterEvent(self, event: object) -> None:
+    def enterEvent(self, event: QEnterEvent) -> None:
         super().enterEvent(event)
         shade = QColor(theme_manager(QApplication.instance()).get_token("surface_hover"))
         shade.setAlpha(150)
         self._fade(shade)
 
-    def leaveEvent(self, event: object) -> None:
+    def leaveEvent(self, event: QEvent) -> None:
         super().leaveEvent(event)
         self._fade(QColor(0, 0, 0, 0))
 
@@ -575,7 +592,7 @@ class VoxSettingRow(QWidget):
         motion = AnimationCoordinator.instance()
         motion.animate_color(self, "_highlight", self._highlight, color, motion.HOVER)
 
-    def paintEvent(self, _event: object) -> None:
+    def paintEvent(self, _event: QPaintEvent) -> None:
         paint = QPainter(self)
         paint.setRenderHint(QPainter.RenderHint.Antialiasing)
         paint.setBrush(self._highlight)
@@ -726,7 +743,7 @@ class WaveformWidget(QWidget):
             self._last = 0.0
             self.update()
 
-    def paintEvent(self, _event: object) -> None:
+    def paintEvent(self, _event: QPaintEvent) -> None:
         paint = QPainter(self)
         paint.setRenderHint(QPainter.RenderHint.Antialiasing)
         paint.setPen(Qt.PenStyle.NoPen)
@@ -758,7 +775,7 @@ class VoiceHalo(QWidget):
             self._recording = recording
             self.update()
 
-    def paintEvent(self, _event: object) -> None:
+    def paintEvent(self, _event: QPaintEvent) -> None:
         if not self._recording:
             return
         paint = QPainter(self)
@@ -796,7 +813,7 @@ class _ToastSlot(QWidget):
         self._offset = value
         self.card.move(self._offset, 0)
 
-    def resizeEvent(self, event: object) -> None:
+    def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
         self.card.resize(self.size())
         self.card.move(self._offset, 0)
@@ -828,9 +845,12 @@ class NotificationCenter(QWidget):
         slot = self.items.get(key)
         motion = AnimationCoordinator.instance()
         if slot is not None:
-            slot.card.findChild(QLabel, "toastText").setText(f"{heading} · {text}")
+            label = slot.card.findChild(QLabel, "toastText")
+            if label is not None:
+                label.setText(f"{heading} · {text}")
             more = slot.card.findChild(QPushButton, "toastDetails")
-            more.setVisible(bool(details))
+            if more is not None:
+                more.setVisible(bool(details))
             if key in self.timers:
                 self.timers[key].start()
             if key in self._exiting:
@@ -930,7 +950,9 @@ class NotificationCenter(QWidget):
 
     def reposition(self) -> None:
         self.adjustSize()
-        self.move(max(0, self.parentWidget().width() - self.width() - 16), 72)
+        parent = self.parentWidget()
+        if parent is not None:
+            self.move(max(0, parent.width() - self.width() - 16), 72)
         self.raise_()
 
     def _show_details(self, title: str, text: str, details: str) -> None:
@@ -941,14 +963,14 @@ class NotificationCenter(QWidget):
 
 
 class VoxDialog(QDialog):
-    def showEvent(self, event: object) -> None:
+    def showEvent(self, event: QShowEvent) -> None:
         super().showEvent(event)
         motion = AnimationCoordinator.instance()
         motion.animate_opacity(self, 0.70, 1.0, motion.MODAL)
 
 
 class VoxMessageBox(QMessageBox):
-    def showEvent(self, event: object) -> None:
+    def showEvent(self, event: QShowEvent) -> None:
         super().showEvent(event)
         motion = AnimationCoordinator.instance()
         motion.animate_opacity(self, 0.70, 1.0, motion.MODAL)

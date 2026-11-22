@@ -18,6 +18,7 @@ from voxtype.asr.profiles import ASRProfile, get_profile
 from voxtype.monitoring.hardware import probe_hardware
 from voxtype.monitoring.health import run_health_checks
 from voxtype.runtime import build_runtime, data_directory_path, install_silero_vad
+from voxtype.settings.updates import StagedUpdate
 from voxtype.version import __version__, version_info
 
 
@@ -138,7 +139,7 @@ def main(argv: list[str] | None = None) -> int:
     if not guard.acquire():
         guard.activate_existing()
         return 0
-    staged_updates = []
+    staged_updates: list[StagedUpdate] = []
     try:
         exit_code = run_desktop(verbose=arguments.verbose, on_installer=staged_updates.append)
     finally:

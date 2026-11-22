@@ -8,7 +8,7 @@ import json
 import re
 import threading
 import unicodedata
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from typing import Any, ClassVar
@@ -172,8 +172,8 @@ def _normalize(text: str) -> str:
     return unicodedata.normalize("NFC", text).replace("\r\n", "\n").replace("\r", "\n")
 
 
-def _outside_protected(text: str, change) -> str:
-    parts = []
+def _outside_protected(text: str, change: Callable[[str], str]) -> str:
+    parts: list[str] = []
     index = 0
     for match in _PROTECTED.finditer(text):
         parts.extend((change(text[index : match.start()]), match[0]))
@@ -198,7 +198,7 @@ class TechnicalTermProtection:
             r"|[.][A-Za-z][A-Za-z0-9]{1,7})(?![A-Za-z0-9_])"
         )
 
-    def apply(self, text: str, change) -> str:
+    def apply(self, text: str, change: Callable[[str], str]) -> str:
         patterns = (
             (_PROTECTED, self._syntax)
             if self._exact is None
@@ -225,7 +225,10 @@ class TechnicalTermProtection:
         return "".join(result)
 
 
-def _unambiguous(rules):
+type LiteralRule = tuple[str, str, bool, bool, int, bool]
+
+
+def _unambiguous(rules: list[LiteralRule]) -> list[LiteralRule]:
     replacements: dict[str, set[str]] = {}
     for pattern, replacement, *_rest in rules:
         replacements.setdefault(pattern.casefold(), set()).add(replacement)
@@ -309,7 +312,7 @@ class VocabularyPromptBuilder:
     @staticmethod
     def build(words: Iterable[str], budget: int = 240) -> tuple[str, ...]:
         seen: set[str] = set()
-        result = []
+        result: list[str] = []
         remaining = max(0, min(int(budget), MAX_HINT_CHARACTERS))
         for term in words:
             value = " ".join(unicodedata.normalize("NFC", term).split())
@@ -330,7 +333,8 @@ def _literal_rules(
     ordered = sorted(rules, key=lambda rule: (-len(rule[0]), -rule[4]))
     if not ordered:
         return text
-    expressions, replacements = [], []
+    expressions: list[str] = []
+    replacements: list[tuple[str, bool]] = []
     for pattern, replacement, sensitive, whole, _priority, preserve in ordered:
         literal = re.escape(pattern)
         literal = literal if sensitive else f"(?i:{literal})"
@@ -691,8 +695,10 @@ class ProfessionalContent:
         if not isinstance(rows, list) or len(rows) > 500:
             raise ValueError("Коллекция должна содержать до 500 записей")
         parsed = []
-        seen = set()
+        seen: set[str | tuple[str, ...]] = set()
+        triggers: dict[str, set[str]] = {}
         for raw in rows:
+            key: str | tuple[str, ...]
             if collection == "dictionary" and isinstance(raw, str):
                 raw = {"canonical_text": raw}
             if not isinstance(raw, dict):
@@ -766,7 +772,7 @@ class ProfessionalContent:
                     "replacements",
                 }:
                     raise ValueError("Выберите существующую панель VoxType")
-                trigger = ("trigger", item.command_set_id, _trigger(item.trigger))
+                trigger = _trigger(item.trigger)
                 builtin = VoiceCommandRouter.route(
                     item.trigger,
                     DictationProfile("developer", "Developer", formatting_mode="code"),
@@ -774,20 +780,14 @@ class ProfessionalContent:
                     activation="",
                     command_mode=True,
                 )
-                if item.enabled and (
-                    builtin is not None
-                    or any(
-                        isinstance(entry, tuple)
-                        and len(entry) == 3
-                        and entry[0] == "trigger"
-                        and entry[2] == trigger[2]
-                        and (not entry[1] or not trigger[1] or entry[1] == trigger[1])
-                        for entry in seen
-                    )
-                ):
-                    raise ValueError("Конфликт голосовых фраз")
                 if item.enabled:
-                    seen.add(trigger)
+                    prior_sets = triggers.setdefault(trigger, set())
+                    if builtin is not None or any(
+                        not existing or not item.command_set_id or existing == item.command_set_id
+                        for existing in prior_sets
+                    ):
+                        raise ValueError("Конфликт голосовых фраз")
+                    prior_sets.add(item.command_set_id)
             if collection == "replacements" and (
                 item.match_type != "literal" or not item.pattern.strip() or len(item.pattern) > 120
             ):

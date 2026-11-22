@@ -99,7 +99,7 @@ class KeyboardHold:
                             self._consume_key_up = True
                             self._changed(True)
                             return 1
-        return self._user32.CallNextHookEx(None, code, message, address)
+        return int(self._user32.CallNextHookEx(None, code, message, address))
 
     def close(self) -> None:
         if self._handle:

@@ -13,12 +13,14 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 from queue import Empty, Full, Queue
+from typing import TYPE_CHECKING
 
 import numpy as np
 
 from voxtype.asr.base import (
     ASRBackend,
     ASRModelUnavailable,
+    LanguageCode,
     TranscriptionRequest,
     TranscriptionResult,
     TranscriptionSegment,
@@ -85,6 +87,9 @@ from voxtype.windows.injection import DeliveryStatus, InjectionStatus, TextInjec
 from voxtype.windows.input_context import ForegroundContext, ForegroundContextProvider
 from voxtype.windows.selection import SelectedText, SelectionProvider, SelectionUnavailable
 from voxtype.windows.target_window import TargetStatus, TargetWindowManager
+
+if TYPE_CHECKING:
+    from voxtype.asr.file_transcription import FileTranscript
 
 CaptureFactory = Callable[[LosslessAudioQueue], AudioCaptureService]
 SegmenterFactory = Callable[[], StreamingSegmenter]
@@ -1896,7 +1901,7 @@ class ApplicationController:
 
     def transcribe_professional_file(
         self, source: Path, profile_id: str, language: str, job_id: str
-    ):
+    ) -> FileTranscript:
         from voxtype.asr.file_transcription import FileTranscriptionService
 
         profile = next(
@@ -1913,14 +1918,15 @@ class ApplicationController:
         if profile.model_id and profile.model_id != backend.model_id:
             if self.profile_backend_factory is None:
                 raise ASRModelUnavailable("Profile model is unavailable")
-            previous = self._file_backend
-            if previous is None or previous.model_id != profile.model_id:
-                if previous is not None:
-                    previous.unload()
-                self._file_backend = self.profile_backend_factory(profile.model_id)
-            backend = self._file_backend
+            alternate = self._file_backend
+            if alternate is None or alternate.model_id != profile.model_id:
+                if alternate is not None:
+                    alternate.unload()
+                alternate = self.profile_backend_factory(profile.model_id)
+                self._file_backend = alternate
+            backend = alternate
         language_preference = language if language in {"ru", "en"} else profile.language
-        selected_language = "en" if language_preference == "en" else "ru"
+        selected_language: LanguageCode = "en" if language_preference == "en" else "ru"
         pipeline = self.professional_content.snapshot()
         context = DictationContext(selection_mode="file", profile_id=profile.id)
         request = pipeline.request(

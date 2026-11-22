@@ -49,12 +49,14 @@ from voxtype.audio.calibration import (
 from voxtype.audio.capture import AudioCaptureConfig, AudioCaptureService
 from voxtype.audio.devices import (
     AudioBackendUnavailable,
+    InputDevice,
     choose_capture_channels,
     choose_capture_rate,
     list_input_devices,
     match_input_device,
     resolve_recording_device,
 )
+from voxtype.audio.models import AudioInputObservation
 from voxtype.audio.preprocessing import (
     PreprocessingProfile as AudioPreprocessingProfile,
 )
@@ -64,8 +66,15 @@ from voxtype.audio.recovery import AudioDeviceReconciler, RecoveryCoordinator, R
 from voxtype.audio.resampler import resample_audio
 from voxtype.audio.spool import LosslessAudioQueue
 from voxtype.core.compute_budget import MemoryPolicy, PerformanceProfile, ResourcePhase
+from voxtype.core.controller import CaptureFactory
 from voxtype.core.gestures import DictationGestureController, DictationMode
-from voxtype.core.models import AppPhase, AppReadiness, Language, RecognitionStatus
+from voxtype.core.models import (
+    AppPhase,
+    AppReadiness,
+    ControllerSnapshot,
+    Language,
+    RecognitionStatus,
+)
 from voxtype.core.profiles import DictationProfile
 from voxtype.monitoring.assistant import DiagnosticAction, diagnostic_findings
 from voxtype.monitoring.hardware import probe_hardware
@@ -79,9 +88,11 @@ from voxtype.runtime import (
     install_silero_vad,
 )
 from voxtype.sessions.backup import BackupManager
-from voxtype.settings.schema import AppSettings
+from voxtype.sessions.repository import OutboxItem, SessionRecord
+from voxtype.settings.schema import AppSettings, HotkeySettings
 from voxtype.settings.updates import (
     StagedUpdate,
+    UpdateInfo,
     UpdateMetadataClient,
     UpdatesUnavailable,
     update_configuration_status,
@@ -110,12 +121,12 @@ from voxtype.vad.segmenter import SegmentationSettings, StreamingSegmenter
 from voxtype.vad.silero import SileroVAD
 from voxtype.version import __version__, version_info
 from voxtype.windows.device_events import DeviceEvent, DeviceEventType, WindowsSystemEventBridge
-from voxtype.windows.foreground import capture_foreground
+from voxtype.windows.foreground import capture_foreground, get_foreground_hwnd
 from voxtype.windows.foreground_events import ForegroundEvents
-from voxtype.windows.hotkeys import GlobalHotkeyManager, parse_hotkey
+from voxtype.windows.hotkeys import GlobalHotkeyManager, Hotkey, parse_hotkey
 from voxtype.windows.local_automation import AutomationRejected, LocalAutomation
 from voxtype.windows.power_events import PowerEventCoordinator
-from voxtype.windows.send_input import SendInputController
+from voxtype.windows.send_input import SendInputController, SendInputError
 from voxtype.windows.single_instance import WM_VOXTYPE_RESTORE
 from voxtype.windows.target_window import TargetPolicy
 
@@ -225,10 +236,14 @@ class _StartupRestoreFilter(QAbstractNativeEventFilter):
         super().__init__()
         self._main = main
 
-    def nativeEventFilter(self, event_type, message):
+    def nativeEventFilter(
+        self, event_type: QByteArray | bytes | bytearray | memoryview[int], message: int
+    ) -> tuple[bool, int]:
         from ctypes import wintypes
 
-        if b"windows" in bytes(event_type):
+        if b"windows" in (
+            event_type.data() if isinstance(event_type, QByteArray) else bytes(event_type)
+        ):
             native = wintypes.MSG.from_address(int(message))
             if int(native.message) == WM_VOXTYPE_RESTORE:
                 QTimer.singleShot(0, self._main, self._show)
@@ -817,7 +832,7 @@ class DesktopApplication:
         if self._overlay is not None:
             self._overlay.hide()
 
-    def _update_views_if_changed(self, snapshot: object) -> None:
+    def _update_views_if_changed(self, snapshot: ControllerSnapshot) -> None:
         profiles = self.controller.profiles
         active_profile = getattr(self.controller, "_session_profile", None)
         state = getattr(snapshot, "state", "")
@@ -852,7 +867,8 @@ class DesktopApplication:
         self._observe_practice(snapshot)
         self._observe_scratchpad(snapshot)
         if self._settings_window is not None and self._settings_window.isVisible():
-            self._refresh_model_cards(snapshot.readiness.phase.value)
+            if snapshot.readiness is not None:
+                self._refresh_model_cards(snapshot.readiness.phase.value)
             self._settings_window.update_audio_quality(
                 snapshot.audio_quality, snapshot.microphone_name
             )
@@ -1059,7 +1075,7 @@ class DesktopApplication:
             threading.Thread(target=flush_worker, name="voxtype-pending-flush", daemon=True).start()
         phase = self.controller.resource_phase
         self._update_idle_model_timer(phase)
-        if snapshot.readiness.phase is AppPhase.RECORDING:
+        if snapshot.readiness is not None and snapshot.readiness.phase is AppPhase.RECORDING:
             interval = 34
         elif phase in {ResourcePhase.ACTIVE, ResourcePhase.QUIESCING, ResourcePhase.INITIALIZING}:
             interval = 250
@@ -1139,7 +1155,7 @@ class DesktopApplication:
             self._request_device_recovery()
 
     def _retry_recording(self) -> None:
-        if self.controller.snapshot().readiness.reason == "microphone_missing":
+        if self.controller.recording_readiness().reason == "microphone_missing":
             self._request_device_recovery()
             return
         if self._recovery.state in {RecoveryState.NEEDS_USER_ACTION, RecoveryState.FAILED}:
@@ -1188,7 +1204,7 @@ class DesktopApplication:
             self._recovery_scanning = False
             self._schedule_device_recovery()
 
-    def _apply_recovered_devices(self, generation: int, devices: tuple) -> None:
+    def _apply_recovered_devices(self, generation: int, devices: tuple[InputDevice, ...]) -> None:
         self._recovery_scanning = False
         if self._closing or self._system_locked or self._system_sleeping:
             return
@@ -1228,12 +1244,12 @@ class DesktopApplication:
         self,
         *,
         strict: bool = True,
-        settings: object = None,
+        settings: HotkeySettings | None = None,
         mode: DictationMode | None = None,
     ) -> bool:
         values = settings if settings is not None else self.runtime.settings.hotkeys
         mode = mode or self.runtime.settings.dictation.mode
-        definitions = (
+        definitions: tuple[tuple[str, str, Callable[[], object]], ...] = (
             (values.language, "toggle_language", self.controller.switch_language),
             (values.pause, "toggle_pause", self.controller.toggle_pause),
         )
@@ -1242,11 +1258,14 @@ class DesktopApplication:
                 (values.toggle, "toggle_dictation", self._toggle_interactive_dictation),
                 *definitions,
             )
-        callbacks = {}
-        for _specification, name, callback in definitions:
-            callbacks[name] = lambda _hotkey, fn=callback, key=name: self._invoke_ui(
-                f"hotkey.{key}", fn
-            )
+
+        def callback_for(fn: Callable[[], object], name: str) -> Callable[[Hotkey], None]:
+            def invoke(_hotkey: Hotkey) -> None:
+                self._invoke_ui(f"hotkey.{name}", fn)
+
+            return invoke
+
+        callbacks = {name: callback_for(callback, name) for _, name, callback in definitions}
         hold = None
         try:
             requested = tuple(
@@ -1452,7 +1471,7 @@ class DesktopApplication:
                     lambda: self.controller.profiles.set_default(profiles[titles.index(name)].id),
                 )
 
-        entries = [
+        entries: list[tuple[str, Callable[[], object]]] = [
             ("Начать или остановить диктовку", self.main.dictation_button.click),
             ("Открыть историю", self.show_history),
             ("Выбрать профиль", choose_profile),
@@ -1665,9 +1684,8 @@ class DesktopApplication:
             )
         if automation is not None:
             automation.configure(enabled)
-        if (
-            self._automation_session is not None
-            and (not enabled or self.runtime.settings.privacy.local_api_allow_recording is not True)
+        if self._automation_session is not None and (
+            not enabled or self.runtime.settings.privacy.local_api_allow_recording is not True
         ):
             if self.controller.recording_readiness().session_id == self._automation_session:
                 self.controller.stop_dictation()
@@ -2054,7 +2072,7 @@ class DesktopApplication:
         )
         window.set_models(models, selected)
         self._installed_model_sizes = installed
-        self._refresh_model_cards(self.controller.snapshot().readiness.phase.value)
+        self._refresh_model_cards(self.controller.recording_readiness().phase.value)
         window.gpu_experimental_check.setChecked(False)
         window.gpu_experimental_check.setEnabled(False)
 
@@ -2091,7 +2109,10 @@ class DesktopApplication:
                 if active and identifier in installed
                 else "Установлена"
                 if identifier in installed
-                else integrity_labels.get(self._model_integrity.get(identifier), "Не установлена")
+                else integrity_labels.get(
+                    self._model_integrity.get(identifier, ModelIntegrityState.MISSING),
+                    "Не установлена",
+                )
             )
             cards.append(
                 (
@@ -2190,23 +2211,25 @@ class DesktopApplication:
         if isinstance(audio, dict) and "device_id" in audio:
             audio = dict(audio)
             index = audio["device_id"]
-            selected = next((item for item in self.runtime.devices if item.index == index), None)
+            selected_device = next(
+                (item for item in self.runtime.devices if item.index == index), None
+            )
             previous_audio = self.runtime.settings.audio
             if index is None:
                 audio["device_fingerprint"] = ""
                 audio["device_endpoint_id"] = ""
-            elif selected is not None and (
+            elif selected_device is not None and (
                 index != previous_audio.device_id
                 or not previous_audio.device_fingerprint
-                or selected.fingerprint == previous_audio.device_fingerprint
+                or selected_device.fingerprint == previous_audio.device_fingerprint
             ):
-                audio["device_fingerprint"] = selected.fingerprint
+                audio["device_fingerprint"] = selected_device.fingerprint
                 if (
                     not previous_audio.device_endpoint_id
-                    or selected.endpoint_id == previous_audio.device_endpoint_id
+                    or selected_device.endpoint_id == previous_audio.device_endpoint_id
                     or index != previous_audio.device_id
                 ):
-                    audio["device_endpoint_id"] = selected.endpoint_id or ""
+                    audio["device_endpoint_id"] = selected_device.endpoint_id or ""
             values["audio"] = audio
         policy = self.controller.policy
         if isinstance(values.get("privacy"), dict):
@@ -2313,7 +2336,8 @@ class DesktopApplication:
         self.controller.settings = updated
         if (
             updated.privacy.local_api_enabled != previous.privacy.local_api_enabled
-            or updated.privacy.local_api_allow_recording != previous.privacy.local_api_allow_recording
+            or updated.privacy.local_api_allow_recording
+            != previous.privacy.local_api_allow_recording
         ):
             self._sync_local_automation()
         self.controller.set_language(updated.dictation.language, persist=False)
@@ -2398,7 +2422,7 @@ class DesktopApplication:
 
     def _capture_factory_for(
         self, selected_index: int | None, fingerprint: str, endpoint: str = ""
-    ):
+    ) -> CaptureFactory:
         profile = AudioPreprocessingProfile(self.runtime.settings.audio.preprocessing_profile.value)
         processing = select_preprocessing(
             self.runtime.settings.audio.preprocessing_mode,
@@ -2472,15 +2496,19 @@ class DesktopApplication:
         button.setEnabled(allowed)
         button.setToolTip(reason)
 
-    def _confirm_update_download(self, client, release) -> None:
+    def _confirm_update_download(
+        self, client: UpdateMetadataClient | None, release: UpdateInfo | str | None
+    ) -> None:
         self._update_busy = False
         if self._closing:
             return
         if client is None:
-            self._show_data_status(release, False)
+            self._show_data_status(str(release or "Проверка обновления недоступна."), False)
             return
         if release is None:
             self._show_data_status("Подходящих обновлений в выбранном канале нет.", True)
+            return
+        if not isinstance(release, UpdateInfo):
             return
         if (
             QMessageBox.question(
@@ -2673,7 +2701,9 @@ class DesktopApplication:
 
         self._run_background("voxtype-personal-import-preview", stage)
 
-    def _confirm_personal_import(self, path: Path, changes: dict, summary: tuple[str, ...]) -> None:
+    def _confirm_personal_import(
+        self, path: Path, changes: dict[str, Any], summary: tuple[str, ...]
+    ) -> None:
         if self._closing or self._settings_write_running:
             return
         lines = "\n".join(
@@ -2757,7 +2787,7 @@ class DesktopApplication:
 
         self._run_background("voxtype-delivery-outbox", load)
 
-    def _show_delivery_outbox(self, entries: tuple) -> None:
+    def _show_delivery_outbox(self, entries: tuple[OutboxItem, ...]) -> None:
         if (
             self._closing
             or self.controller.policy.disable_history
@@ -2860,7 +2890,9 @@ class DesktopApplication:
             self._history_loading = False
             self.history_window.set_loading(False)
 
-    def _on_history_ready(self, revision: int, result: tuple | None) -> None:
+    def _on_history_ready(
+        self, revision: int, result: tuple[tuple[SessionRecord, ...], bool] | None
+    ) -> None:
         self._history_loading = False
         if self._closing or self._closed:
             self.history_window.set_loading(False)
@@ -3252,7 +3284,7 @@ class DesktopApplication:
         cancel = self._model_download_cancel = threading.Event()
         self._downloading_model = spec.model_id
         self._failed_model = None
-        self._refresh_model_cards(self.controller.snapshot().readiness.phase.value)
+        self._refresh_model_cards(self.controller.recording_readiness().phase.value)
         if self.main.shell.current in {"settings", "models"} and self._settings_window is not None:
             if self._model_download_dialog is not None:
                 self._model_download_dialog.show()
@@ -3332,7 +3364,7 @@ class DesktopApplication:
         self._failed_model = None if ready else model_id
         if self._closing:
             return
-        self._refresh_model_cards(self.controller.snapshot().readiness.phase.value)
+        self._refresh_model_cards(self.controller.recording_readiness().phase.value)
         if self._model_download_dialog is not None:
             self._model_download_dialog.close()
             self._model_download_dialog.deleteLater()
@@ -3436,7 +3468,7 @@ class DesktopApplication:
                     int(device_text) if device_text else None, self.runtime.devices
                 )
 
-                def display(observation) -> None:
+                def display(observation: AudioInputObservation) -> None:
                     if not cancel.is_set():
                         clipping = observation.clipping_ratio * 100.0
                         message = (
@@ -3551,21 +3583,23 @@ class DesktopApplication:
             ),
         ):
             self.signals.phrase_ready.emit(
-                language, self.controller.snapshot().readiness.message, False
+                language, self.controller.recording_readiness().message, False
             )
             return
-        identifier = self.controller.snapshot().readiness.session_id
+        identifier = self.controller.recording_readiness().session_id
         if identifier is not None:
             self._practice = (language, identifier)
             wizard.set_phrase_result(language, "Подготовка микрофона…", False)
 
-    def _observe_practice(self, snapshot: object) -> None:
+    def _observe_practice(self, snapshot: ControllerSnapshot) -> None:
         entry = self._practice
         if entry is None:
             return
         language, identifier = entry
         state = snapshot.state
         readiness = snapshot.readiness
+        if readiness is None:
+            return
         if readiness.session_id == identifier and state in {
             "LISTENING",
             "SPEECH_DETECTED",
@@ -3593,7 +3627,7 @@ class DesktopApplication:
     def _stop_practice(self) -> None:
         if (
             self._practice is not None
-            and self.controller.snapshot().readiness.session_id == self._practice[1]
+            and self.controller.recording_readiness().session_id == self._practice[1]
         ):
             self.controller.stop_dictation()
 
@@ -3602,7 +3636,29 @@ class DesktopApplication:
             self.onboarding.set_phrase_result(language, text, ok)
 
     def _test_insertion(self, text: str) -> None:
-        QTimer.singleShot(120, lambda: SendInputController().send_unicode(text))
+        wizard = self.onboarding
+        if wizard is None or text != wizard.INSERTION_TEST_TEXT:
+            return
+
+        def owns_focus() -> bool:
+            return (
+                not self._closing
+                and self.onboarding is wizard
+                and wizard.isVisible()
+                and wizard.insertion_edit.hasFocus()
+                and get_foreground_hwnd() == int(wizard.winId())
+            )
+
+        def send() -> None:
+            try:
+                if owns_focus():
+                    SendInputController().send_unicode(text, validate=owns_focus)
+                    return
+            except (OSError, SendInputError):
+                pass
+            wizard.insertion_status.setText("Верните фокус в тестовое поле и повторите проверку.")
+
+        QTimer.singleShot(120, wizard, send)
 
     def _complete_onboarding(self, values: object) -> None:
         if not isinstance(values, dict):

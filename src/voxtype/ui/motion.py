@@ -68,10 +68,12 @@ class AnimationCoordinator(QObject):
     @classmethod
     def instance(cls) -> AnimationCoordinator:
         application = QApplication.instance()
+        if not isinstance(application, QApplication):
+            raise RuntimeError("VoxType motion requires QApplication")
         coordinator = getattr(application, "_voxtype_motion", None)
-        if coordinator is None:
+        if not isinstance(coordinator, cls):
             coordinator = cls(application)
-            application._voxtype_motion = coordinator
+            application.__dict__["_voxtype_motion"] = coordinator
         return coordinator
 
     @staticmethod
@@ -250,19 +252,22 @@ class AnimationCoordinator(QObject):
                 finished()
             return
         existing = widget.graphicsEffect()
-        if existing is not None and not getattr(existing, "_voxtype_opacity", False):
+        if existing is not None and not (
+            isinstance(existing, QGraphicsOpacityEffect) and existing.property("voxtypeOpacity")
+        ):
             if finished is not None:
                 finished()
             return
-        if existing is None:
-            existing = QGraphicsOpacityEffect(widget)
-            existing._voxtype_opacity = True
-            widget.setGraphicsEffect(existing)
-        effect = existing
+        if isinstance(existing, QGraphicsOpacityEffect):
+            effect = existing
+        else:
+            effect = QGraphicsOpacityEffect(widget)
+            effect.setProperty("voxtypeOpacity", True)
+            widget.setGraphicsEffect(effect)
 
         def clear() -> None:
             if widget.graphicsEffect() is effect:
-                widget.setGraphicsEffect(None)
+                widget.setGraphicsEffect(None)  # type: ignore[arg-type]  # Qt accepts nullptr.
 
         self.animate_value(
             widget,

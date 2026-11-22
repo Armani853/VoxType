@@ -25,8 +25,8 @@ from .models import (
 )
 
 if PYSIDE6_AVAILABLE:
-    from PySide6.QtCore import QByteArray, QEvent, QObject, QSize, Qt, QTimer, Signal
-    from PySide6.QtGui import QCloseEvent, QGuiApplication
+    from PySide6.QtCore import QByteArray, QEvent, QObject, QSettings, QSize, Qt, QTimer, Signal
+    from PySide6.QtGui import QCloseEvent, QGuiApplication, QMoveEvent, QResizeEvent
     from PySide6.QtWidgets import (
         QApplication,
         QFrame,
@@ -124,7 +124,7 @@ if PYSIDE6_AVAILABLE:
             self.setWindowIcon(create_app_icon())
             self.resize(1100, 720)
             self.setMinimumSize(760, 560)
-            self._geometry_store = None
+            self._geometry_store: QSettings | None = None
             self._observed_result = ""
             self._build_ui()
             self._connect_ui()
@@ -433,7 +433,7 @@ if PYSIDE6_AVAILABLE:
                 ("Профиль · " if self._interface_language == "ru" else "Profile · ") + name
             )
 
-        def set_geometry_store(self, store: object) -> None:
+        def set_geometry_store(self, store: QSettings) -> None:
             self._geometry_store = store
             saved = store.value("mainWindow/geometry")
             if isinstance(saved, QByteArray):
@@ -445,12 +445,12 @@ if PYSIDE6_AVAILABLE:
             if self._geometry_store is not None:
                 self._geometry_store.setValue("mainWindow/geometry", self.saveGeometry())
 
-        def moveEvent(self, event: object) -> None:
+        def moveEvent(self, event: QMoveEvent) -> None:
             super().moveEvent(event)
             if hasattr(self, "_geometry_timer"):
                 self._geometry_timer.start()
 
-        def resizeEvent(self, event: object) -> None:
+        def resizeEvent(self, event: QResizeEvent) -> None:
             super().resizeEvent(event)
             if hasattr(self, "_geometry_timer"):
                 self._geometry_timer.start()

@@ -14,9 +14,11 @@ import tempfile
 import time
 from dataclasses import dataclass
 from datetime import datetime
+from http.client import HTTPMessage
 from importlib.util import find_spec
 from pathlib import Path
 from threading import Event
+from typing import IO
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
@@ -44,7 +46,9 @@ def update_configuration_status() -> tuple[bool, str]:
 
 
 class _NoRedirects(HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
+    def redirect_request(
+        self, req: Request, fp: IO[bytes], code: int, msg: str, headers: HTTPMessage, newurl: str
+    ) -> Request | None:
         raise ValueError("Update endpoints may not redirect")
 
 
@@ -95,8 +99,8 @@ def canonical_update_payload(document: dict[str, object]) -> bytes:
     ).encode("ascii")
 
 
-def _unique_fields(pairs):
-    values = {}
+def _unique_fields(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    values: dict[str, object] = {}
     for key, value in pairs:
         if key in values:
             raise ValueError("Duplicate update field")

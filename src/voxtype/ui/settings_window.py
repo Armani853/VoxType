@@ -16,7 +16,7 @@ _KEEP_SELECTION = object()
 
 if PYSIDE6_AVAILABLE:
     from PySide6.QtCore import QSettings, QSignalBlocker, Qt, Signal
-    from PySide6.QtGui import QKeySequence
+    from PySide6.QtGui import QHideEvent, QKeySequence, QStandardItemModel
     from PySide6.QtWidgets import (
         QApplication,
         QCheckBox,
@@ -27,6 +27,7 @@ if PYSIDE6_AVAILABLE:
         QHBoxLayout,
         QKeySequenceEdit,
         QLabel,
+        QLayout,
         QListWidget,
         QListWidgetItem,
         QMessageBox,
@@ -42,6 +43,7 @@ if PYSIDE6_AVAILABLE:
         QWidget,
     )
 
+    from voxtype.audio.quality import AudioQualitySnapshot
     from voxtype.constants import DEFAULT_HOTKEY, DEFAULT_LANGUAGE_HOTKEY, DEFAULT_PAUSE_HOTKEY
 
     from .motion import AnimationCoordinator, MotionPreference
@@ -70,15 +72,22 @@ if PYSIDE6_AVAILABLE:
         }
 
         def addRow(self, *args: object) -> None:
-            if len(args) == 2 and isinstance(args[0], str) and isinstance(args[1], QWidget):
-                title, control = args
-                super().addRow(
-                    VoxSettingRow(
-                        title, control, detail=control.toolTip() or self._details.get(title, "")
+            if len(args) == 2:
+                label, field = args
+                if isinstance(label, str) and isinstance(field, QWidget):
+                    super().addRow(
+                        VoxSettingRow(
+                            label, field, detail=field.toolTip() or self._details.get(label, "")
+                        )
                     )
-                )
+                    return
+                if isinstance(label, (str, QWidget)) and isinstance(field, (QWidget, QLayout)):
+                    super().addRow(label, field)
+                    return
+            elif len(args) == 1 and isinstance(row := args[0], (QWidget, QLayout)):
+                super().addRow(row)
                 return
-            super().addRow(*args)
+            raise TypeError("Invalid settings form row")
 
     class SettingsWindow(QDialog):
         settings_submitted = Signal(object)
@@ -400,9 +409,10 @@ if PYSIDE6_AVAILABLE:
                 ),
                 page,
             )
-            enhanced = self.preprocessing_mode_combo.model().item(3)
-            enhanced.setEnabled(False)
-            enhanced.setToolTip("Требуется совместимый модуль шумоподавления.")
+            model = self.preprocessing_mode_combo.model()
+            if isinstance(model, QStandardItemModel) and (enhanced := model.item(3)) is not None:
+                enhanced.setEnabled(False)
+                enhanced.setToolTip("Требуется совместимый модуль шумоподавления.")
             self.noise_suppression_check = QCheckBox("Умеренное шумоподавление", page)
             self.startup_pre_roll_check = QCheckBox("Первые звуки во время подготовки модели", page)
             self.startup_pre_roll_check.setToolTip(
@@ -420,7 +430,9 @@ if PYSIDE6_AVAILABLE:
             meter_layout.addWidget(self.mic_status_label)
             self.audio_quality_label = QLabel("Показатели появятся во время диктовки", page)
             self.audio_quality_label.setWordWrap(True)
-            self._last_audio_quality_view = None
+            self._last_audio_quality_view: tuple[AudioQualitySnapshot | None, str, str] | None = (
+                None
+            )
             self.audio_quality_label.setProperty("muted", True)
             meter_layout.addWidget(self.audio_quality_label)
             self.test_microphone_button = QPushButton("Тест микрофона", page)
@@ -444,11 +456,13 @@ if PYSIDE6_AVAILABLE:
             self.noise_suppression_check.setEnabled(legacy)
             self.normalization_check.setEnabled(legacy)
 
-        def hideEvent(self, event) -> None:
+        def hideEvent(self, event: QHideEvent) -> None:
             self.audio_view_hidden.emit()
             super().hideEvent(event)
 
-        def update_audio_quality(self, snapshot, device_name: str) -> None:
+        def update_audio_quality(
+            self, snapshot: AudioQualitySnapshot | None, device_name: str
+        ) -> None:
             if not self.isVisible() or self.pages.currentWidget() is not self._audio_page:
                 return
             mode = {
@@ -889,14 +903,15 @@ if PYSIDE6_AVAILABLE:
             )
             for combo in combos:
                 combo.currentIndexChanged.connect(self._mark_dirty)
-            for spin in (
+            spins: tuple[QSpinBox | QSlider, ...] = (
                 self.insertion_delay_spin,
                 self.cpu_threads_spin,
                 self.idle_unload_spin,
                 self.retention_spin,
                 self.vad_slider,
                 *self.auto_stop_limits,
-            ):
+            )
+            for spin in spins:
                 spin.valueChanged.connect(self._mark_dirty)
             for key_edit in (
                 self.toggle_hotkey_edit,
@@ -1057,7 +1072,7 @@ if PYSIDE6_AVAILABLE:
                 self.caret_overlay_check.setChecked(
                     bool(_setting(dictation, "caret_overlay", default=False))
                 )
-                auto_stop = _setting(dictation, "auto_stop", default={})
+                auto_stop = _section(dictation, "auto_stop")
                 self.auto_stop_enabled.setChecked(
                     bool(_setting(auto_stop, "enabled", default=True))
                 )
@@ -1071,7 +1086,7 @@ if PYSIDE6_AVAILABLE:
                     (400, 1500, 120000),
                     strict=True,
                 ):
-                    spin.setValue(int(_setting(auto_stop, key, default=default)))
+                    spin.setValue(int(str(_setting(auto_stop, key, default=default))))
                 self.live_preview_check.setChecked(
                     bool(_setting(dictation, "live_preview", default=False))
                 )

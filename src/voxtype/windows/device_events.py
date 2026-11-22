@@ -9,7 +9,12 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from time import monotonic
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Protocol, cast
+
+
+class _EndpointEnumerator(Protocol):
+    def RegisterEndpointNotificationCallback(self, client: object) -> None: ...
+    def UnregisterEndpointNotificationCallback(self, client: object) -> None: ...
 
 
 class DeviceEventType(StrEnum):
@@ -35,7 +40,7 @@ class WindowsSystemEventBridge:
         self._notify = notify
         self._hwnd = 0
         self._registered = False
-        self._core_audio = None
+        self._core_audio: tuple[_EndpointEnumerator, object] | None = None
 
     def start(self, hwnd: int) -> None:
         if sys.platform != "win32" or not hwnd or self._hwnd:
@@ -78,7 +83,7 @@ class WindowsSystemEventBridge:
         self._registered = False
         self._hwnd = 0
 
-    def _register_core_audio(self):
+    def _register_core_audio(self) -> tuple[_EndpointEnumerator, object]:
         from ctypes import POINTER, c_int, c_ulong, c_void_p, c_wchar_p
 
         from comtypes import (
@@ -94,8 +99,10 @@ class WindowsSystemEventBridge:
         class PropertyKey(ctypes.Structure):
             _fields_ = (("fmtid", GUID), ("pid", c_ulong))
 
+        make_guid = cast(Callable[[str], GUID], GUID)
+
         class NotificationClient(IUnknown):
-            _iid_ = GUID("{7991EEC9-7E89-4D85-8390-6C703CEC60C0}")
+            _iid_ = make_guid("{7991EEC9-7E89-4D85-8390-6C703CEC60C0}")
             _methods_: ClassVar[list[Any]] = [
                 COMMETHOD(
                     [],
@@ -124,7 +131,7 @@ class WindowsSystemEventBridge:
             ]
 
         class DeviceEnumerator(IUnknown):
-            _iid_ = GUID("{A95664D2-9614-4F35-A746-DE8DB63617E6}")
+            _iid_ = make_guid("{A95664D2-9614-4F35-A746-DE8DB63617E6}")
             _methods_: ClassVar[list[Any]] = [
                 COMMETHOD(
                     [],
@@ -169,29 +176,32 @@ class WindowsSystemEventBridge:
             _com_interfaces_: ClassVar[list[Any]] = [NotificationClient]
 
             @staticmethod
-            def _emit(kind, device, role=None):
+            def _emit(kind: DeviceEventType, device: str | None, role: int | None = None) -> int:
                 notify(DeviceEvent(kind, device, role is not None, role, monotonic()))
                 return 0
 
-            def OnDeviceStateChanged(self, device, state):
+            def OnDeviceStateChanged(self, device: str | None, state: int) -> int:
                 return self._emit(DeviceEventType.CHANGED, device)
 
-            def OnDeviceAdded(self, device):
+            def OnDeviceAdded(self, device: str | None) -> int:
                 return self._emit(DeviceEventType.ADDED, device)
 
-            def OnDeviceRemoved(self, device):
+            def OnDeviceRemoved(self, device: str | None) -> int:
                 return self._emit(DeviceEventType.REMOVED, device)
 
-            def OnDefaultDeviceChanged(self, flow, role, device):
+            def OnDefaultDeviceChanged(self, flow: int, role: int, device: str | None) -> int:
                 return self._emit(DeviceEventType.DEFAULT, device, role) if flow == 1 else 0
 
-            def OnPropertyValueChanged(self, device, key):
+            def OnPropertyValueChanged(self, device: str | None, key: PropertyKey) -> int:
                 return 0
 
-        enumerator = CoCreateInstance(
-            GUID("{BCDE0395-E52F-467C-8E3D-C4579291692E}"),
-            interface=DeviceEnumerator,
-            clsctx=CLSCTX_INPROC_SERVER,
+        enumerator = cast(
+            _EndpointEnumerator,
+            CoCreateInstance(
+                make_guid("{BCDE0395-E52F-467C-8E3D-C4579291692E}"),
+                interface=DeviceEnumerator,
+                clsctx=CLSCTX_INPROC_SERVER,
+            ),
         )
         client = Client().QueryInterface(NotificationClient)
         enumerator.RegisterEndpointNotificationCallback(client)

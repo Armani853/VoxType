@@ -9,9 +9,12 @@ from ctypes import wintypes
 from dataclasses import dataclass, replace
 from enum import IntFlag
 from functools import lru_cache
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from ._win32 import clear_last_error, last_error, load_library
+
+if TYPE_CHECKING:
+    from voxtype.windows.keyboard_hold import KeyboardHold
 
 WM_HOTKEY = 0x0312
 ERROR_HOTKEY_ALREADY_REGISTERED = 1409
@@ -221,7 +224,7 @@ class GlobalHotkeyManager:
     def __init__(self, hwnd: int = 0, backend: HotkeyBackend | None = None) -> None:
         self._hwnd = int(hwnd)
         self._backend = backend or NativeHotkeyBackend()
-        self._hold = None
+        self._hold: KeyboardHold | None = None
         self._hold_spec: Hotkey | None = None
         self._registered: dict[int, Hotkey] = {}
         self._callbacks: dict[int, HotkeyCallback] = {}

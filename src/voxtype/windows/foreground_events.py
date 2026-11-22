@@ -48,8 +48,15 @@ class ForegroundEvents:
         self._remove.argtypes = (wintypes.HANDLE,)
         self._remove.restype = wintypes.BOOL
 
-        @callback_type
-        def callback(_hook, event, hwnd, _object, _child, _thread, _time):
+        def callback(
+            _hook: int | None,
+            event: int,
+            hwnd: int | None,
+            _object: int,
+            _child: int,
+            _thread: int,
+            _time: int,
+        ) -> None:
             if not hwnd:
                 return
             if event == 0x0003:
@@ -60,13 +67,14 @@ class ForegroundEvents:
                     self._last_focus_event = now
                     focus_notify()
 
-        self._callback = callback
+        native_callback = callback_type(callback)
+        self._callback = native_callback
         foreground_event = 0x0003
         # Out-of-context events are delivered to the installing thread.
-        self._hook = install(foreground_event, foreground_event, None, callback, 0, 0, 0)
+        self._hook = install(foreground_event, foreground_event, None, native_callback, 0, 0, 0)
         if focus_notify is not None:
             focus_event = 0x8005  # EVENT_OBJECT_FOCUS
-            self._focus_hook = install(focus_event, focus_event, None, callback, 0, 0, 0)
+            self._focus_hook = install(focus_event, focus_event, None, native_callback, 0, 0, 0)
 
     @property
     def active(self) -> bool:

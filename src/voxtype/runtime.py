@@ -17,6 +17,7 @@ import tempfile
 import time
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import TYPE_CHECKING
 from urllib.request import Request, urlopen
 
 from platformdirs import user_cache_path, user_data_path
@@ -58,6 +59,9 @@ from voxtype.windows.injection import InjectionStrategy, TextInjectionService
 from voxtype.windows.input_context import ForegroundContextProvider
 from voxtype.windows.startup import MemoryStartupRegistryBackend, StartupManager
 from voxtype.windows.target_window import TargetPolicy, TargetWindowManager
+
+if TYPE_CHECKING:
+    from voxtype.windows.secret_store import WindowsSecretStore
 
 SILERO_VAD_URL = (
     "https://raw.githubusercontent.com/snakers4/silero-vad/"
@@ -209,7 +213,7 @@ class RuntimeBundle:
     restore_status: str = ""
 
     @property
-    def secret_store(self):
+    def secret_store(self) -> WindowsSecretStore:
         from voxtype.windows.secret_store import WindowsSecretStore
 
         return WindowsSecretStore(self.data_directory / "credentials")

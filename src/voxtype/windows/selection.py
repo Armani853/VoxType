@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from queue import Empty, Queue
 from threading import Lock, Thread
 from time import monotonic
+from typing import cast
 
 from voxtype.windows.foreground import WindowMetadata, get_foreground_hwnd, get_window_process_id
 from voxtype.windows.input_context import ForegroundContextProvider
@@ -74,7 +76,7 @@ class SelectionProvider:
                 "UI Automation недоступна. Вставьте выделение вручную."
             ) from exc
         try:
-            comtypes.CoInitialize()
+            cast(Callable[[], None], comtypes.CoInitialize)()
             try:
                 types = GetModule(
                     str(Path(os.environ["SYSTEMROOT"]) / "System32/UIAutomationCore.dll")
@@ -121,7 +123,7 @@ class SelectionProvider:
                     raise SelectionUnavailable("Поле ввода сменилось")
                 return SelectedText(target, value, control_id, monotonic())
             finally:
-                comtypes.CoUninitialize()
+                cast(Callable[[], None], comtypes.CoUninitialize)()
         except SelectionUnavailable:
             raise
         except (OSError, ValueError, AttributeError, KeyError, TypeError, ImportError) as exc:

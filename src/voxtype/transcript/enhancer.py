@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from voxtype.windows.local_paths import is_local_path
+
+if TYPE_CHECKING:
+    from llama_cpp import Llama
 
 OPERATIONS = {
     "polish": "Исправь опечатки, грамматику и пунктуацию.",
@@ -36,7 +39,7 @@ class LlamaCppTextEnhancer:
         if not is_local_path(path):
             raise ValueError("Модель должна находиться на локальном диске")
         self._path = path
-        self._runtime = None
+        self._runtime: Llama | None = None
 
     def transform(
         self,
@@ -49,10 +52,11 @@ class LlamaCppTextEnhancer:
             raise ValueError("Неизвестная операция или язык")
         if not text.strip() or len(text) > 12_000:
             raise ValueError("Введите текст длиной до 12 000 символов")
-        if self._runtime is None:
+        runtime = self._runtime
+        if runtime is None:
             from llama_cpp import Llama
 
-            self._runtime = Llama(
+            runtime = self._runtime = Llama(
                 model_path=str(self._path), n_ctx=4096, n_threads=2, n_gpu_layers=0, verbose=False
             )
         instructions = (
@@ -62,7 +66,7 @@ class LlamaCppTextEnhancer:
             + " ".join(constraints)
         )
         messages = [{"role": "system", "content": instructions}, {"role": "user", "content": text}]
-        result = self._runtime.create_chat_completion(
+        result = runtime.create_chat_completion(
             messages=messages, max_tokens=768, temperature=0.0, stream=False
         )
         choice = result["choices"][0]

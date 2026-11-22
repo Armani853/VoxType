@@ -7,6 +7,7 @@ import ntpath
 import os
 import sqlite3
 import tempfile
+from collections.abc import Iterable
 from contextlib import closing
 from dataclasses import asdict
 from pathlib import Path
@@ -23,7 +24,7 @@ _HOTKEYS = ("toggle", "language", "pause")
 _LIMIT = 2 * 1024**2
 
 
-def _profile_for_export(row: dict) -> dict:
+def _profile_for_export(row: dict[str, Any]) -> dict[str, Any]:
     row = dict(row)
     row["app_rules"] = [
         {**rule, "executable": ntpath.basename(rule["executable"])}
@@ -88,6 +89,7 @@ def export_archive(database: Path, category: str, path: Path) -> None:
             db.row_factory = sqlite3.Row
             db.execute("BEGIN")
             stream.write('{"schema_version":1,"category":' + json.dumps(category) + ',"records":[')
+            rows: Iterable[sqlite3.Row]
             if category == "history":
                 rows = db.execute(
                     """SELECT session_id, started_at, finished_at, language, model, profile_id,
@@ -157,7 +159,7 @@ def stage_configuration(
         combos.add(combination)
 
     current = repository.load().professional
-    changes = {"schema_version": 1}
+    changes: dict[str, Any] = {"schema_version": 1}
     summary = []
     for name, rows in content.items():
         if not isinstance(rows, list) or len(rows) > (

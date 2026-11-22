@@ -47,7 +47,8 @@ class EnterprisePolicy:
         allowed = {item.name for item in fields(cls)}
         if set(raw) - allowed:
             raise ValueError("Неизвестные корпоративные настройки")
-        values = {}
+        booleans: dict[str, bool] = {}
+        lists: dict[str, tuple[str, ...]] = {}
         for key, value in raw.items():
             if key in {"allowed_models", "allowed_profiles", "disabled_applications"}:
                 if (
@@ -59,12 +60,26 @@ class EnterprisePolicy:
                     )
                 ):
                     raise ValueError("Неверный список корпоративных ограничений")
-                values[key] = tuple(value)
+                lists[key] = tuple(value)
             elif type(value) is bool:
-                values[key] = value
+                booleans[key] = value
             else:
                 raise ValueError("Корпоративный переключатель должен быть логическим")
-        return cls(**values)
+        return cls(
+            enforce_offline_only=booleans.get("enforce_offline_only", False),
+            disable_history=booleans.get("disable_history", False),
+            disable_audio_storage=booleans.get("disable_audio_storage", False),
+            disable_external_processing=booleans.get("disable_external_processing", False),
+            allowed_models=lists.get("allowed_models", ()),
+            allowed_profiles=lists.get("allowed_profiles", ()),
+            disabled_applications=lists.get("disabled_applications", ()),
+            allow_user_snippets=booleans.get("allow_user_snippets", True),
+            allow_voice_commands=booleans.get("allow_voice_commands", True),
+            allow_clipboard_persistence=booleans.get("allow_clipboard_persistence", True),
+            allow_local_api=booleans.get("allow_local_api", True),
+            allow_optional_ai=booleans.get("allow_optional_ai", True),
+            allow_organization_vocabulary=booleans.get("allow_organization_vocabulary", True),
+        )
 
     def model_allowed(self, model: str) -> bool:
         return not self.allowed_models or model in self.allowed_models
@@ -164,26 +179,34 @@ class EnterprisePolicyService:
             return ctypes.wstring_at(value)
 
         try:
-            if not (owner and dacl) or sid_string(owner) not in _PRIVILEGED_SIDS:
+            acl_start = dacl.value
+            if not owner or acl_start is None or sid_string(owner) not in _PRIVILEGED_SIDS:
                 return False
             # ACL header: revision/reserved, ACL size, ACE count/reserved.
-            count = ctypes.c_uint16.from_address(dacl.value + 4).value
+            acl_size = ctypes.c_uint16.from_address(acl_start + 2).value
+            count = ctypes.c_uint16.from_address(acl_start + 4).value
             for index in range(count):
                 ace = ctypes.c_void_p()
                 if not security.GetAce(dacl, index, ctypes.byref(ace)):
                     return False
-                ace_type = ctypes.c_ubyte.from_address(ace.value).value
-                flags = ctypes.c_ubyte.from_address(ace.value + 1).value
+                ace_start = ace.value
+                if ace_start is None or not acl_start + 8 <= ace_start <= acl_start + acl_size - 4:
+                    return False
+                size = ctypes.c_uint16.from_address(ace_start + 2).value
+                if size < 4 or ace_start + size > acl_start + acl_size:
+                    return False
+                ace_type = ctypes.c_ubyte.from_address(ace_start).value
+                flags = ctypes.c_ubyte.from_address(ace_start + 1).value
                 if flags & 8:  # inherit-only entries do not grant rights on this object
                     continue
                 if ace_type == 1:  # access denied ACE does not grant write permissions
                     continue
-                if ace_type != 0:
+                if ace_type != 0 or size < 16:
                     return False
-                mask = ctypes.c_uint32.from_address(ace.value + 4).value
+                mask = ctypes.c_uint32.from_address(ace_start + 4).value
                 sensitive = 0x500D0040 if parent_only else _WRITE_ACCESS
                 if mask & sensitive:
-                    sid = sid_string(ctypes.c_void_p(ace.value + 8))
+                    sid = sid_string(ctypes.c_void_p(ace_start + 8))
                     if sid not in _PRIVILEGED_SIDS and sid != "S-1-3-0":  # creator owner
                         return False
             return True

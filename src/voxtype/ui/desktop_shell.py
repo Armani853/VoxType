@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from PySide6.QtCore import QEvent, Qt, Signal
+from PySide6.QtCore import QEvent, QObject, Qt, Signal
+from PySide6.QtGui import QKeyEvent, QResizeEvent, QShowEvent
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -111,14 +112,14 @@ class DesktopShell(QWidget):
     def __init__(self, parent: QWidget) -> None:
         super().__init__(parent)
         self.current = "home"
-        self.locale = "ru"
+        self._locale = "ru"
         self._manual_collapse: bool | None = None
         self._collapsed: bool | None = None
         self._sidebar_destination: bool | None = None
         self._transition_view: QWidget | None = None
         self._selection_target: QPushButton | None = None
         self.pages: dict[str, QWidget] = {}
-        self.actions: dict[str, tuple[str, Callable[[], None]]] = {}
+        self._context_actions: dict[str, tuple[str, Callable[[], None]]] = {}
         self.buttons: dict[str, QPushButton] = {}
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -196,8 +197,8 @@ class DesktopShell(QWidget):
         search.clicked.connect(self.palette_requested)
         settings = VoxIconButton("settings", "Настройки", header)
         settings.clicked.connect(lambda: self.page_requested.emit("settings"))
-        for widget in (self.engine, self.profile, self.context_action, search, settings):
-            line.addWidget(widget)
+        for control in (self.engine, self.profile, self.context_action, search, settings):
+            line.addWidget(control)
         column.addWidget(header)
         self.stack = QStackedWidget(body)
         column.addWidget(self.stack, 1)
@@ -264,26 +265,26 @@ class DesktopShell(QWidget):
         self.show_page(key)
 
     def set_locale(self, locale: str) -> None:
-        self.locale = locale
+        self._locale = locale
         self._labels()
 
     def set_context_action(self, page: str, label: str, action: Callable[[], None]) -> None:
-        self.actions[page] = (label, action)
+        self._context_actions[page] = (label, action)
         if page == self.current:
             self._labels()
 
     def _run_context_action(self) -> None:
-        action = self.actions.get(self.current)
+        action = self._context_actions.get(self.current)
         if action is not None:
             action[1]()
 
     def _labels(self) -> None:
-        locale = int(self.locale == "en")
+        locale = int(self._locale == "en")
         metadata = PAGES[self.current]
         self.title.setText(metadata[locale])
         self.subtitle.setText(metadata[2 + locale])
         self.privacy.setText("On-device processing" if locale else "Обработка на устройстве")
-        action = self.actions.get(self.current)
+        action = self._context_actions.get(self.current)
         self.context_action.setVisible(action is not None and self.width() >= 800)
         if action is not None:
             self.context_action.setText(action[0])
@@ -354,21 +355,23 @@ class DesktopShell(QWidget):
             )
         self.profile.setVisible(self.width() >= 900)
         self.subtitle.setVisible(self.width() >= 800)
-        self.context_action.setVisible(self.current in self.actions and self.width() >= 800)
+        self.context_action.setVisible(
+            self.current in self._context_actions and self.width() >= 800
+        )
 
-    def resizeEvent(self, event: object) -> None:
+    def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
         self._apply_density()
         self.notifications.reposition()
 
-    def showEvent(self, event: object) -> None:
+    def showEvent(self, event: QShowEvent) -> None:
         super().showEvent(event)
         selected = self.buttons["settings" if self.current == "models" else self.current]
         self._move_selection(selected, immediate=True)
 
 
 class CommandPalette(QDialog):
-    def __init__(self, entries: list[tuple[str, Callable[[], None]]], parent: QWidget) -> None:
+    def __init__(self, entries: list[tuple[str, Callable[[], object]]], parent: QWidget) -> None:
         super().__init__(parent)
         self.setWindowTitle("Команды VoxType")
         self.resize(580, 420)
@@ -387,7 +390,7 @@ class CommandPalette(QDialog):
         self._filter("")
         self.search.setFocus()
 
-    def showEvent(self, event: object) -> None:
+    def showEvent(self, event: QShowEvent) -> None:
         super().showEvent(event)
         self.search.setFocus(Qt.FocusReason.OtherFocusReason)
         coordinator = AnimationCoordinator.instance()
@@ -412,9 +415,13 @@ class CommandPalette(QDialog):
         else:
             self.results.setCurrentRow(0)
 
-    def eventFilter(self, watched: object, event: object) -> bool:
-        if watched is self.search and event.type() == QEvent.Type.KeyPress:
-            step = {Qt.Key.Key_Down: 1, Qt.Key.Key_Up: -1}.get(event.key())
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        if (
+            watched is self.search
+            and isinstance(event, QKeyEvent)
+            and event.type() == QEvent.Type.KeyPress
+        ):
+            step = {int(Qt.Key.Key_Down): 1, int(Qt.Key.Key_Up): -1}.get(event.key())
             if step is not None:
                 self.results.setCurrentRow(
                     max(0, min(self.results.count() - 1, self.results.currentRow() + step))

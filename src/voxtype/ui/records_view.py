@@ -12,7 +12,7 @@ from PySide6.QtCore import (
     QSortFilterProxyModel,
     Qt,
 )
-from PySide6.QtGui import QBrush, QColor, QPalette
+from PySide6.QtGui import QBrush, QColor, QPainter, QPalette
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -70,13 +70,15 @@ class RecordsModel(QAbstractTableModel):
                     [Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.ToolTipRole],
                 )
 
-    def rowCount(self, parent: QModelIndex | None = None) -> int:
+    def rowCount(self, parent: QModelIndex | QPersistentModelIndex | None = None) -> int:
         return 0 if parent is not None and parent.isValid() else len(self.records)
 
-    def columnCount(self, parent: QModelIndex | None = None) -> int:
+    def columnCount(self, parent: QModelIndex | QPersistentModelIndex | None = None) -> int:
         return 0 if parent is not None and parent.isValid() else len(self.headings)
 
-    def data(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole) -> str | None:
+    def data(
+        self, index: QModelIndex | QPersistentModelIndex, role: int = Qt.ItemDataRole.DisplayRole
+    ) -> str | None:
         if not index.isValid() or not 0 <= index.row() < len(self.records):
             return None
         key, values = self.records[index.row()]
@@ -99,7 +101,12 @@ class _SelectionDelegate(QStyledItemDelegate):
         super().__init__(view)
         self.view = view
 
-    def paint(self, painter, option, index) -> None:
+    def paint(
+        self,
+        painter: QPainter,
+        option: QStyleOptionViewItem,
+        index: QModelIndex | QPersistentModelIndex,
+    ) -> None:
         strength = self.view.highlight_strength(index)
         if strength is None:
             super().paint(painter, option, index)
@@ -181,7 +188,7 @@ class RecordsView(QTableView):
                 )
             )
 
-    def highlight_strength(self, index: QModelIndex) -> float | None:
+    def highlight_strength(self, index: QModelIndex | QPersistentModelIndex) -> float | None:
         if self._selection_progress >= 1:
             return None
         if self._selected_row.isValid() and index.row() == self._selected_row.row():
