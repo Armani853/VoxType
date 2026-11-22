@@ -126,6 +126,7 @@ Write-Host ("[build] Move prepared standalone directory: {0:N3} s" -f $MoveStopw
 $Executable = Join-Path $PortableRoot 'VoxType.exe'
 if (-not (Test-Path -LiteralPath $Executable)) { throw "Missing portable executable: $Executable" }
 if ((Get-Item -LiteralPath $Executable).Length -eq 0) { throw 'Portable executable is empty' }
+Set-Content -LiteralPath (Join-Path $PortableRoot 'build-commit.txt') -Encoding ascii -NoNewline -Value $BuildCommitFull
 
 Write-Host '[5/6] Smoke-testing packaged executable'
 $PackagedSmokeStopwatch = [Diagnostics.Stopwatch]::StartNew()
@@ -149,7 +150,6 @@ $PackagedSmokeStopwatch.Stop()
 Write-Host ("[build] Packaged self/inference/UI smoke: {0:N3} s" -f $PackagedSmokeStopwatch.Elapsed.TotalSeconds)
 
 Write-Host '[6/6] Creating ZIP and SHA-256 checksum'
-Set-Content -LiteralPath (Join-Path $PortableRoot 'build-commit.txt') -Encoding ascii -NoNewline -Value $BuildCommitFull
 $ZipStopwatch = [Diagnostics.Stopwatch]::StartNew()
 for ($Attempt = 1; $Attempt -le 5; $Attempt++) {
     try {

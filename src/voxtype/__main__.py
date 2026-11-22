@@ -18,7 +18,7 @@ from voxtype.asr.profiles import ASRProfile, get_profile
 from voxtype.monitoring.hardware import probe_hardware
 from voxtype.monitoring.health import run_health_checks
 from voxtype.runtime import build_runtime, data_directory_path, install_silero_vad
-from voxtype.version import __version__
+from voxtype.version import __version__, version_info
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -41,6 +41,7 @@ def _diagnostics() -> dict[str, object]:
     checks = run_health_checks(data)
     return {
         "version": __version__,
+        "build_id": version_info().build_id,
         "hardware": {
             "os": hardware.os_name,
             "cpu": hardware.cpu_name,
