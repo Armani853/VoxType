@@ -66,6 +66,7 @@ class DictationSettings:
 class AudioSettings:
     device_id: int | None = None
     device_fingerprint: str = ""
+    device_endpoint_id: str = ""
     startup_pre_roll: bool = False
     vad_sensitivity: float = 0.5
     preprocessing_profile: PreprocessingProfile = PreprocessingProfile.RAW

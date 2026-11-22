@@ -8,6 +8,7 @@ import logging
 import os
 import shutil
 import sqlite3
+import stat
 import sys
 import threading
 import time
@@ -66,9 +67,9 @@ from voxtype.core.compute_budget import MemoryPolicy, PerformanceProfile, Resour
 from voxtype.core.gestures import DictationGestureController, DictationMode
 from voxtype.core.models import AppPhase, AppReadiness, Language, RecognitionStatus
 from voxtype.core.profiles import DictationProfile
+from voxtype.monitoring.assistant import DiagnosticAction, diagnostic_findings
 from voxtype.monitoring.hardware import probe_hardware
 from voxtype.monitoring.health import run_health_checks
-from voxtype.monitoring.logging import configure_logging
 from voxtype.monitoring.storage import measure_owned_paths
 from voxtype.runtime import (
     RuntimeBundle,
@@ -78,9 +79,13 @@ from voxtype.runtime import (
     install_silero_vad,
 )
 from voxtype.sessions.backup import BackupManager
-from voxtype.settings.defaults import create_default_settings
 from voxtype.settings.schema import AppSettings
-from voxtype.settings.updates import StagedUpdate, UpdateMetadataClient, UpdatesUnavailable
+from voxtype.settings.updates import (
+    StagedUpdate,
+    UpdateMetadataClient,
+    UpdatesUnavailable,
+    update_configuration_status,
+)
 from voxtype.transcript.editing import RevisionSource, TranscriptRevision
 from voxtype.transcript.professional import CommandResolution, VoiceAction
 from voxtype.transcript.vocabulary import Vocabulary
@@ -104,7 +109,7 @@ from voxtype.ui.obsidian import ModelDownloadDialog
 from voxtype.vad.segmenter import SegmentationSettings, StreamingSegmenter
 from voxtype.vad.silero import SileroVAD
 from voxtype.version import __version__, version_info
-from voxtype.windows.device_events import DeviceEvent, WindowsSystemEventBridge
+from voxtype.windows.device_events import DeviceEvent, DeviceEventType, WindowsSystemEventBridge
 from voxtype.windows.foreground import capture_foreground
 from voxtype.windows.foreground_events import ForegroundEvents
 from voxtype.windows.hotkeys import GlobalHotkeyManager, parse_hotkey
@@ -115,6 +120,8 @@ from voxtype.windows.single_instance import WM_VOXTYPE_RESTORE
 from voxtype.windows.target_window import TargetPolicy
 
 if TYPE_CHECKING:
+    from PySide6.QtWidgets import QPushButton
+
     from voxtype.ui.professional import ProfessionalWindow
 
 
@@ -308,6 +315,7 @@ class DesktopApplication:
         QTimer.singleShot(1100, self._start_professional_queue)
         self._history_window: HistoryWindow | None = None
         self._diagnostics_window: DiagnosticsWindow | None = None
+        self._diagnostics_running = False
         stage("auxiliary_widgets_constructed")
         self.onboarding: OnboardingWizard | None = None
         self._practice: tuple[str, int] | None = None
@@ -319,6 +327,8 @@ class DesktopApplication:
         self._system_locked = False
         self._recovery = RecoveryCoordinator()
         self._recovery_scanning = False
+        self._default_audio_endpoint_id = ""
+        self._system_default_missing = False
         self._recovery_timer = QTimer(self.main, singleShot=True)
         self._recovery_timer.timeout.connect(self._scan_recovery_devices)
         self.system_events = WindowsSystemEventBridge(self.signals.system_event.emit)
@@ -658,6 +668,7 @@ class DesktopApplication:
             window.import_personal_requested.connect(self._import_personal_data)
             window.export_archive_requested.connect(self._export_personal_archive)
             window.updates_requested.connect(self._check_updates)
+            self._present_updates(window.check_updates_button)
             window.input_compatibility_requested.connect(self._open_input_compatibility)
             window.open_log_requested.connect(self._open_log)
             window.export_diagnostics_requested.connect(self._export_diagnostics)
@@ -692,9 +703,11 @@ class DesktopApplication:
             window.refresh_requested.connect(self._refresh_diagnostics)
             window.resources_requested.connect(self._show_live_resource_counters)
             window.updates_requested.connect(self._check_updates)
+            self._present_updates(window.updates_button)
             window.self_test_requested.connect(self._refresh_diagnostics)
             window.open_log_requested.connect(self._open_log)
             window.export_requested.connect(self._export_diagnostics)
+            window.finding_action_requested.connect(self._apply_diagnostic_action)
         return window
 
     def _invoke_ui(self, handler: str, callback: Any) -> None:
@@ -1080,15 +1093,30 @@ class DesktopApplication:
         if self._closing:
             return
         if isinstance(event, DeviceEvent):
-            if (
-                not self._system_locked
-                and not self._system_sleeping
-                and self._recovery.state
-                not in {
-                    RecoveryState.INTERRUPTED,
-                    RecoveryState.RECOVERING,
-                }
-            ):
+            if not self._system_locked and not self._system_sleeping:
+                audio = self.runtime.settings.audio
+                if event.event_type is DeviceEventType.DEFAULT:
+                    if event.role == 0:
+                        self._default_audio_endpoint_id = event.endpoint_id or ""
+                        self._system_default_missing = event.endpoint_id is None
+                    else:
+                        return
+                    if audio.device_id is not None:
+                        return
+                    if (
+                        self._system_default_missing
+                        or self.runtime.device.endpoint_id != self._default_audio_endpoint_id
+                    ):
+                        self.controller.set_recording_availability(microphone=False)
+                        self.controller.interrupt_dictation()
+                if (
+                    event.event_type is DeviceEventType.REMOVED
+                    and event.endpoint_id is not None
+                    and self.runtime.device.endpoint_id is not None
+                    and event.endpoint_id.casefold() == self.runtime.device.endpoint_id.casefold()
+                ):
+                    self.controller.set_recording_availability(microphone=False)
+                    self.controller.interrupt_dictation()
                 self._request_device_recovery()
             return
         if event in {"suspend", "resume"}:
@@ -1169,7 +1197,14 @@ class DesktopApplication:
                 self._recovery_timer.start(500)
             return
         audio = self.runtime.settings.audio
-        candidate = AudioDeviceReconciler.match(devices, audio.device_id, audio.device_fingerprint)
+        endpoint = self._selected_audio_endpoint()
+        candidate = (
+            None
+            if audio.device_id is None and self._system_default_missing
+            else AudioDeviceReconciler.match(
+                devices, audio.device_id, audio.device_fingerprint, endpoint
+            )
+        )
         old = self.runtime.device
         if candidate is None or (
             audio.device_id is None and candidate.fingerprint != old.fingerprint
@@ -1630,6 +1665,13 @@ class DesktopApplication:
             )
         if automation is not None:
             automation.configure(enabled)
+        if (
+            self._automation_session is not None
+            and (not enabled or self.runtime.settings.privacy.local_api_allow_recording is not True)
+        ):
+            if self.controller.recording_readiness().session_id == self._automation_session:
+                self.controller.stop_dictation()
+            self._automation_session = None
         if self._settings_window is not None:
             self._present_local_automation(self._settings_window)
 
@@ -2092,13 +2134,20 @@ class DesktopApplication:
         self.runtime.devices = tuple(items)
         audio = self.runtime.settings.audio
         selected = match_input_device(
-            self.runtime.devices, audio.device_id, audio.device_fingerprint
+            self.runtime.devices,
+            audio.device_id,
+            audio.device_fingerprint,
+            self._selected_audio_endpoint(),
         )
+        if audio.device_id is None and self._system_default_missing:
+            selected = None
         self.controller.set_recording_availability(microphone=selected is not None)
         devices = [(f"{item.name} ({item.host_api})", item.index) for item in items]
         if self._settings_window is not None:
             unavailable_id = (
-                -1 if audio.device_fingerprint and selected is None else audio.device_id
+                -1
+                if (audio.device_fingerprint or audio.device_endpoint_id) and selected is None
+                else audio.device_id
             )
             self._settings_window.set_audio_devices(
                 devices,
@@ -2145,12 +2194,19 @@ class DesktopApplication:
             previous_audio = self.runtime.settings.audio
             if index is None:
                 audio["device_fingerprint"] = ""
+                audio["device_endpoint_id"] = ""
             elif selected is not None and (
                 index != previous_audio.device_id
                 or not previous_audio.device_fingerprint
                 or selected.fingerprint == previous_audio.device_fingerprint
             ):
                 audio["device_fingerprint"] = selected.fingerprint
+                if (
+                    not previous_audio.device_endpoint_id
+                    or selected.endpoint_id == previous_audio.device_endpoint_id
+                    or index != previous_audio.device_id
+                ):
+                    audio["device_endpoint_id"] = selected.endpoint_id or ""
             values["audio"] = audio
         policy = self.controller.policy
         if isinstance(values.get("privacy"), dict):
@@ -2255,7 +2311,10 @@ class DesktopApplication:
         vad_changed = updated.audio.vad_sensitivity != previous.audio.vad_sensitivity
         self.runtime.settings = updated
         self.controller.settings = updated
-        if updated.privacy.local_api_enabled != previous.privacy.local_api_enabled:
+        if (
+            updated.privacy.local_api_enabled != previous.privacy.local_api_enabled
+            or updated.privacy.local_api_allow_recording != previous.privacy.local_api_allow_recording
+        ):
             self._sync_local_automation()
         self.controller.set_language(updated.dictation.language, persist=False)
         self.controller.vocabulary = vocabulary
@@ -2317,8 +2376,13 @@ class DesktopApplication:
         devices = self.runtime.devices
         selected_index = self.runtime.settings.audio.device_id
         fingerprint = self.runtime.settings.audio.device_fingerprint
-        device = match_input_device(devices, selected_index, fingerprint)
-        self.controller.capture_factory = self._capture_factory_for(selected_index, fingerprint)
+        endpoint = self._selected_audio_endpoint()
+        device = match_input_device(devices, selected_index, fingerprint, endpoint)
+        if selected_index is None and self._system_default_missing:
+            device = None
+        self.controller.capture_factory = self._capture_factory_for(
+            selected_index, fingerprint, endpoint
+        )
         self.controller.set_recording_availability(microphone=device is not None)
         self.controller.microphone_name = (
             f"{device.name} ({device.host_api})" if device else "Микрофон недоступен"
@@ -2326,7 +2390,15 @@ class DesktopApplication:
         if device is not None:
             self.runtime.device = device
 
-    def _capture_factory_for(self, selected_index: int | None, fingerprint: str):
+    def _selected_audio_endpoint(self) -> str:
+        audio = self.runtime.settings.audio
+        if audio.device_id is None:
+            return self._default_audio_endpoint_id
+        return audio.device_endpoint_id
+
+    def _capture_factory_for(
+        self, selected_index: int | None, fingerprint: str, endpoint: str = ""
+    ):
         profile = AudioPreprocessingProfile(self.runtime.settings.audio.preprocessing_profile.value)
         processing = select_preprocessing(
             self.runtime.settings.audio.preprocessing_mode,
@@ -2341,7 +2413,7 @@ class DesktopApplication:
                 if selected_index is not None
                 else ()
             )
-            selected = resolve_recording_device(selected_index, current, fingerprint)
+            selected = resolve_recording_device(selected_index, current, fingerprint, endpoint)
             return AudioCaptureService(
                 queue,
                 AudioCaptureConfig(
@@ -2372,6 +2444,7 @@ class DesktopApplication:
         if self.controller.policy.enforce_offline_only:
             self._show_data_status("Обновления по сети отключены политикой.", False)
             return
+
         current = version_info(self.runtime.settings.general.release_channel)
         self._update_busy = True
 
@@ -2391,6 +2464,13 @@ class DesktopApplication:
 
         if not self._run_background("voxtype-update-check", check):
             self._update_busy = False
+
+    def _present_updates(self, button: QPushButton) -> None:
+        allowed, reason = update_configuration_status()
+        if self.controller.policy.enforce_offline_only:
+            allowed, reason = False, "Обновления отключены политикой автономной работы"
+        button.setEnabled(allowed)
+        button.setToolTip(reason)
 
     def _confirm_update_download(self, client, release) -> None:
         self._update_busy = False
@@ -2904,7 +2984,17 @@ class DesktopApplication:
         )
 
     def _refresh_diagnostics(self) -> None:
+        if self._diagnostics_running or self._closing:
+            return
+        self._diagnostics_running = True
         self.diagnostics_window.set_self_test_running(True, "Выполняю локальные проверки…")
+        mode = self.runtime.settings.dictation.mode
+        hotkey_available = (
+            mode == DictationMode.MANUAL
+            or (mode == DictationMode.PUSH_TO_TALK and self.hotkeys.hold_active)
+            or any(item.name == "toggle_dictation" for item in self.hotkeys.registered)
+        )
+        state = self.controller.diagnostic_state(hotkey_available)
 
         def worker() -> None:
             try:
@@ -2963,6 +3053,13 @@ class DesktopApplication:
                     "audio": {
                         "Микрофон": self.controller.microphone_name,
                         "Частоты": ", ".join(map(str, hardware.supported_sample_rates)),
+                        "Доступ к микрофону": (
+                            "Windows не предоставила состояние разрешения"
+                            if state.microphone_permission is None
+                            else "Разрешён"
+                            if state.microphone_permission
+                            else "Запрещён"
+                        ),
                     },
                     "runtime": {
                         key: str(value)
@@ -2973,6 +3070,7 @@ class DesktopApplication:
                     "libraries": libraries,
                     "checks": tuple((item.name, item.ok, item.detail) for item in checks),
                     "log_excerpt": _tail(self.runtime.log_path, 80),
+                    "findings": diagnostic_findings(state),
                 }
             except Exception as exc:
                 _LOGGER.exception("diagnostics_failed type=%s", type(exc).__name__)
@@ -2982,11 +3080,34 @@ class DesktopApplication:
                 }
             self.signals.diagnostics_ready.emit(report)
 
-        threading.Thread(target=worker, name="voxtype-diagnostics", daemon=True).start()
+        if not self._run_background("voxtype-diagnostics", worker):
+            self._diagnostics_running = False
+            self.diagnostics_window.set_self_test_running(False, "Повторите проверку позже")
 
     def _on_diagnostics_ready(self, report: object) -> None:
+        self._diagnostics_running = False
+        if self._closing:
+            return
         self.diagnostics_window.set_self_test_running(False)
         self.diagnostics_window.set_report(report)
+        self.diagnostics_window.set_findings(
+            report.get("findings", ()) if isinstance(report, dict) else ()
+        )
+
+    def _apply_diagnostic_action(self, action: str) -> None:
+        if self._closing:
+            return
+        self.diagnostics_window.hide()
+        if action in {DiagnosticAction.MODELS, DiagnosticAction.PERFORMANCE}:
+            self.show_settings("models")
+        elif action == DiagnosticAction.AUDIO:
+            self.show_settings()
+            self.settings_window.open_audio()
+        elif action == DiagnosticAction.HOTKEYS:
+            self.show_settings()
+            self.settings_window.open_hotkeys()
+        elif action == DiagnosticAction.OUTBOX:
+            self._load_delivery_outbox()
 
     def show_onboarding(self) -> None:
         if self.onboarding is not None and self.onboarding.isVisible():
@@ -3016,6 +3137,7 @@ class DesktopApplication:
         wizard.insertion_test_requested.connect(self._test_insertion)
         wizard.setup_completed.connect(self._complete_onboarding)
         wizard.rejected.connect(self._stop_practice)
+        wizard.rejected.connect(self._stop_audio_test)
         wizard.show()
         _LOGGER.info("onboarding_shown total_ms=%.1f", (time.perf_counter() - started) * 1_000.0)
         self._run_background("voxtype-onboarding-devices", self._scan_settings_devices)
@@ -3028,38 +3150,43 @@ class DesktopApplication:
     def _recommend_hardware(self) -> None:
         def worker() -> None:
             hardware = probe_hardware()
-            # RAM alone cannot prove realtime inference.  Begin with the measured
-            # conservative profile; the phrase benchmark may promote a faster CPU.
-            summary = (
-                f"{hardware.cpu_name}; {hardware.total_ram_bytes / 1024**3:.1f} ГБ RAM. "
-                "Окончательный выбор можно изменить после локального benchmark."
+            profile, reason = self.runtime.model_manager.suggest_profile(
+                physical_cores=hardware.physical_cores,
+                available_ram=hardware.available_ram_bytes,
+                measured_rtf=self.controller.metrics.snapshot()["rtf_average"],
+                allowed=self.controller.policy.model_allowed,
             )
-            self.signals.hardware_ready.emit("fast", summary)
+            self.signals.hardware_ready.emit(
+                profile.value if profile is not None else "",
+                f"{hardware.cpu_name} · {hardware.available_ram_bytes / 1024**3:.1f} ГБ доступно. {reason}",
+            )
 
-        threading.Thread(target=worker, name="voxtype-hardware-probe", daemon=True).start()
+        self._run_background("voxtype-hardware-probe", worker)
 
     def _on_hardware_ready(self, profile: str, summary: str) -> None:
         if self.onboarding is not None:
-            self.onboarding.set_hardware_recommendation(profile, summary)
+            selected = "accurate" if profile == ASRProfile.MAXIMUM_ACCURACY else profile
+            self.onboarding.set_hardware_recommendation(selected, summary, ok=bool(profile))
 
     def _calibrate(self, device_text: str) -> None:
-        try:
-            device = int(device_text)
-        except ValueError:
-            device = self.runtime.device.index
+        if self._closing or not self.controller.reserve_audio_monitor():
+            self._on_calibration_ready(device_error_result("микрофон занят"))
+            return
+        cancel = self._audio_test_cancel = threading.Event()
+        self.signals.state_changed.emit()
 
         def worker() -> None:
             capture_rate = 48_000
             try:
-                selected = next(
-                    (candidate for candidate in self.runtime.devices if candidate.index == device),
-                    self.runtime.device,
+                selected = resolve_recording_device(
+                    int(device_text) if device_text else None, self.runtime.devices
                 )
                 capture_rate = choose_capture_rate(selected)
                 silence = record_input(
                     selected,
                     2.5,
                     capture_rate,
+                    cancel=cancel,
                     progress=lambda elapsed: self.signals.calibration_progress.emit(
                         min(89, round(elapsed / 7.5 * 90)),
                         "Пожалуйста, помолчите 2–3 секунды.",
@@ -3069,6 +3196,7 @@ class DesktopApplication:
                     selected,
                     5.0,
                     capture_rate,
+                    cancel=cancel,
                     progress=lambda elapsed: self.signals.calibration_progress.emit(
                         min(89, round((2.5 + elapsed) / 7.5 * 90)),
                         "Теперь произнесите обычным голосом несколько предложений.",
@@ -3080,14 +3208,21 @@ class DesktopApplication:
                     speech,
                     sample_rate=capture_rate,
                 )
+            except InterruptedError:
+                return
             except Exception as exc:
-                _LOGGER.exception("calibration_capture_failed type=%s", type(exc).__name__)
+                _LOGGER.warning("calibration_capture_failed type=%s", type(exc).__name__)
                 result = device_error_result(
                     "не удалось открыть выбранный микрофон", sample_rate=capture_rate
                 )
+            finally:
+                self.controller.release_audio_monitor()
+                self.signals.state_changed.emit()
             self.signals.calibration_ready.emit(result)
 
-        threading.Thread(target=worker, name="voxtype-calibration", daemon=True).start()
+        if not self._run_background("voxtype-calibration", worker, finish_on_close=True):
+            self.controller.release_audio_monitor()
+            self._on_calibration_ready(device_error_result("повторите проверку позже"))
 
     def _on_calibration_progress(self, percent: int, message: str) -> None:
         if self.onboarding is not None:
@@ -3332,47 +3467,36 @@ class DesktopApplication:
             self.controller.release_audio_monitor()
 
     def _delete_local_data(self) -> None:
-        if self.controller.state.name != "IDLE" or (self._file_queue and self._file_queue.busy):
+        if (
+            self._closing
+            or self._settings_write_running
+            or (self._file_queue and self._file_queue.busy)
+            or not self.controller.reserve_storage_maintenance()
+        ):
             self.settings_window.set_diagnostics_status(
                 "Сначала завершите активную диктовку", False
             )
             return
-        self.controller.backend.unload()
-        if (
-            self.controller.retry_backend is not None
-            and self.controller.retry_backend is not self.controller.backend
-        ):
-            self.controller.retry_backend.unload()
-        removed = self.runtime.session_repository.delete_all()
-        root_logger = logging.getLogger("voxtype")
-        for handler in tuple(root_logger.handlers):
-            root_logger.removeHandler(handler)
-            handler.close()
-        log_root = self.runtime.log_path.parent.resolve()
-        data_root = self.runtime.data_directory.resolve()
-        for child in tuple(data_root.iterdir()):
-            if child.name.startswith("sessions.sqlite3"):
-                continue
-            _remove_owned_path(child, data_root)
-        spool_root = self.controller.spool_root.resolve()
-        if spool_root.exists():
-            for child in tuple(spool_root.iterdir()):
-                _remove_owned_path(child, spool_root)
-        config_root = self.runtime.settings_repository.path.parent.resolve()
-        if config_root.exists():
-            for child in tuple(config_root.iterdir()):
-                _remove_owned_path(child, config_root)
-        if log_root.exists():
-            for child in tuple(log_root.iterdir()):
-                _remove_owned_path(child, log_root)
-        self.runtime.log_path = configure_logging()
-        defaults = create_default_settings()
-        self.runtime.settings = defaults
-        self.controller.settings = defaults
-        self.runtime.startup.disable()
-        self.settings_window.set_diagnostics_status(
-            f"Локальные данные удалены; сессий: {removed}. Модели нужно скачать заново.", True
-        )
+
+        def clean() -> None:
+            try:
+                removed = self.runtime.session_repository.delete_all()
+                data = self.runtime.data_directory
+                _remove_owned_path(data / "audio", data)
+                spool = self.controller.spool_root
+                if spool.is_dir():
+                    for entry in spool.iterdir():
+                        _remove_owned_path(entry, spool)
+            except (OSError, sqlite3.Error) as exc:
+                _LOGGER.warning("local_cleanup_failed kind=%s", type(exc).__name__)
+                self.signals.data_status.emit("Часть данных не удалось очистить", False)
+            else:
+                self.signals.data_status.emit(f"Удалены локальные записи: {removed}", True)
+            finally:
+                self.controller.release_storage_maintenance()
+
+        if not self._run_background("voxtype-storage-cleanup", clean, finish_on_close=True):
+            self.controller.release_storage_maintenance()
 
     def _open_log(self) -> None:
         os.startfile(self.runtime.log_path)
@@ -3422,7 +3546,9 @@ class DesktopApplication:
             return
         if not self.controller.start_dictation(
             practice_language=Language(language),
-            practice_capture=self._capture_factory_for(device_id, device.fingerprint),
+            practice_capture=self._capture_factory_for(
+                device_id, device.fingerprint, device.endpoint_id or ""
+            ),
         ):
             self.signals.phrase_ready.emit(
                 language, self.controller.snapshot().readiness.message, False
@@ -3607,14 +3733,41 @@ def _tail(path: Path, lines: int) -> str:
 
 
 def _remove_owned_path(path: Path, root: Path) -> None:
-    resolved = path.resolve()
-    owned_root = root.resolve()
-    if resolved == owned_root or owned_root not in resolved.parents or not resolved.exists():
+    try:
+        relative = path.absolute().relative_to(root.absolute())
+        root_info = root.lstat()
+    except (ValueError, FileNotFoundError):
         return
-    if resolved.is_dir():
-        shutil.rmtree(resolved)
+    if (
+        not relative.parts
+        or ".." in relative.parts
+        or stat.S_ISLNK(root_info.st_mode)
+        or (
+            getattr(root_info, "st_file_attributes", 0)
+            & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+        )
+    ):
+        return
+    owned_root = root.resolve()
+    path = owned_root / relative
+    for entry in (path, *path.parents):
+        if entry == owned_root:
+            break
+        try:
+            info = entry.lstat()
+        except FileNotFoundError:
+            return
+        if stat.S_ISLNK(info.st_mode) or (
+            getattr(info, "st_file_attributes", 0)
+            & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+        ):
+            return
+    if path.resolve() != path:
+        return
+    if path.is_dir():
+        shutil.rmtree(path)
     else:
-        resolved.unlink()
+        path.unlink()
 
 
 def _coerce_asr_profile(value: str) -> ASRProfile:

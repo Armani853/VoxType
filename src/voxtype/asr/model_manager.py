@@ -129,6 +129,57 @@ class ModelManager:
             raise ValueError("model path escaped the managed directory")
         return path
 
+    def suggest_profile(
+        self,
+        *,
+        physical_cores: int,
+        available_ram: int,
+        measured_rtf: float,
+        allowed: Callable[[str], bool],
+    ) -> tuple[ASRProfile | None, str]:
+        candidates = tuple(
+            (profile, spec)
+            for profile, spec in DEFAULT_MODEL_SPECS.items()
+            if allowed(spec.model_id)
+        )
+        if not candidates:
+            return None, "Политика организации не разрешает доступные модели."
+        installed = {item.model_id: item.size_bytes for item in self.list_installed()}
+        gib = 1024**3
+        accurate = ASRProfile.MAXIMUM_ACCURACY
+        large_size = installed.get(DEFAULT_MODEL_SPECS[accurate].model_id, 0)
+        profiles = {profile for profile, _ in candidates}
+        if (
+            accurate in profiles
+            and large_size
+            and physical_cores >= 6
+            and available_ram >= max(12 * gib, 4 * large_size + 2 * gib)
+            and 0 < measured_rtf <= 0.75
+        ):
+            chosen = accurate
+        elif (
+            ASRProfile.BALANCED in profiles
+            and physical_cores >= 4
+            and available_ram >= 6 * gib
+            and measured_rtf <= 1.0
+        ):
+            chosen = ASRProfile.BALANCED
+        else:
+            chosen = candidates[0][0]
+        model = DEFAULT_MODEL_SPECS[chosen].model_id
+        size = installed.get(model)
+        availability = (
+            f"Модель {model} установлена ({size / 1024**2:.0f} МиБ)."
+            if size
+            else f"Модель {model} требует загрузки по вашему запросу."
+        )
+        latency = (
+            f" Средний измеренный RTF предыдущих операций: {measured_rtf:.2f}."
+            if measured_rtf > 0
+            else " Замеров скорости пока нет."
+        )
+        return chosen, f"{availability} Поддерживаются RU и EN.{latency}"
+
     def is_installed(self, model_id: str, *, verify: bool = False) -> bool:
         return self.integrity_state(model_id, verify=verify) is ModelIntegrityState.READY
 

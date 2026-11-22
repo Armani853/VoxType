@@ -328,7 +328,10 @@ def build_runtime(*, verbose: bool = False) -> RuntimeBundle:
         logging.getLogger("voxtype.runtime").warning("audio_device_discovery_unavailable")
         devices = ()
     matched_device = match_input_device(
-        devices, settings.audio.device_id, settings.audio.device_fingerprint
+        devices,
+        settings.audio.device_id,
+        settings.audio.device_fingerprint,
+        settings.audio.device_endpoint_id if settings.audio.device_id is not None else "",
     )
     device = matched_device or InputDevice(-1, "Микрофон недоступен", "", 0, 0, (), False)
     stage("audio_devices_enumerated")
@@ -383,7 +386,10 @@ def build_runtime(*, verbose: bool = False) -> RuntimeBundle:
             else ()
         )
         selected = resolve_recording_device(
-            settings.audio.device_id, current, settings.audio.device_fingerprint
+            settings.audio.device_id,
+            current,
+            settings.audio.device_fingerprint,
+            settings.audio.device_endpoint_id if settings.audio.device_id is not None else "",
         )
         return AudioCaptureService(
             queue,

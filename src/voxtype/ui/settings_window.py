@@ -566,6 +566,12 @@ if PYSIDE6_AVAILABLE:
         def open_models(self) -> None:
             self.navigation.setCurrentRow(self._models_index)
 
+        def open_audio(self) -> None:
+            self.navigation.setCurrentRow(self.pages.indexOf(self._audio_page))
+
+        def open_hotkeys(self) -> None:
+            self.navigation.setCurrentRow(self.pages.indexOf(self._hotkeys_page))
+
         def confirm_navigation(self) -> bool:
             if not self._dirty:
                 return True
@@ -682,7 +688,7 @@ if PYSIDE6_AVAILABLE:
             actions = QHBoxLayout(data_actions)
             actions.setContentsMargins(0, 0, 0, 0)
             self.open_data_button = QPushButton("Открыть папку данных", data_actions)
-            self.delete_data_button = QPushButton("Удалить локальные данные", data_actions)
+            self.delete_data_button = QPushButton("Удалить локальные записи", data_actions)
             self.delete_data_button.setProperty("danger", True)
             actions.addWidget(self.open_data_button)
             actions.addWidget(self.delete_data_button)
@@ -751,6 +757,7 @@ if PYSIDE6_AVAILABLE:
             page, form = self._page(
                 "Горячие клавиши", "Глобальные сочетания; конфликты проверяются при применении."
             )
+            self._hotkeys_page = page
             self.toggle_hotkey_edit = QKeySequenceEdit(page)
             self.pause_hotkey_edit = QKeySequenceEdit(page)
             self.language_hotkey_edit = QKeySequenceEdit(page)
@@ -1303,8 +1310,8 @@ if PYSIDE6_AVAILABLE:
         def _confirm_delete_data(self) -> None:
             if confirm_delete(
                 self,
-                "Удалить локальные данные?",
-                "Будут удалены история, журналы сессий и сохранённое аудио. "
+                "Удалить локальные записи?",
+                "Будут удалены история, черновики, журналы сессий и сохранённое аудио. "
                 "Это действие нельзя отменить.",
             ):
                 self.delete_local_data_requested.emit()

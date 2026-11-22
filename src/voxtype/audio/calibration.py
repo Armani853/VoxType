@@ -97,11 +97,23 @@ class CalibrationResult:
 
     @property
     def technical_details(self) -> str:
+        noise = (
+            (
+                "тихий"
+                if self.silence.dbfs < -55
+                else "умеренный"
+                if self.silence.dbfs < -38
+                else "шумный"
+            )
+            if self.capture_worked
+            else "не измерен"
+        )
         return (
             f"dtype={self.input_dtype}; {self.sample_rate} Гц; channels={self.channels}; "
             f"noise RMS={self.silence.rms:.7f} ({self.silence.dbfs:.1f} dBFS); "
             f"speech RMS={self.speech.rms:.7f} ({self.speech.dbfs:.1f} dBFS); "
-            f"peak={self.speech.peak:.7f}; P95={self.speech.p95_absolute:.7f}; "
+            f"peak={self.speech.peak:.7f} ({_to_dbfs(self.speech.peak):.1f} dBFS); "
+            f"фон: {noise}; P95={self.speech.p95_absolute:.7f}; "
             f"margin={self.margin_db:.1f} dB; clipping={self.clipping_percentage:.3f}%; "
             f"speech activity={self.speech_activity_ratio * 100:.1f}%"
         )

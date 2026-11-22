@@ -14,6 +14,7 @@ import tempfile
 import time
 from dataclasses import dataclass
 from datetime import datetime
+from importlib.util import find_spec
 from pathlib import Path
 from threading import Event
 from urllib.parse import urlsplit
@@ -27,6 +28,19 @@ _INSTALLER_LIMIT = 2 * 1024**3
 
 class UpdatesUnavailable(RuntimeError):
     pass
+
+
+def update_configuration_status() -> tuple[bool, str]:
+    if sys.platform != "win32":
+        return False, "Подписанные обновления доступны только в Windows"
+    if not all(
+        os.environ.get(key, "").strip()
+        for key in ("VOXTYPE_UPDATE_MANIFEST", "VOXTYPE_UPDATE_PUBLIC_KEY")
+    ):
+        return False, "Доверенный канал обновлений не настроен"
+    if find_spec("cryptography") is None:
+        return False, "В этой сборке нет проверки подписи Ed25519"
+    return True, ""
 
 
 class _NoRedirects(HTTPRedirectHandler):
@@ -75,7 +89,7 @@ def _version(value: str) -> tuple[int, int, int, int, int]:
     return int(major), int(minor), int(patch), int(beta is None), int(beta or 0)
 
 
-def _canonical(document: dict) -> bytes:
+def canonical_update_payload(document: dict[str, object]) -> bytes:
     return json.dumps(
         document, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False
     ).encode("ascii")
@@ -151,7 +165,8 @@ class UpdateMetadataClient:
             raise ValueError("Invalid manifest envelope")
         payload = document["payload"]
         self._verifier.verify(
-            base64.b64decode(document["signature"], validate=True), _canonical(payload)
+            base64.b64decode(document["signature"], validate=True),
+            canonical_update_payload(payload),
         )
         fields = {
             "schema_version",

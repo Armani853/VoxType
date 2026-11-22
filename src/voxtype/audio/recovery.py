@@ -39,9 +39,9 @@ class RecoveryCoordinator:
 class AudioDeviceReconciler:
     @staticmethod
     def match(
-        devices: tuple[InputDevice, ...], index: int | None, fingerprint: str
+        devices: tuple[InputDevice, ...], index: int | None, fingerprint: str, endpoint_id: str = ""
     ) -> InputDevice | None:
         # An index-only saved choice cannot be safely rebound after enumeration.
-        if index is not None and not fingerprint:
+        if index is not None and not fingerprint and not endpoint_id:
             return None
-        return match_input_device(devices, index, fingerprint)
+        return match_input_device(devices, index, fingerprint, endpoint_id)

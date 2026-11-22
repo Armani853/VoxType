@@ -52,6 +52,7 @@ from voxtype.core.profiles import (
     ProfileManager,
 )
 from voxtype.core.state_machine import AppState, StateMachine
+from voxtype.monitoring.assistant import DiagnosticSnapshot
 from voxtype.monitoring.metrics import PerformanceMonitor
 from voxtype.sessions.journal import SessionJournal
 from voxtype.sessions.repository import SessionRepository
@@ -242,6 +243,7 @@ class ApplicationController:
         self._pipeline_thread: threading.Thread | None = None
         self._inference_thread: threading.Thread | None = None
         self._recovery_active = False
+        self._storage_maintenance_active = False
         self._start_thread: threading.Thread | None = None
         self._preload_thread: threading.Thread | None = None
         self._stop_thread: threading.Thread | None = None
@@ -1599,7 +1601,7 @@ class ApplicationController:
                             "Вставка не подтверждена. Автоповтор отключён во избежание дубля."
                         )
                     elif injection.status is InjectionStatus.INSERTED:
-                        self._delivery_status = "delivered"
+                        self._delivery_status = "submitted_unconfirmed"
                         self._status_message = "Команда вставки отправлена"
                         self._error_message = ""
                     elif injection.status is InjectionStatus.COPIED:
@@ -1866,6 +1868,7 @@ class ApplicationController:
             if (
                 self._shutdown_requested.is_set()
                 or self._recovery_active
+                or self._storage_maintenance_active
                 or self._file_recognition_active
                 or self._audio_monitor_active
                 or self._model_switch_active
@@ -2369,6 +2372,34 @@ class ApplicationController:
         with self._lock:
             return self._readiness()
 
+    def reserve_storage_maintenance(self) -> bool:
+        with self._lock:
+            if not self.can_change_runtime_settings() or self._storage_maintenance_active:
+                return False
+            self._storage_maintenance_active = True
+            return True
+
+    def release_storage_maintenance(self) -> None:
+        with self._lock:
+            self._storage_maintenance_active = False
+
+    def diagnostic_state(self, hotkey_available: bool) -> DiagnosticSnapshot:
+        with self._lock:
+            stats = self._last_stats
+            result = self._recognition_result
+            quality = self._audio_quality
+            return DiagnosticSnapshot(
+                self._microphone_available if self._initialized else None,
+                None,
+                self._model_available and self.policy.model_allowed(self.backend.model_id),
+                self.active_model_loaded,
+                hotkey_available,
+                stats.callback_overflows if stats is not None else 0,
+                bool(quality and quality.clipping_detected),
+                result.error_code if result and result.status is RecognitionStatus.FAILED else None,
+                self._delivery_status,
+            )
+
     def active_profile_id(self) -> str:
         with self._lock:
             if self._session_started_monotonic is not None:
@@ -2379,6 +2410,7 @@ class ApplicationController:
         state = self.state
         busy = (
             self._recovery_active
+            or self._storage_maintenance_active
             or self._file_recognition_active
             or self._inference_thread is not None
             or self._delivery_busy
@@ -2399,6 +2431,8 @@ class ApplicationController:
             phase, reason, message = AppPhase.PROCESSING, "processing", "Обработка записи"
         elif self._audio_monitor_active:
             phase, reason, message = AppPhase.PROCESSING, "audio_monitor", "Проверка микрофона"
+        elif self._storage_maintenance_active:
+            phase, reason, message = AppPhase.PROCESSING, "storage_maintenance", "Очистка данных"
         elif self._file_recognition_active:
             phase, reason, message = (
                 AppPhase.PROCESSING,
@@ -2781,7 +2815,7 @@ class ApplicationController:
                 self._record_delivery_outcome(delivery_id, True, status, result.status.value)
             with self._lock:
                 self._delivery_status = {
-                    InjectionStatus.INSERTED: "delivered",
+                    InjectionStatus.INSERTED: "submitted_unconfirmed",
                     InjectionStatus.COPIED: "copied",
                     InjectionStatus.QUEUED: "queued_target_inactive",
                 }.get(result.status, "copy_required")
@@ -3032,7 +3066,7 @@ class ApplicationController:
             self._reconcile_outbox_retry()
         with self._lock:
             if result.status is InjectionStatus.INSERTED:
-                self._delivery_status = "delivered"
+                self._delivery_status = "submitted_unconfirmed"
                 self._status_message = "Команда вставки отправлена"
                 self._error_message = ""
                 if int(getattr(self.injection_service, "pending_fragments", 0)) == 0:

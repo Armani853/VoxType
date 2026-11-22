@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from voxtype.monitoring.assistant import DiagnosticFinding
+
 from ._optional import PYSIDE6_AVAILABLE, require_pyside6
 from .models import DiagnosticReport, diagnostic_report_from
 
@@ -36,6 +38,7 @@ if PYSIDE6_AVAILABLE:
         export_requested = Signal()
         resources_requested = Signal()
         updates_requested = Signal()
+        finding_action_requested = Signal(str)
 
         def __init__(self, parent: QWidget | None = None) -> None:
             super().__init__(parent)
@@ -98,9 +101,9 @@ if PYSIDE6_AVAILABLE:
             self.self_test_button.setProperty("compactPrimary", True)
             header.addWidget(self.refresh_button)
             header.addWidget(self.self_test_button)
-            updates = QPushButton("Обновления", self)
-            updates.clicked.connect(lambda: self.updates_requested.emit())
-            header.addWidget(updates)
+            self.updates_button = QPushButton("Обновления", self)
+            self.updates_button.clicked.connect(lambda: self.updates_requested.emit())
+            header.addWidget(self.updates_button)
             root.addLayout(header)
             self.live_resources = QCheckBox("Показывать нагрузку в реальном времени", self)
             self.resource_label = QLabel(self)
@@ -131,6 +134,8 @@ if PYSIDE6_AVAILABLE:
             checks_header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
             checks_header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
             overview_layout.addWidget(self.checks_table)
+            self.findings = QVBoxLayout()
+            overview_layout.addLayout(self.findings)
             self.tabs.addTab(self.overview_tab, "Проверки")
             for key, title in (
                 ("hardware", "Компьютер"),
@@ -214,6 +219,22 @@ if PYSIDE6_AVAILABLE:
             self._fill_table(self._tables["libraries"], parsed.libraries)
             self.log_edit.setPlainText(parsed.log_excerpt)
             self.set_self_test_running(False)
+
+        def set_findings(self, findings: tuple[DiagnosticFinding, ...]) -> None:
+            while self.findings.count():
+                item = self.findings.takeAt(0)
+                if item is not None and (widget := item.widget()) is not None:
+                    widget.deleteLater()
+            for finding in findings:
+                button = QPushButton(finding.label, self.overview_tab)
+                button.setToolTip(finding.detail)
+                button.setAccessibleDescription(finding.detail)
+                button.clicked.connect(
+                    lambda _checked=False, action=finding.action: (
+                        self.finding_action_requested.emit(action.value)
+                    )
+                )
+                self.findings.addWidget(button)
 
         def _fill_checks(self, checks: tuple[tuple[str, bool, str], ...]) -> None:
             self.checks_table.setRowCount(len(checks))

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ctypes
+import os
 from dataclasses import dataclass
 from typing import Any
 
@@ -19,6 +21,7 @@ class InputDevice:
     default_sample_rate: int
     supported_sample_rates: tuple[int, ...]
     is_default: bool
+    endpoint_id: str | None = None
 
     @property
     def fingerprint(self) -> str:
@@ -38,7 +41,16 @@ def match_input_device(
     devices: tuple[InputDevice, ...],
     index: int | None,
     fingerprint: str = "",
+    endpoint_id: str = "",
 ) -> InputDevice | None:
+    if endpoint_id:
+        matches = [
+            device
+            for device in devices
+            if device.endpoint_id is not None
+            and device.endpoint_id.casefold() == endpoint_id.casefold()
+        ]
+        return matches[0] if len(matches) == 1 else None
     if index is None:
         return next((device for device in devices if device.is_default), None)
     if fingerprint:
@@ -57,6 +69,45 @@ def _sounddevice() -> Any:
     return sounddevice
 
 
+def _wasapi_device_accessor(sd: Any) -> Any:
+    if os.name != "nt":
+        return None
+    try:
+        function = ctypes.CDLL(sd._libname).PaWasapi_GetIMMDevice
+        function.argtypes = (ctypes.c_int, ctypes.POINTER(ctypes.c_void_p))
+        function.restype = ctypes.c_int
+        return function
+    except (AttributeError, OSError):
+        return None
+
+
+def _wasapi_endpoint(accessor: Any, index: int) -> tuple[str | None, bool]:
+    """Read IMMDevice metadata from the current PortAudio inventory."""
+    device = ctypes.c_void_p()
+    if accessor(index, ctypes.byref(device)) != 0 or not device.value:
+        return None, True
+    # PortAudio owns the IMMDevice.  The endpoint ID is a caller-owned COM string.
+    vtable = ctypes.cast(device, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p)))[0]
+    get_id = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p))(
+        vtable[5]
+    )
+    get_state = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong))(
+        vtable[6]
+    )
+    value = ctypes.c_void_p()
+    state = ctypes.c_ulong()
+    active = get_state(device, ctypes.byref(state)) != 0 or bool(state.value & 0x1)
+    if get_id(device, ctypes.byref(value)) != 0 or not value.value:
+        return None, active
+    free = ctypes.OleDLL("ole32").CoTaskMemFree
+    free.argtypes = (ctypes.c_void_p,)
+    free.restype = None
+    try:
+        return ctypes.wstring_at(value), active
+    finally:
+        free(value)
+
+
 def list_input_devices(
     *,
     candidate_sample_rates: tuple[int, ...] = (16_000, 22_050, 32_000, 44_100, 48_000, 96_000),
@@ -72,6 +123,7 @@ def list_input_devices(
         raise AudioBackendUnavailable("PortAudio не смог перечислить устройства записи.") from exc
 
     devices: list[InputDevice] = []
+    wasapi = _wasapi_device_accessor(sd)
     for index, raw in enumerate(raw_devices):
         channels = int(raw.get("max_input_channels", 0))
         if channels <= 0:
@@ -92,6 +144,13 @@ def list_input_devices(
         host_name = "Unknown"
         if 0 <= host_index < len(host_apis):
             host_name = str(host_apis[host_index].get("name", "Unknown"))
+        endpoint, active = (
+            _wasapi_endpoint(wasapi, index)
+            if wasapi is not None and "wasapi" in host_name.casefold()
+            else (None, True)
+        )
+        if not active:
+            continue
         devices.append(
             InputDevice(
                 index=index,
@@ -101,6 +160,7 @@ def list_input_devices(
                 default_sample_rate=default_rate,
                 supported_sample_rates=tuple(sorted(set(supported))),
                 is_default=index == default_input,
+                endpoint_id=endpoint,
             )
         )
     return tuple(devices)
@@ -125,15 +185,16 @@ def resolve_recording_device(
     selected_index: int | None,
     known_devices: tuple[InputDevice, ...],
     fingerprint: str = "",
+    endpoint_id: str = "",
 ) -> InputDevice:
     """Resolve the stream device before choosing its native rate and channel count."""
     if selected_index is None:
         devices = list_input_devices(candidate_sample_rates=(16_000, 48_000))
-        for device in devices:
-            if device.is_default:
-                return device
+        device = match_input_device(devices, None, endpoint_id=endpoint_id)
+        if device is not None:
+            return device
         raise AudioBackendUnavailable("Windows не назначила устройство записи по умолчанию.")
-    selected = match_input_device(known_devices, selected_index, fingerprint)
+    selected = match_input_device(known_devices, selected_index, fingerprint, endpoint_id)
     if selected is not None:
         return selected
     raise AudioBackendUnavailable(f"Выбранное устройство записи недоступно ({selected_index}).")

@@ -289,8 +289,8 @@ if PYSIDE6_AVAILABLE:
             if state.state is AppStatus.COMPLETED:
                 if state.delivery_status == "no_result":
                     return state.status_message
-                if state.delivery_status == "delivered":
-                    return "Команда вставки отправлена"
+                if state.delivery_status in {"delivered", "submitted_unconfirmed"}:
+                    return "Команда вставки отправлена; проверьте целевое поле"
                 if state.delivery_status == "copied":
                     return "Текст скопирован"
                 if state.delivery_status == "queued_target_inactive":
