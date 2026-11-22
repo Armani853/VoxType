@@ -127,6 +127,7 @@ class ApplicationController:
         vocabulary: Vocabulary | None = None,
         logger: logging.Logger | None = None,
         inference_timeout_s: float = 120.0,
+        enterprise: EnterprisePolicyService | None = None,
     ) -> None:
         if inference_timeout_s <= 0:
             raise ValueError("inference_timeout_s must be positive")
@@ -153,17 +154,21 @@ class ApplicationController:
             loaded_settings.professional.get("typing_speed_wpm"),
         )
         self.profiles = ProfileManager(settings_repository, loaded_settings.professional)
+        self.enterprise = enterprise or EnterprisePolicyService()
+        self.policy = self.enterprise.policy
         self.professional_content = ProfessionalContent(
-            settings_repository, loaded_settings.professional
+            settings_repository,
+            loaded_settings.professional,
+            allow_organization_vocabulary=self.policy.allow_organization_vocabulary,
         )
         self.organization_packs = OrganizationPackService(
             settings_repository,
             self.profiles,
             self.professional_content,
         )
-        self.enterprise = EnterprisePolicyService()
-        self.policy = self.enterprise.policy
-        if self.policy.disable_history and isinstance(injection_service, TextInjectionService):
+        if (
+            self.policy.disable_history or not self.policy.allow_clipboard_persistence
+        ) and isinstance(injection_service, TextInjectionService):
             injection_service.configure_pending_storage(False)
         if self.policy.disabled_applications:
             self.target_manager.application_blocked = lambda window: self.policy.blocked(
@@ -414,7 +419,9 @@ class ApplicationController:
             if isinstance(
                 self.injection_service, TextInjectionService
             ) and not self.injection_service.configure_pending_storage(
-                self.settings.privacy.save_history and not self.policy.disable_history
+                self.settings.privacy.save_history
+                and not self.policy.disable_history
+                and self.policy.allow_clipboard_persistence
             ):
                 self._error_message = "Скопируйте ожидающий доставки текст перед началом записи"
                 self.target_manager.end_session()
@@ -2358,6 +2365,16 @@ class ApplicationController:
                 self._loaded_backend = None
                 self._model_switch_active = False
 
+    def recording_readiness(self) -> AppReadiness:
+        with self._lock:
+            return self._readiness()
+
+    def active_profile_id(self) -> str:
+        with self._lock:
+            if self._session_started_monotonic is not None:
+                return self._session_profile.id
+        return self.profiles.default_id
+
     def _readiness(self) -> AppReadiness:
         state = self.state
         busy = (
@@ -3226,6 +3243,7 @@ class ApplicationController:
                 and not self._session_interrupted
                 and not self._local_only
                 and self.settings.dictation.copy_full_text_on_complete
+                and self.policy.allow_clipboard_persistence
                 and completed_text
                 and self._practice_language is None
             ):

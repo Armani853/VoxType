@@ -6,11 +6,30 @@ import ctypes
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Any
 
-from PySide6.QtCore import QEasingCurve, QEvent, QObject, QVariantAnimation, Signal
+from PySide6.QtCore import QEasingCurve, QEvent, QObject, QSettings, QVariantAnimation, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QApplication, QGraphicsOpacityEffect, QWidget
+
+
+class MotionPreference(StrEnum):
+    SYSTEM = "system"
+    FULL = "full"
+    REDUCED = "reduced"
+
+    @classmethod
+    def load(cls, settings: QSettings) -> MotionPreference:
+        saved = settings.value("ui/motionPreference")
+        if saved is None:
+            return (
+                cls.REDUCED if settings.value("ui/reduceMotion", False, type=bool) else cls.SYSTEM
+            )
+        try:
+            return cls(saved)
+        except ValueError:
+            return cls.SYSTEM
 
 
 @dataclass(slots=True)
@@ -76,9 +95,12 @@ class AnimationCoordinator(QObject):
         self.preference_updated.emit()
 
     def reduced_motion_enabled(self) -> bool:
+        preference = self._application.property("voxtypeMotionPreference")
+        if preference == MotionPreference.FULL:
+            return False
         return (
-            not self._system_motion
-            or bool(self._application.property("voxtypeReduceMotion"))
+            preference == MotionPreference.REDUCED
+            or not self._system_motion
             or bool(self._application.property("voxtypeEcoMotion"))
         )
 

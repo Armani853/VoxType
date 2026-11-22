@@ -31,6 +31,14 @@ class EnterprisePolicy:
     disabled_applications: tuple[str, ...] = ()
     allow_user_snippets: bool = True
     allow_voice_commands: bool = True
+    allow_clipboard_persistence: bool = True
+    allow_local_api: bool = True
+    allow_optional_ai: bool = True
+    allow_organization_vocabulary: bool = True
+
+    @property
+    def permits_ai(self) -> bool:
+        return self.allow_optional_ai and not self.disable_external_processing
 
     @classmethod
     def parse(cls, raw: object) -> EnterprisePolicy:

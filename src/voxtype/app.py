@@ -99,7 +99,7 @@ from voxtype.ui import (
 from voxtype.ui.desktop_shell import CommandPalette
 from voxtype.ui.messages import failure_message
 from voxtype.ui.models import AppStatus, UIState
-from voxtype.ui.motion import AnimationCoordinator
+from voxtype.ui.motion import AnimationCoordinator, MotionPreference
 from voxtype.ui.obsidian import ModelDownloadDialog
 from voxtype.vad.segmenter import SegmentationSettings, StreamingSegmenter
 from voxtype.vad.silero import SileroVAD
@@ -108,6 +108,7 @@ from voxtype.windows.device_events import DeviceEvent, WindowsSystemEventBridge
 from voxtype.windows.foreground import capture_foreground
 from voxtype.windows.foreground_events import ForegroundEvents
 from voxtype.windows.hotkeys import GlobalHotkeyManager, parse_hotkey
+from voxtype.windows.local_automation import AutomationRejected, LocalAutomation
 from voxtype.windows.power_events import PowerEventCoordinator
 from voxtype.windows.send_input import SendInputController
 from voxtype.windows.single_instance import WM_VOXTYPE_RESTORE
@@ -236,6 +237,8 @@ class _StartupRestoreFilter(QAbstractNativeEventFilter):
 class DesktopApplication:
     """Own Qt views and adapt them to the Qt-independent controller."""
 
+    _local_automation: LocalAutomation | None = None
+
     def __init__(
         self, application: QApplication, runtime: RuntimeBundle, *, main: MainWindow | None = None
     ) -> None:
@@ -275,8 +278,9 @@ class DesktopApplication:
         self.main.set_geometry_store(geometry)
         self._view_preferences = geometry
         self.application.setProperty(
-            "voxtypeReduceMotion", geometry.value("ui/reduceMotion", False, type=bool)
+            "voxtypeMotionPreference", MotionPreference.load(geometry).value
         )
+        AnimationCoordinator.instance().preference_changed()
         self._model_download_dialog: ModelDownloadDialog | None = None
         self._model_download_cancel: threading.Event | None = None
         self._downloading_model: str | None = None
@@ -359,6 +363,8 @@ class DesktopApplication:
         self._background_workers: set[threading.Thread] = set()
         self._closed = False
         self._closing = False
+        self._automation_session: int | None = None
+        self._automation_profile_updating = threading.Event()
         self._foreground_events = ForegroundEvents(
             self.signals.foreground_changed.emit,
             focus_notify=self.signals.input_focus_changed.emit,
@@ -405,6 +411,7 @@ class DesktopApplication:
             0, self.main, lambda: self.system_events.start(hwnd) if not self._closing else None
         )
         self.tray.show()
+        self._sync_local_automation()
         stage("tray_shown")
         if runtime.settings_repository.last_recovery_backup is not None:
             self.tray.show_message(
@@ -630,6 +637,8 @@ class DesktopApplication:
                 history_disabled=self.controller.policy.disable_history,
                 audio_disabled=self.controller.policy.disable_audio_storage,
             )
+            window.local_api_credentials_requested.connect(self._show_local_automation)
+            self._present_local_automation(window)
             window.settings_submitted.connect(self._save_settings)
             window.onboarding_requested.connect(self.show_onboarding)
             window.open_data_folder_requested.connect(self._open_data_folder)
@@ -1608,6 +1617,127 @@ class DesktopApplication:
         self._header_profile_id = None
         self._update_views_if_changed(self.controller.snapshot())
 
+    def _sync_local_automation(self) -> None:
+        enabled = (
+            self.controller.policy.allow_local_api
+            and not self._closing
+            and self.runtime.settings.privacy.local_api_enabled is True
+        )
+        automation = self._local_automation
+        if enabled and automation is None:
+            automation = self._local_automation = LocalAutomation(
+                self._dispatch_local_automation, self.main
+            )
+        if automation is not None:
+            automation.configure(enabled)
+        if self._settings_window is not None:
+            self._present_local_automation(self._settings_window)
+
+    def _present_local_automation(self, window: SettingsWindow) -> None:
+        allowed = bool(self.controller.policy.allow_local_api)
+        automation = self._local_automation
+        status = automation.status if automation is not None else "Выключен"
+        window.set_local_api_status(
+            allowed,
+            automation is not None and automation.credentials is not None,
+            status if allowed else "Отключено политикой организации",
+        )
+
+    def _show_local_automation(self) -> None:
+        automation = self._local_automation
+        credentials = automation.credentials if automation is not None else None
+        if credentials is None or self._closing or self._system_locked:
+            return
+        endpoint, token = credentials
+        dialog = QMessageBox(self.main)
+        dialog.setWindowTitle("Локальное API VoxType")
+        dialog.setTextFormat(Qt.TextFormat.PlainText)
+        dialog.setText(
+            "Доступ только для приложений текущего пользователя. "
+            "Токен меняется при перезапуске API.\n\n"
+            f"Канал: {endpoint}\nТокен: {token}"
+        )
+        dialog.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        dialog.setDetailedText(
+            "Один UTF-8 JSON-запрос на подключение, завершённый переводом строки.\n"
+            "Поля: schema_version=1, request_id (UUID), method, params, token.\n"
+            "get_status · list_profiles · get_active_profile · get_model_status\n"
+            "set_active_profile (params.profile_id) · start_dictation · stop_dictation"
+        )
+        dialog.exec()
+
+    def _dispatch_local_automation(self, method: str, params: dict[str, object]) -> object:
+        if (
+            self._closing
+            or self._system_locked
+            or self._system_sleeping
+            or not self.controller.policy.allow_local_api
+        ):
+            raise AutomationRejected("unavailable")
+        if method == "set_active_profile":
+            profile_id = params.get("profile_id")
+            if set(params) != {"profile_id"} or not isinstance(profile_id, str):
+                raise AutomationRejected("invalid_params")
+            profiles = self.controller.profiles
+            if not any(
+                profile.id == profile_id and self.controller.profile_allowed(profile)
+                for profile in profiles.profiles()
+            ):
+                raise AutomationRejected("profile_unavailable")
+            pending = self._automation_profile_updating
+            if pending.is_set() or self._settings_write_running:
+                raise AutomationRejected("busy")
+            pending.set()
+
+            def select_profile() -> None:
+                try:
+                    profiles.set_default(profile_id)
+                finally:
+                    pending.clear()
+
+            if not self._run_background(
+                "voxtype-api-profile", select_profile, finish_on_close=True
+            ):
+                pending.clear()
+                raise AutomationRejected("busy")
+            return {"accepted": True}
+        if params:
+            raise AutomationRejected("invalid_params")
+        if method == "get_status":
+            readiness = self.controller.recording_readiness()
+            return {
+                "phase": readiness.phase.value,
+                "reason": readiness.reason,
+                "can_record": readiness.can_record,
+            }
+        if method == "list_profiles":
+            return [
+                {"id": item.id, "name": item.name}
+                for item in self.controller.profiles.profiles()
+                if self.controller.profile_allowed(item)
+            ]
+        if method == "get_active_profile":
+            return {"profile_id": self.controller.active_profile_id()}
+        if method == "get_model_status":
+            readiness = self.controller.recording_readiness()
+            return {"phase": readiness.phase.value, "loaded": self.controller.active_model_loaded}
+        if method == "start_dictation":
+            if self.runtime.settings.privacy.local_api_allow_recording is not True:
+                raise AutomationRejected("recording_not_permitted")
+            if self._settings_write_running or not self.controller.start_dictation(local_only=True):
+                raise AutomationRejected("not_ready")
+            self._automation_session = self.controller.recording_readiness().session_id
+            return {"started": True}
+        if method == "stop_dictation":
+            readiness = self.controller.recording_readiness()
+            if self._automation_session is None or readiness.session_id != self._automation_session:
+                raise AutomationRejected("no_api_session")
+            if not self.controller.stop_dictation():
+                raise AutomationRejected("not_recording")
+            self._automation_session = None
+            return {"stopping": True}
+        raise AutomationRejected("unknown_method")
+
     def _start_professional_queue(self) -> None:
         if self._closing or self._file_queue is not None or self._file_queue_starting:
             return
@@ -2125,6 +2255,8 @@ class DesktopApplication:
         vad_changed = updated.audio.vad_sensitivity != previous.audio.vad_sensitivity
         self.runtime.settings = updated
         self.controller.settings = updated
+        if updated.privacy.local_api_enabled != previous.privacy.local_api_enabled:
+            self._sync_local_automation()
         self.controller.set_language(updated.dictation.language, persist=False)
         self.controller.vocabulary = vocabulary
         self.controller.target_manager.set_policy(TargetPolicy(updated.dictation.target_mode.value))
@@ -3383,6 +3515,8 @@ class DesktopApplication:
         if self._professional_window is not None:
             self._professional_window.flush_editor_draft()
         self._closing = True
+        if self._local_automation is not None:
+            self._local_automation.close()
         self.controller.begin_shutdown()
         if self.main.isVisible():
             self.main.update_snapshot(self.controller.snapshot())

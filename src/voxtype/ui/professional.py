@@ -317,10 +317,7 @@ class ProfessionalWindow(QDialog):
                 self._refresh_capabilities() if self.tabs.currentWidget() is page else None
             )
         )
-        if (
-            find_spec("llama_cpp") is not None
-            and not self.controller.policy.disable_external_processing
-        ):
+        if find_spec("llama_cpp") is not None and self.controller.policy.permits_ai:
             row = QHBoxLayout()
             self.ai_operation = QComboBox(page)
             for operation, title in OPERATIONS.items():
@@ -363,7 +360,7 @@ class ProfessionalWindow(QDialog):
 
     def _run_enhancement(self) -> None:
         backend = self.enhancer
-        if backend is None or self.controller.policy.disable_external_processing:
+        if backend is None or not self.controller.policy.permits_ai:
             return
         text = self.edit_original.toPlainText()
         profile = self._selected()

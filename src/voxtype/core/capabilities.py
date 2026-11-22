@@ -21,7 +21,7 @@ class CapabilityRegistry:
         matching_model = controller._model_available and policy.model_allowed(model_id)
         decoder = find_spec("av") is not None
         selection = os.name == "nt" and find_spec("comtypes") is not None
-        ai_allowed = not policy.disable_external_processing
+        ai_allowed = policy.permits_ai
         return {
             "local_asr": Capability(
                 matching_model, model_id if matching_model else "Нужна разрешённая локальная модель"

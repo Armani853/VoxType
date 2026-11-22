@@ -684,6 +684,17 @@ class WaveformWidget(QWidget):
         self._active_brush = QBrush(QColor(manager.get_token("accent")))
         self._idle_brush = QBrush(QColor(manager.get_token("border")))
         manager.theme_changed.connect(self._theme_changed)
+        motion = AnimationCoordinator.instance()
+        self._static = motion.reduced_motion_enabled()
+        motion.preference_updated.connect(self._motion_changed)
+
+    def _motion_changed(self) -> None:
+        static = AnimationCoordinator.instance().reduced_motion_enabled()
+        if self._static != static:
+            self._static = static
+            self._values.clear()
+            if self.isVisible():
+                self.update()
 
     def _theme_changed(self, _theme: object) -> None:
         manager = theme_manager(QApplication.instance())
@@ -693,7 +704,7 @@ class WaveformWidget(QWidget):
 
     def set_level(self, level: float, *_args: object) -> None:
         now = time.monotonic()
-        if not self._active or not self.isVisible() or now - self._last < 1 / 30:
+        if not self._active or self._static or not self.isVisible() or now - self._last < 1 / 30:
             return
         level = max(0.0, min(float(level), 1.0))
         coefficient = 0.35 if level >= self._level else 0.15
@@ -722,7 +733,7 @@ class WaveformWidget(QWidget):
         paint.setBrush(self._active_brush if self._active else self._idle_brush)
         values = (
             chain(repeat(0.0, self._bars - len(self._values)), self._values)
-            if self._active
+            if self._active and not self._static
             else self._idle_levels
         )
         x = (self.width() - (self._bars * 6 - 3)) / 2

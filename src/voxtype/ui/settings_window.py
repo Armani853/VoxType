@@ -44,6 +44,7 @@ if PYSIDE6_AVAILABLE:
 
     from voxtype.constants import DEFAULT_HOTKEY, DEFAULT_LANGUAGE_HOTKEY, DEFAULT_PAUSE_HOTKEY
 
+    from .motion import AnimationCoordinator, MotionPreference
     from .obsidian import (
         VoxButton,
         VoxComboBox,
@@ -100,6 +101,7 @@ if PYSIDE6_AVAILABLE:
         export_diagnostics_requested = Signal()
         self_test_requested = Signal()
         show_versions_requested = Signal()
+        local_api_credentials_requested = Signal()
         onboarding_requested = Signal()
 
         def __init__(self, parent: QWidget | None = None) -> None:
@@ -242,21 +244,29 @@ if PYSIDE6_AVAILABLE:
             )
             form.addRow("Тема", self.theme_combo)
             form.addRow("Язык интерфейса", self.interface_language_combo)
-            self.reduce_motion = VoxToggle("Уменьшить анимацию", page)
-            self.reduce_motion.setAccessibleDescription("Отключает декоративные переходы VoxType")
-            form.addRow(self.reduce_motion)
+            self.motion_combo = self._combo(
+                (
+                    ("Как в системе", MotionPreference.SYSTEM.value),
+                    ("Обычная", MotionPreference.FULL.value),
+                    ("Уменьшенная", MotionPreference.REDUCED.value),
+                ),
+                page,
+            )
+            self.motion_combo.setToolTip("Управляет декоративными переходами и волной записи.")
+            form.addRow("Анимация", self.motion_combo)
 
         def set_view_preferences(self, store: QSettings) -> None:
-            self.reduce_motion.setChecked(store.value("ui/reduceMotion", False, type=bool))
+            _select_data(self.motion_combo, MotionPreference.load(store).value)
 
-            def update(value: bool) -> None:
-                store.setValue("ui/reduceMotion", value)
-                QApplication.instance().setProperty("voxtypeReduceMotion", value)
-                from .motion import AnimationCoordinator
-
+            def update(_index: int) -> None:
+                value = self.motion_combo.currentData()
+                store.setValue("ui/motionPreference", value)
+                application = QApplication.instance()
+                if application is not None:
+                    application.setProperty("voxtypeMotionPreference", value)
                 AnimationCoordinator.instance().preference_changed()
 
-            self.reduce_motion.toggled.connect(update)
+            self.motion_combo.currentIndexChanged.connect(update)
 
         def _build_dictation_page(self) -> None:
             page, form = self._page(
@@ -651,6 +661,20 @@ if PYSIDE6_AVAILABLE:
                 "Сохранять завершённые черновики для восстановления", page
             )
             self.save_audio_check = QCheckBox("Сохранять исходное аудио", page)
+            self.local_api_check = QCheckBox("Разрешить локальное API Windows", page)
+            self.local_api_record_check = QCheckBox("Разрешить API запускать микрофон", page)
+            self.local_api_record_check.setToolTip(
+                "Запрос с токеном включает микрофон. Результат остаётся в VoxType."
+            )
+            self.local_api_status = QLabel("Выключен", page)
+            self.local_api_status.setWordWrap(True)
+            self.local_api_credentials_button = QPushButton("Канал и токен API…", page)
+            self.local_api_credentials_button.clicked.connect(self.local_api_credentials_requested)
+            self.local_api_check.toggled.connect(
+                lambda enabled: self.local_api_record_check.setEnabled(
+                    enabled and self.local_api_check.isEnabled()
+                )
+            )
             self.retention_spin = QSpinBox(page)
             self.retention_spin.setRange(1, 3650)
             self.retention_spin.setSuffix(" дней")
@@ -666,6 +690,10 @@ if PYSIDE6_AVAILABLE:
             form.addRow(self.save_history_check)
             form.addRow(self.save_audio_check)
             form.addRow(self.recover_drafts_check)
+            form.addRow(self.local_api_check)
+            form.addRow(self.local_api_record_check)
+            form.addRow(self.local_api_credentials_button)
+            form.addRow("Локальное API", self.local_api_status)
             for title, action in (
                 ("Центр восстановления", self.recovery_center_requested),
                 ("Создать резервную копию", self.backup_requested),
@@ -710,6 +738,14 @@ if PYSIDE6_AVAILABLE:
             self.save_audio_check.setToolTip(
                 "Отключено политикой организации" if audio_disabled else ""
             )
+
+        def set_local_api_status(self, enabled_by_policy: bool, active: bool, status: str) -> None:
+            self.local_api_check.setEnabled(enabled_by_policy)
+            self.local_api_record_check.setEnabled(
+                enabled_by_policy and self.local_api_check.isChecked()
+            )
+            self.local_api_credentials_button.setEnabled(active)
+            self.local_api_status.setText(status)
 
         def _build_hotkeys_page(self) -> None:
             page, form = self._page(
@@ -823,6 +859,8 @@ if PYSIDE6_AVAILABLE:
                 self.save_history_check,
                 self.save_audio_check,
                 self.recover_drafts_check,
+                self.local_api_check,
+                self.local_api_record_check,
             )
             for check in checks:
                 check.toggled.connect(self._mark_dirty)
@@ -947,6 +985,10 @@ if PYSIDE6_AVAILABLE:
                     "save_audio": self.save_audio_check.isChecked(),
                     "recover_unsaved_drafts": self.recover_drafts_check.isChecked(),
                     "retention_days": self.retention_spin.value(),
+                    "local_api_enabled": self.local_api_check.isChecked(),
+                    "local_api_allow_recording": (
+                        self.local_api_check.isChecked() and self.local_api_record_check.isChecked()
+                    ),
                 },
                 "hotkeys": {
                     "toggle": self.toggle_hotkey_edit.keySequence().toString(portable),
@@ -1122,6 +1164,12 @@ if PYSIDE6_AVAILABLE:
                 self.save_audio_check.setChecked(
                     not getattr(self, "_audio_policy_disabled", False)
                     and bool(_setting(privacy, "save_audio", default=False))
+                )
+                self.local_api_check.setChecked(
+                    bool(_setting(privacy, "local_api_enabled", default=False))
+                )
+                self.local_api_record_check.setChecked(
+                    bool(_setting(privacy, "local_api_allow_recording", default=False))
                 )
                 self.retention_spin.setValue(
                     int(str(_setting(privacy, "retention_days", default=30)))

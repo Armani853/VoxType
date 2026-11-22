@@ -644,8 +644,15 @@ class ProfessionalContent:
         "replacements": ReplacementRule,
     }
 
-    def __init__(self, repository: SettingsRepository, configuration: dict[str, Any]) -> None:
+    def __init__(
+        self,
+        repository: SettingsRepository,
+        configuration: dict[str, Any],
+        *,
+        allow_organization_vocabulary: bool = True,
+    ) -> None:
         self._repository = repository
+        self._allow_organization_vocabulary = allow_organization_vocabulary
         self._lock = threading.RLock()
         self._configuration = dict(configuration)
         self._collections: dict[str, tuple[Any, ...]] = {}
@@ -658,8 +665,13 @@ class ProfessionalContent:
     def snapshot(self) -> TextPipeline:
         with self._lock:
             budget = self._configuration.get("prompt_budget", 240)
+            collections = dict(self._collections)
+            if not self._allow_organization_vocabulary:
+                collections["dictionary"] = tuple(
+                    term for term in collections["dictionary"] if term.origin != "organization"
+                )
             return TextPipeline(
-                **self._collections,
+                **collections,
                 activation=str(self._configuration.get("command_activation", "вокстайп"))[:64],
                 prompt_budget=min(budget, MAX_HINT_CHARACTERS)
                 if type(budget) is int and budget >= 0

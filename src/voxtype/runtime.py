@@ -48,6 +48,7 @@ from voxtype.monitoring.logging import configure_logging
 from voxtype.sessions.backup import BackupManager
 from voxtype.sessions.repository import SessionRepository
 from voxtype.sessions.retention import cleanup_retention
+from voxtype.settings.enterprise import EnterprisePolicyService
 from voxtype.settings.repository import SettingsRepository
 from voxtype.settings.schema import AppSettings
 from voxtype.vad.segmenter import SegmentationSettings, StreamingSegmenter
@@ -354,11 +355,16 @@ def build_runtime(*, verbose: bool = False) -> RuntimeBundle:
             engine_slot=engine_slot,
         )
     target_manager = TargetWindowManager(policy=TargetPolicy(settings.dictation.target_mode.value))
+    enterprise = EnterprisePolicyService()
     injection = TextInjectionService(
         target_manager,
         strategy=InjectionStrategy(settings.dictation.injection_mode.value),
         paste_delay=max(350, settings.dictation.insertion_delay_ms) / 1_000.0,
-        persist_pending=settings.privacy.save_history,
+        persist_pending=(
+            settings.privacy.save_history
+            and not enterprise.policy.disable_history
+            and enterprise.policy.allow_clipboard_persistence
+        ),
         context_provider=ForegroundContextProvider() if os.name == "nt" else None,
     )
 
@@ -406,6 +412,7 @@ def build_runtime(*, verbose: bool = False) -> RuntimeBundle:
         segmenter_factory=segmenter_factory,
         target_manager=target_manager,
         injection_service=injection,
+        enterprise=enterprise,
         spool_root=cache_directory / "audio-spool",
         microphone_name=f"{device.name} ({device.host_api})",
     )

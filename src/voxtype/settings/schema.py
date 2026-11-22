@@ -91,6 +91,8 @@ class PrivacySettings:
     save_audio: bool = False
     recover_unsaved_drafts: bool = False
     retention_days: int = 30
+    local_api_enabled: bool = False
+    local_api_allow_recording: bool = False
 
 
 @dataclass(slots=True)
