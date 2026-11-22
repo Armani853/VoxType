@@ -159,6 +159,14 @@ class StreamingSegmenter:
     def analyzed_samples(self) -> int:
         return self._pending_start
 
+    def configure_streaming_limits(self, max_unconfirmed_ms: int, overlap_ms: int) -> None:
+        """Set the live-mode limits before the first audio block."""
+        if self._stream_end:
+            raise RuntimeError("Cannot change segmentation limits during capture")
+        self._maximum = min(self._maximum, round(self.sample_rate * max_unconfirmed_ms / 1000))
+        self._preferred = min(self._preferred, self._maximum, self.sample_rate * 8)
+        self._overlap = round(self.sample_rate * overlap_ms / 1000)
+
     @property
     def trailing_silence_samples(self) -> int:
         return (
@@ -170,6 +178,10 @@ class StreamingSegmenter:
     @property
     def active(self) -> bool:
         return self._active_start is not None
+
+    @property
+    def active_start_sample(self) -> int | None:
+        return self._active_start
 
     @property
     def buffered_seconds(self) -> float:
@@ -190,12 +202,13 @@ class StreamingSegmenter:
             self._pending_start = self._stream_end
         self._stream_end += int(audio.size)
         emitted: list[AudioSegment] = []
-        while self._pending.size >= self._frame_samples:
-            frame_audio = self._pending[: self._frame_samples].copy()
+        full = self._pending.size // self._frame_samples * self._frame_samples
+        for index in range(0, full, self._frame_samples):
+            frame_audio = self._pending[index : index + self._frame_samples].copy()
             frame_start = self._pending_start
-            self._pending = self._pending[self._frame_samples :].copy()
             self._pending_start += self._frame_samples
             emitted.extend(self._process_frame(frame_audio, frame_start))
+        self._pending = self._pending[full:].copy()
         return tuple(emitted)
 
     def _process_frame(self, samples: FloatAudio, start: int) -> list[AudioSegment]:

@@ -44,7 +44,9 @@ class DictationSettings:
     model_profile: ModelProfile = ModelProfile.BALANCED
     voice_commands: bool = False
     user_text_transformations: bool = True
-    live_preview: bool = False
+    live_preview: bool = True
+    live_insertion: bool = False
+    streaming_speed: str = "balanced"
     safe_terminal_input: bool = True
     caret_overlay: bool = False
     mode: DictationMode = DictationMode.TOGGLE

@@ -15,7 +15,6 @@ from voxtype.asr.base import (
     TranscriptionSegment,
     WordTimestamp,
 )
-from voxtype.asr.live import LiveSpeechSession
 from voxtype.audio.models import AudioChunk, AudioQueueStats
 from voxtype.audio.spool import LosslessAudioQueue
 from voxtype.core.controller import ApplicationController
@@ -284,7 +283,12 @@ def wait_for_state(
 def _settings_with_recovery(tmp_path: Path) -> SettingsRepository:
     repository = SettingsRepository(tmp_path / "settings.json")
     # This suite exercises durable history and PCM recovery with explicit consent.
-    repository.update({"privacy": {"save_history": True, "save_audio": True}})
+    repository.update(
+        {
+            "privacy": {"save_history": True, "save_audio": True},
+            "dictation": {"live_preview": False},
+        }
+    )
     return repository
 
 
@@ -804,18 +808,11 @@ def test_inference_watchdog_allows_retry_once_native_call_exits(tmp_path: Path) 
 
 def test_live_preview_keeps_vad_draining_and_yields_to_final(
     tmp_path: Path,
-    monkeypatch: MonkeyPatch,
 ) -> None:
     preview_started = threading.Event()
     preview_release = threading.Event()
     second_block_analyzed = threading.Event()
     calls: list[str] = []
-
-    class ImmediateLiveSession(LiveSpeechSession):
-        def request(self, speech_samples: int, now: float) -> TranscriptionRequest | None:
-            if not preview_started.is_set():
-                self._next = 0
-            return super().request(speech_samples, now)
 
     class BlockingPreviewBackend(DeterministicBackend):
         def transcribe(self, request: TranscriptionRequest) -> TranscriptionResult:
@@ -836,7 +833,6 @@ def test_live_preview_keeps_vad_draining_and_yields_to_final(
                 second_block_analyzed.set()
             return super().speech_probability(samples, sample_rate)
 
-    monkeypatch.setattr("voxtype.core.controller.LiveSpeechSession", ImmediateLiveSession)
     settings = _settings_with_recovery(tmp_path)
     settings.update({"dictation": {"live_preview": True}})
     injection = FixtureInjection()
@@ -865,7 +861,8 @@ def test_live_preview_keeps_vad_draining_and_yields_to_final(
         wait_for_state(controller, AppState.COMPLETED)
         assert calls == ["preview", "final"]
         assert controller.snapshot().live_transcript is None
-        assert injection.fragments == ["Привет мир"]
+        assert controller.snapshot().full_transcript == "Привет мир"
+        assert injection.fragments == []
     finally:
         preview_release.set()
         controller.shutdown()

@@ -41,6 +41,17 @@ class InputPlan:
 
 class InputTargetClassifier:
     @staticmethod
+    def is_possible_terminal(context: ForegroundContext, kind: InputTargetKind) -> bool:
+        return kind is InputTargetKind.TERMINAL or context.process_name.casefold() in {
+            "windowsterminal.exe",
+            "powershell.exe",
+            "pwsh.exe",
+            "cmd.exe",
+            "conhost.exe",
+            "openconsole.exe",
+        }
+
+    @staticmethod
     def classify(context: ForegroundContext) -> InputTargetKind:
         if context.is_password:
             return InputTargetKind.PASSWORD
@@ -166,14 +177,7 @@ class InputStrategyResolver:
         if not reason and profile and not profile.allow_auto_insert and not manual:
             reason = "Для этого приложения включена ручная вставка."
         multiline = any(chr(code) in text for code in (10, 13, 8232, 8233))
-        possible_terminal = kind is InputTargetKind.TERMINAL or context.process_name.casefold() in {
-            "windowsterminal.exe",
-            "powershell.exe",
-            "pwsh.exe",
-            "cmd.exe",
-            "conhost.exe",
-            "openconsole.exe",
-        }
+        possible_terminal = InputTargetClassifier.is_possible_terminal(context, kind)
         ambiguous_editor = kind is InputTargetKind.CODE_EDITOR and not context.native_text_control
         needs_clipboard_for_multiline = (
             possible_terminal or ambiguous_editor or kind is InputTargetKind.UNKNOWN

@@ -75,6 +75,7 @@ class TranscriptFragment:
     compression_ratio: float = 1.0
     no_speech_probability: float = 0.0
     inference_s: float = 0.0
+    absolute_word_timestamps: bool = False
 
     @property
     def audio_duration_s(self) -> float:
@@ -193,5 +194,7 @@ class ControllerSnapshot:
     configured_language: Language | None = None
     live_transcript: LiveTranscript | None = None
     live_final: SpeechSegment | None = None
+    live_session_id: str | None = None
+    live_committed_length: int = 0
     audio_quality: AudioQualitySnapshot | None = None
     pending_insertion: bool = False

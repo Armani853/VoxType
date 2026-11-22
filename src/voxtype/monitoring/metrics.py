@@ -11,7 +11,20 @@ from typing import Any, Literal
 
 import psutil
 
-type TimedOperation = Literal["startup_paint", "model_load", "ui_stall", "delivery", "shutdown"]
+type TimedOperation = Literal[
+    "startup_paint",
+    "model_load",
+    "ui_stall",
+    "delivery",
+    "shutdown",
+    "audio_to_first_preview",
+    "audio_to_first_nonempty_text",
+    "audio_to_stable_text",
+    "final_segment_latency",
+    "stop_to_final",
+    "preview_inference",
+    "preview_queue_wait",
+]
 
 
 @dataclass(slots=True)

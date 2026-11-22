@@ -16,7 +16,13 @@ from uuid import uuid4
 
 from voxtype.core.profiles import AppRule
 
-from .adaptive_input import FocusIdentityGuard, InputPlan, InputStrategy, InputStrategyResolver
+from .adaptive_input import (
+    FocusIdentityGuard,
+    InputPlan,
+    InputStrategy,
+    InputStrategyResolver,
+    InputTargetClassifier,
+)
 from .clipboard import ClipboardError, ClipboardManager
 from .foreground import WindowMetadata
 from .input_context import ForegroundContext, ForegroundContextProvider
@@ -775,6 +781,55 @@ class TextInjectionService:
             )
 
     inject = submit
+
+    def submit_live_fragment(
+        self, text: str, anchor: ForegroundContext | None, *, strategy: str | None = None
+    ) -> InjectionStatus:
+        """Attempt one committed fragment, independently of the retryable pending queue."""
+        with self._lock:
+            decision = self._targets.resolve()
+            target = decision.target
+            if (
+                anchor is None
+                or anchor.target_mode != "locked"
+                or self.context_provider is None
+                or not decision.can_inject
+                or target is None
+                or target.identity != anchor.identity
+                or not self._same_target_is_ready(target)
+            ):
+                return InjectionStatus.BLOCKED
+            plan, context = self._adaptive_plan(
+                target,
+                text,
+                self._strategy if strategy is None else InjectionStrategy(strategy),
+                manual=False,
+            )
+            if (
+                context is None
+                or plan is None
+                or not FocusIdentityGuard.matches(anchor, context, strict=True)
+                or InputTargetClassifier.is_possible_terminal(
+                    context, InputTargetClassifier.classify(context)
+                )
+                or plan.strategy in {InputStrategy.LOCAL_PREVIEW, InputStrategy.COPY_ONLY}
+            ):
+                return InjectionStatus.BLOCKED
+            try:
+                self._inject_once(
+                    text,
+                    target,
+                    InjectionStrategy(plan.strategy.value),
+                    context=context,
+                    attempt_id=uuid4().hex,
+                )
+            except _TargetChanged:
+                return InjectionStatus.BLOCKED
+            except SendInputError as exc:
+                return InjectionStatus.UNKNOWN if exc.sent else InjectionStatus.FAILED
+            except (ClipboardError, OSError):
+                return InjectionStatus.FAILED
+            return InjectionStatus.INSERTED
 
     def dispatch_explicit(
         self,

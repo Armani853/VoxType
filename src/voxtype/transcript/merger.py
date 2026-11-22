@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 import threading
 import unicodedata
+from bisect import bisect_right
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -70,7 +71,10 @@ class TranscriptMerger:
         self.max_overlap_words = max_overlap_words
         self.timestamp_tolerance_s = timestamp_tolerance_s
         self._words: list[WordStamp] = []
-        self._text = ""
+        self._text: str | None = ""
+        self._pieces: list[str] = []
+        self._ends: list[int] = []
+        self._tail = ""
         self._last_sequence = -1
         self._last_chunk_end_s = 0.0
         self._lock = threading.RLock()
@@ -78,7 +82,29 @@ class TranscriptMerger:
     @property
     def committed_text(self) -> str:
         with self._lock:
+            if self._text is None:
+                self._text = "".join(self._pieces)
             return self._text
+
+    @property
+    def committed_length(self) -> int:
+        with self._lock:
+            return self._ends[-1] if self._ends else 0
+
+    @property
+    def recent_text(self) -> str:
+        with self._lock:
+            return self._tail
+
+    def text_since(self, offset: int, limit: int) -> str:
+        with self._lock:
+            offset = max(offset, 0)
+            index = bisect_right(self._ends, offset)
+            stop = bisect_right(self._ends, limit, lo=index)
+            if index == len(self._ends) or limit <= offset:
+                return ""
+            base = self._ends[index - 1] if index else 0
+            return "".join(self._pieces[index : stop + 1])[offset - base : limit - base]
 
     @property
     def committed_words(self) -> tuple[WordStamp, ...]:
@@ -89,11 +115,17 @@ class TranscriptMerger:
         """Replace the display text after final routing, retaining raw word timings."""
         with self._lock:
             self._text = text
+            self._pieces[:] = [text] if text else []
+            self._ends[:] = [len(text)] if text else []
+            self._tail = text[-4096:]
 
     def reset(self) -> None:
         with self._lock:
             self._words.clear()
             self._text = ""
+            self._pieces.clear()
+            self._ends.clear()
+            self._tail = ""
             self._last_sequence = -1
             self._last_chunk_end_s = 0.0
 
@@ -106,10 +138,13 @@ class TranscriptMerger:
         transform: Callable[[str], str] | None = None,
         preserve_format: bool = False,
         code_spacing: bool = False,
+        include_committed_text: bool = True,
     ) -> MergeOutcome:
         with self._lock:
             if fragment.sequence <= self._last_sequence:
-                return MergeOutcome("", self._text, 0, True)
+                return MergeOutcome(
+                    "", self.committed_text if include_committed_text else "", 0, True
+                )
             absolute = self._absolute_words(fragment)
             overlap_count = (
                 self._find_overlap(absolute, fragment.chunk_start_s)
@@ -132,12 +167,12 @@ class TranscriptMerger:
                 if raw_insertion in {"\n", "\n\n"}
                 else (
                     format_fragment_boundary(
-                        self._text,
+                        self._tail,
                         raw_insertion,
                         add_space=add_space
                         and not (
                             code_spacing
-                            and (self._text.endswith("_") or raw_insertion.startswith(("_", "(")))
+                            and (self._tail.endswith("_") or raw_insertion.startswith(("_", "(")))
                         ),
                         capitalize=capitalize,
                         normalize=not preserve_format,
@@ -145,16 +180,24 @@ class TranscriptMerger:
                 )
             )
             if insertion:
-                self._text += insertion
+                self._ends.append((self._ends[-1] if self._ends else 0) + len(insertion))
+                self._pieces.append(insertion)
+                self._tail = (self._tail + insertion)[-4096:]
+                self._text = None
             self._words.extend(remaining)
             self._last_sequence = fragment.sequence
             self._last_chunk_end_s = max(self._last_chunk_end_s, fragment.chunk_end_s)
-            return MergeOutcome(insertion, self._text, overlap_count, overlap_count > 0)
+            return MergeOutcome(
+                insertion,
+                self.committed_text if include_committed_text else "",
+                overlap_count,
+                overlap_count > 0,
+            )
 
     def _absolute_words(self, fragment: TranscriptFragment) -> list[WordStamp]:
         words = list(fragment.words)
-        if not words:
-            return []
+        if not words or fragment.absolute_word_timestamps:
+            return words
         duration = fragment.audio_duration_s
         timestamps_look_relative = (
             fragment.chunk_start_s > 0
@@ -207,10 +250,10 @@ class TranscriptMerger:
         an intentional repetition.
         """
 
-        if not self._text or chunk_start_s >= self._last_chunk_end_s - 0.02:
+        if not self._tail or chunk_start_s >= self._last_chunk_end_s - 0.02:
             return 0
         tail = deque(
-            (match.group(0) for match in _TOKEN_PATTERN.finditer(self._text)),
+            (match.group(0) for match in _TOKEN_PATTERN.finditer(self._tail)),
             maxlen=self.max_overlap_words,
         )
         previous = [normalize_token(word) for word in tail]
