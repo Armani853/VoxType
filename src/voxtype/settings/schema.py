@@ -47,6 +47,9 @@ class DictationSettings:
     live_preview: bool = True
     live_insertion: bool = False
     streaming_speed: str = "balanced"
+    show_live_provisional: bool = True
+    live_auto_scroll: bool = True
+    confirm_overlay_close: bool = False
     safe_terminal_input: bool = True
     caret_overlay: bool = False
     mode: DictationMode = DictationMode.TOGGLE

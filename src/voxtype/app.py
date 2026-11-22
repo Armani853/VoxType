@@ -299,6 +299,10 @@ class DesktopApplication:
             self.main.set_interface_language(runtime.settings.general.ui_language)
             self.main.set_minimize_to_tray(runtime.settings.general.minimize_to_tray)
         self.main.set_live_text_source(self.controller.live_text_since)
+        self.main.set_live_presentation(
+            show_provisional=runtime.settings.dictation.show_live_provisional,
+            auto_scroll=runtime.settings.dictation.live_auto_scroll,
+        )
         paint = self.main.first_paint_seconds
         if paint is None:
             self.main.first_paint.connect(
@@ -648,6 +652,7 @@ class DesktopApplication:
                     str(self.runtime.data_directory / "overlay.ini"), QSettings.Format.IniFormat
                 )
             overlay = DictationOverlay(None, settings=settings)
+            overlay.set_show_provisional(self.runtime.settings.dictation.show_live_provisional)
             self._overlay = overlay
             overlay.pause_requested.connect(
                 lambda: self._invoke_ui("overlay.toggle_pause", self.controller.toggle_pause)
@@ -670,6 +675,7 @@ class DesktopApplication:
             )
             overlay.close_result_requested.connect(self._dismiss_result)
             overlay.hide_requested.connect(self._dismiss_dictation_overlay)
+            overlay.close_overlay_requested.connect(self._close_dictation_overlay)
             overlay.open_buffer_requested.connect(self._open_dictation_buffer)
         return overlay
 
@@ -859,6 +865,23 @@ class DesktopApplication:
     def _open_dictation_buffer(self) -> None:
         self._show_main()
         self._navigate_desktop("dictation")
+
+    def _close_dictation_overlay(self) -> None:
+        overlay = self.overlay
+        if (
+            self.runtime.settings.dictation.confirm_overlay_close
+            and self.controller.resource_phase is ResourcePhase.ACTIVE
+            and QMessageBox.question(
+                overlay,
+                "Скрыть окно диктовки?",
+                "Диктовка продолжится. Окно можно вернуть из трея.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            != QMessageBox.StandardButton.Yes
+        ):
+            return
+        overlay.hide_for_user()
 
     def _dismiss_dictation_overlay(self) -> None:
         snapshot = self.controller.snapshot(include_live_text=False)
@@ -2422,6 +2445,17 @@ class DesktopApplication:
             max(350, updated.dictation.insertion_delay_ms) / 1_000.0
         )
         self.main.set_minimize_to_tray(updated.general.minimize_to_tray)
+        if (
+            updated.dictation.show_live_provisional != previous.dictation.show_live_provisional
+            or updated.dictation.live_auto_scroll != previous.dictation.live_auto_scroll
+        ):
+            self.main.set_live_presentation(
+                show_provisional=updated.dictation.show_live_provisional,
+                auto_scroll=updated.dictation.live_auto_scroll,
+            )
+            if self._overlay is not None:
+                self._overlay.set_show_provisional(updated.dictation.show_live_provisional)
+            self._last_rendered_snapshot = None
         if updated.model.power_mode != previous.model.power_mode:
             self._apply_motion_profile()
         self._update_idle_model_timer(self.controller.resource_phase)

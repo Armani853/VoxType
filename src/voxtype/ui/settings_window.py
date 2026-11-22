@@ -307,6 +307,11 @@ if PYSIDE6_AVAILABLE:
                 "Подтверждённый текст будет добавляться в выбранное поле по мере распознавания. "
                 "Голосовые действия в этом режиме отключены."
             )
+            self.live_provisional_check = QCheckBox("Показывать предварительный текст", page)
+            self.live_auto_scroll_check = QCheckBox("Прокручивать буфер за новым текстом", page)
+            self.confirm_overlay_close_check = QCheckBox(
+                "Спрашивать перед закрытием плавающего окна во время записи", page
+            )
             self.streaming_speed_combo = self._combo(
                 (
                     ("Максимально быстро", "fast"),
@@ -379,6 +384,9 @@ if PYSIDE6_AVAILABLE:
             form.addRow(self.live_preview_check)
             form.addRow(self.live_insertion_check)
             form.addRow("Скорость появления текста", self.streaming_speed_combo)
+            form.addRow(self.live_provisional_check)
+            form.addRow(self.live_auto_scroll_check)
+            form.addRow(self.confirm_overlay_close_check)
             form.addRow(self.auto_insert_check)
             form.addRow(self.copy_complete_check)
             form.addRow(self.auto_hide_result_check)
@@ -391,6 +399,8 @@ if PYSIDE6_AVAILABLE:
         def _update_streaming_controls(self, enabled: bool) -> None:
             self.live_insertion_check.setEnabled(enabled)
             self.streaming_speed_combo.setEnabled(enabled)
+            self.live_provisional_check.setEnabled(enabled)
+            self.live_auto_scroll_check.setEnabled(enabled)
             self.auto_insert_check.setEnabled(not enabled)
 
         def _build_audio_page(self) -> None:
@@ -887,6 +897,9 @@ if PYSIDE6_AVAILABLE:
                 self.voice_commands_check,
                 self.live_preview_check,
                 self.live_insertion_check,
+                self.live_provisional_check,
+                self.live_auto_scroll_check,
+                self.confirm_overlay_close_check,
                 self.auto_stop_enabled,
                 self.safe_terminal_check,
                 self.caret_overlay_check,
@@ -988,6 +1001,9 @@ if PYSIDE6_AVAILABLE:
                     "live_preview": self.live_preview_check.isChecked(),
                     "live_insertion": self.live_insertion_check.isChecked(),
                     "streaming_speed": self.streaming_speed_combo.currentData(),
+                    "show_live_provisional": self.live_provisional_check.isChecked(),
+                    "live_auto_scroll": self.live_auto_scroll_check.isChecked(),
+                    "confirm_overlay_close": self.confirm_overlay_close_check.isChecked(),
                     "mode": self.dictation_mode_combo.currentData(),
                     "safe_terminal_input": self.safe_terminal_check.isChecked(),
                     "caret_overlay": self.caret_overlay_check.isChecked(),
@@ -1123,6 +1139,15 @@ if PYSIDE6_AVAILABLE:
                 speed = str(_setting(dictation, "streaming_speed", default="balanced"))
                 index = self.streaming_speed_combo.findData(speed)
                 self.streaming_speed_combo.setCurrentIndex(index if index >= 0 else 1)
+                self.live_provisional_check.setChecked(
+                    bool(_setting(dictation, "show_live_provisional", default=True))
+                )
+                self.live_auto_scroll_check.setChecked(
+                    bool(_setting(dictation, "live_auto_scroll", default=True))
+                )
+                self.confirm_overlay_close_check.setChecked(
+                    bool(_setting(dictation, "confirm_overlay_close", default=False))
+                )
                 self._update_streaming_controls(self.live_preview_check.isChecked())
                 self.auto_insert_check.setChecked(
                     bool(_setting(dictation, "auto_insert", default=True))

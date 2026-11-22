@@ -131,6 +131,8 @@ if PYSIDE6_AVAILABLE:
             self._live_source: Callable[[str, int, int], str] | None = None
             self._live_document_session: str | None = None
             self._live_cursor_offset = 0
+            self._show_live_provisional = True
+            self._live_auto_scroll = True
             self._build_ui()
             self._connect_ui()
             self.retranslate_ui()
@@ -439,6 +441,14 @@ if PYSIDE6_AVAILABLE:
         def set_live_text_source(self, source: Callable[[str, int, int], str]) -> None:
             self._live_source = source
 
+        def set_live_presentation(self, *, show_provisional: bool, auto_scroll: bool) -> None:
+            if self._show_live_provisional != show_provisional:
+                self._live_key = None
+            self._show_live_provisional = show_provisional
+            if not show_provisional:
+                self.live_panel.hide()
+            self._live_auto_scroll = auto_scroll
+
         def _hide_new_text_at_end(self, position: int) -> None:
             if position == self.result_editor.verticalScrollBar().maximum():
                 self.new_text_label.hide()
@@ -457,7 +467,7 @@ if PYSIDE6_AVAILABLE:
                 if delta:
                     scroll = self.result_editor.verticalScrollBar()
                     previous_position = scroll.value()
-                    following = previous_position == scroll.maximum()
+                    following = self._live_auto_scroll and previous_position == scroll.maximum()
                     document = self.result_editor.document()
                     edited = document.isModified()
                     cursor = QTextCursor(document)
@@ -465,7 +475,7 @@ if PYSIDE6_AVAILABLE:
                     cursor.insertText(delta)
                     document.setModified(edited)
                     scroll.setValue(scroll.maximum() if following else previous_position)
-                    self.new_text_label.setVisible(not following)
+                    self.new_text_label.setVisible(scroll.value() < scroll.maximum())
                     self._live_cursor_offset += len(delta)
                 self.result_editor.setReadOnly(False)
                 return
@@ -602,7 +612,11 @@ if PYSIDE6_AVAILABLE:
                 )
             )
             live = getattr(snapshot, "live_transcript", None)
-            if live is None or getattr(snapshot, "live_final", None) is not None:
+            if (
+                not self._show_live_provisional
+                or live is None
+                or getattr(snapshot, "live_final", None) is not None
+            ):
                 self.live_panel.hide()
             elif (
                 self._live_key is None

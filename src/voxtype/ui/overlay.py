@@ -61,6 +61,7 @@ if PYSIDE6_AVAILABLE:
         insert_requested = Signal()
         close_result_requested = Signal()
         hide_requested = Signal()
+        close_overlay_requested = Signal()
         open_buffer_requested = Signal()
 
         def __init__(
@@ -99,6 +100,7 @@ if PYSIDE6_AVAILABLE:
             self._preview = ""
             self._preview_changed = ("", -1)
             self._hypothesis = ""
+            self._show_provisional = True
             self._controller_connections: list[tuple[Any, Callable[..., Any]]] = []
             self._build_ui()
             self._connect_ui()
@@ -205,7 +207,7 @@ if PYSIDE6_AVAILABLE:
         def _connect_ui(self) -> None:
             self.expand_button.clicked.connect(self.toggle_compact)
             self.minimize_button.clicked.connect(self.minimize_panel)
-            self.hide_button.clicked.connect(self._request_hide)
+            self.hide_button.clicked.connect(self.close_overlay_requested)
             self.open_buffer_button.clicked.connect(self.open_buffer_requested)
             self.start_button.clicked.connect(self.stop_requested)
             self.pause_button.clicked.connect(self.pause_requested)
@@ -213,10 +215,13 @@ if PYSIDE6_AVAILABLE:
             self.copy_all_button.clicked.connect(self.copy_all_requested)
             self.insert_button.clicked.connect(self.insert_requested)
 
-        def _request_hide(self) -> None:
+        def hide_for_user(self) -> None:
             self._save_position()
             self.hide()
             self.hide_requested.emit()
+
+        def set_show_provisional(self, enabled: bool) -> None:
+            self._show_provisional = enabled
 
         def _request_stop(self) -> None:
             if self._state.state is AppStatus.FINISHING:
@@ -271,7 +276,7 @@ if PYSIDE6_AVAILABLE:
                     meter.set_level(rms_to_meter(state.input_rms))
             self.processing_label.setText(self._processing_text(state))
             self.processing_label.setToolTip(self._processing_text(state))
-            live = getattr(snapshot, "live_transcript", None)
+            live = getattr(snapshot, "live_transcript", None) if self._show_provisional else None
             key = (live.session_id, live.revision) if live is not None else ("", -1)
             if key != self._preview_changed:
                 self._preview_changed = key
@@ -350,7 +355,7 @@ if PYSIDE6_AVAILABLE:
 
         def minimize_panel(self) -> None:
             self.set_mode("mini")
-            self._request_hide()
+            self.hide_for_user()
 
         def set_compact(self, compact: bool, *, persist: bool = True) -> None:
             self.set_mode("standard" if compact else "expanded", persist=persist)
