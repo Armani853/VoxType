@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 import pytest
 
 pytest.importorskip("pytestqt")
@@ -32,6 +34,29 @@ def test_dashboard_viewport_reports_first_paint(qtbot) -> None:  # type: ignore[
     assert not window._first_content_paint_seen
     window.eventFilter(window._dashboard_scroll.viewport(), paint)
     assert window._first_content_paint_seen
+
+
+def test_confirmed_deltas_preserve_edits_through_finalization(qtbot) -> None:  # type: ignore[no-untyped-def]
+    window = MainWindow()
+    qtbot.addWidget(window)
+    machine_text = "Первая фраза. Вторая фраза. Последняя фраза."
+    window.set_live_text_source(lambda _session, offset, limit: machine_text[offset:limit])
+    active = SimpleNamespace(
+        state=AppStatus.LISTENING,
+        live_session_id="stream",
+        live_committed_length=len("Первая фраза."),
+    )
+    window.update_snapshot(active)
+    assert window.result_text() == "Первая фраза."
+    window.result_editor.setPlainText("Моя правка.")
+    window.result_editor.document().setModified(True)
+    active.live_committed_length += len(" Вторая фраза.")
+    window.update_snapshot(active)
+    assert window.result_text() == "Моя правка. Вторая фраза."
+    window.update_snapshot(
+        SimpleNamespace(state=AppStatus.COMPLETED, full_transcript=machine_text, live_final=True)
+    )
+    assert window.result_text() == "Моя правка. Вторая фраза. Последняя фраза."
 
 
 def test_main_window_renders_snapshot_and_routes_commands(qtbot) -> None:  # type: ignore[no-untyped-def]

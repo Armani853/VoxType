@@ -78,6 +78,8 @@ class IconProvider:
         "search": "\ue721",
         "menu": "\ue700",
         "close": "\ue711",
+        "minimize": "\ue921",
+        "expand": "\ue922",
         "check": "\ue73e",
         "warning": "\ue7ba",
         "pause": "\ue769",
@@ -144,6 +146,10 @@ class IconProvider:
         elif name == "close":
             paint.drawLine(5, 5, 15, 15)
             paint.drawLine(5, 15, 15, 5)
+        elif name == "minimize":
+            paint.drawLine(4, 10, 16, 10)
+        elif name == "expand":
+            paint.drawRect(QRectF(4, 4, 12, 12))
         elif name == "menu":
             for y in (5, 10, 15):
                 paint.drawLine(3, y, 17, y)

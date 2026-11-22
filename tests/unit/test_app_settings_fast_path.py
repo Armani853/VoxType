@@ -82,6 +82,8 @@ def _view_app() -> DesktopApplication:
     app.main = MagicMock()
     app.tray = MagicMock()
     app._overlay = None
+    app._overlay_requested = False
+    app._overlay_dismissed = False
     return app
 
 

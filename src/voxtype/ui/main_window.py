@@ -26,7 +26,7 @@ from .models import (
 
 if PYSIDE6_AVAILABLE:
     from PySide6.QtCore import QByteArray, QEvent, QObject, QSettings, QSize, Qt, QTimer, Signal
-    from PySide6.QtGui import QCloseEvent, QGuiApplication, QMoveEvent, QResizeEvent
+    from PySide6.QtGui import QCloseEvent, QGuiApplication, QMoveEvent, QResizeEvent, QTextCursor
     from PySide6.QtWidgets import (
         QApplication,
         QFrame,
@@ -128,6 +128,9 @@ if PYSIDE6_AVAILABLE:
             self.setMinimumSize(760, 560)
             self._geometry_store: QSettings | None = None
             self._observed_result = ""
+            self._live_source: Callable[[str, int, int], str] | None = None
+            self._live_document_session: str | None = None
+            self._live_cursor_offset = 0
             self._build_ui()
             self._connect_ui()
             self.retranslate_ui()
@@ -248,7 +251,6 @@ if PYSIDE6_AVAILABLE:
                 label.setTextFormat(Qt.TextFormat.PlainText)
                 live_layout.addWidget(label)
             self.live_panel.setAccessibleName("Предварительный текст")
-            hero.content_layout.addWidget(self.live_panel)
             self.live_panel.hide()
             self._live_key: tuple[str, int] | None = None
             self.cancel_button = VoxButton("Отменить обработку", hero)
@@ -335,11 +337,17 @@ if PYSIDE6_AVAILABLE:
             self.fragment_label.hide()
             self.result_editor = QPlainTextEdit(fragment)
             self.result_editor.setAccessibleName("Последний окончательный текст")
-            self.result_editor.setPlaceholderText("Окончательный текст появится после диктовки")
+            self.result_editor.setPlaceholderText("Здесь появится подтверждённый текст")
             self.result_editor.setMaximumHeight(130)
             self.result_editor.setReadOnly(True)
             self.result_editor.textChanged.connect(self._update_result_actions)
             fragment.content_layout.addWidget(self.result_editor)
+            fragment.content_layout.addWidget(self.live_panel)
+            self.new_text_label = QLabel("Новый текст", fragment)
+            self.new_text_label.setProperty("muted", True)
+            self.new_text_label.hide()
+            fragment.content_layout.addWidget(self.new_text_label)
+            self.result_editor.verticalScrollBar().valueChanged.connect(self._hide_new_text_at_end)
             result_actions = QHBoxLayout()
             self.result_copy = VoxButton("Копировать", fragment)
             self.result_copy_pending = VoxButton("Скопировать ожидающее", fragment)
@@ -416,9 +424,7 @@ if PYSIDE6_AVAILABLE:
         def _update_result_actions(self) -> None:
             if not hasattr(self, "result_target"):
                 return
-            available = (
-                bool(self.result_editor.toPlainText().strip()) and not self._state.state.active
-            )
+            available = not self._state.state.active and not self.result_editor.document().isEmpty()
             for button in (
                 self.result_copy,
                 self.result_insert,
@@ -429,6 +435,56 @@ if PYSIDE6_AVAILABLE:
 
         def result_text(self) -> str:
             return self.result_editor.toPlainText()
+
+        def set_live_text_source(self, source: Callable[[str, int, int], str]) -> None:
+            self._live_source = source
+
+        def _hide_new_text_at_end(self, position: int) -> None:
+            if position == self.result_editor.verticalScrollBar().maximum():
+                self.new_text_label.hide()
+
+        def _update_result_editor(self, snapshot: object, state: UIState) -> None:
+            session = getattr(snapshot, "live_session_id", None)
+            active = state.state.active
+            if active and session is not None and self._live_source is not None:
+                if session != self._live_document_session:
+                    self.result_editor.clear()
+                    self.result_editor.document().setModified(False)
+                    self._live_document_session = session
+                    self._live_cursor_offset = 0
+                length = getattr(snapshot, "live_committed_length", 0)
+                delta = self._live_source(session, self._live_cursor_offset, length)
+                if delta:
+                    scroll = self.result_editor.verticalScrollBar()
+                    previous_position = scroll.value()
+                    following = previous_position == scroll.maximum()
+                    document = self.result_editor.document()
+                    edited = document.isModified()
+                    cursor = QTextCursor(document)
+                    cursor.movePosition(QTextCursor.MoveOperation.End)
+                    cursor.insertText(delta)
+                    document.setModified(edited)
+                    scroll.setValue(scroll.maximum() if following else previous_position)
+                    self.new_text_label.setVisible(not following)
+                    self._live_cursor_offset += len(delta)
+                self.result_editor.setReadOnly(False)
+                return
+            finalized = state.full_transcript if not active else ""
+            if self._live_document_session is not None:
+                edited = self.result_editor.document().isModified()
+                if active or (not edited and self.result_editor.toPlainText() != finalized):
+                    self.result_editor.setPlainText(finalized)
+                elif edited and getattr(snapshot, "live_final", None) is not None:
+                    cursor = QTextCursor(self.result_editor.document())
+                    cursor.movePosition(QTextCursor.MoveOperation.End)
+                    cursor.insertText(finalized[self._live_cursor_offset :])
+                self._live_document_session = None
+                self._live_cursor_offset = 0
+                self.new_text_label.hide()
+            elif self._observed_result != finalized:
+                self.result_editor.setPlainText(finalized)
+            self._observed_result = finalized
+            self.result_editor.setReadOnly(active)
 
         def set_profile_name(self, name: str) -> None:
             if self.shell.profile.text() == name:
@@ -685,11 +741,7 @@ if PYSIDE6_AVAILABLE:
             )
             self.shell.engine.setText(status_text)
             self.shell.model.setText(model_label)
-            finalized = state.full_transcript if not active else ""
-            if self._observed_result != finalized:
-                self._observed_result = finalized
-                self.result_editor.setPlainText(finalized)
-            self.result_editor.setReadOnly(active)
+            self._update_result_editor(snapshot, state)
             self._update_result_actions()
             mode = (
                 "processing"

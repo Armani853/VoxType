@@ -298,6 +298,7 @@ class DesktopApplication:
         if main is not None:
             self.main.set_interface_language(runtime.settings.general.ui_language)
             self.main.set_minimize_to_tray(runtime.settings.general.minimize_to_tray)
+        self.main.set_live_text_source(self.controller.live_text_since)
         paint = self.main.first_paint_seconds
         if paint is None:
             self.main.first_paint.connect(
@@ -380,6 +381,8 @@ class DesktopApplication:
         self._last_rendered_snapshot: object | None = None
         self._header_profile_id: str | None = None
         self._result_dismissed = False
+        self._overlay_dismissed = False
+        self._overlay_requested = False
         self._last_pending_flush = 0.0
         self._last_target_sample = 0.0
         self._pending_flush_running = False
@@ -548,6 +551,7 @@ class DesktopApplication:
             )
         )
         self.tray.open_window_requested.connect(self._show_main)
+        self.tray.open_overlay_requested.connect(self._restore_dictation_overlay)
         self.tray.settings_requested.connect(self.show_settings)
         self.tray.quit_requested.connect(self.quit)
         self.signals.model_progress.connect(self._on_model_progress)
@@ -665,6 +669,8 @@ class DesktopApplication:
                 )
             )
             overlay.close_result_requested.connect(self._dismiss_result)
+            overlay.hide_requested.connect(self._dismiss_dictation_overlay)
+            overlay.open_buffer_requested.connect(self._open_dictation_buffer)
         return overlay
 
     @property
@@ -845,9 +851,41 @@ class DesktopApplication:
         self._poll()
 
     def _dismiss_result(self) -> None:
+        self._overlay_requested = False
         self._result_dismissed = True
         if self._overlay is not None:
             self._overlay.hide()
+
+    def _open_dictation_buffer(self) -> None:
+        self._show_main()
+        self._navigate_desktop("dictation")
+
+    def _dismiss_dictation_overlay(self) -> None:
+        snapshot = self.controller.snapshot(include_live_text=False)
+        if not self._overlay_dismissed and snapshot.state in {
+            "LISTENING",
+            "SPEECH_DETECTED",
+            "TRANSCRIBING",
+            "PAUSED",
+            "PAUSED_TARGET_LOST",
+        }:
+            self._notify_desktop(
+                "dictation-overlay-hidden",
+                "Маленькое окно скрыто. Диктовка продолжается.",
+            )
+        self._overlay_dismissed = True
+        self._overlay_requested = False
+
+    def _restore_dictation_overlay(self) -> None:
+        self._overlay_dismissed = False
+        self._result_dismissed = False
+        self._overlay_requested = True
+        overlay = self.overlay
+        snapshot = self.controller.snapshot(include_live_text=False)
+        overlay.update_snapshot(snapshot)
+        if snapshot.state in {"IDLE", "COMPLETED"} and overlay.is_compact():
+            overlay.set_mode("standard", persist=False)
+        self._poll()
 
     def _update_views_if_changed(self, snapshot: ControllerSnapshot) -> None:
         profiles = self.controller.profiles
@@ -938,6 +976,8 @@ class DesktopApplication:
     def _observe_foreground(self, hwnd: int = 0) -> None:
         if self._closing:
             return
+        if hwnd:
+            self.controller.note_foreground_change(hwnd)
         if (
             hwnd
             and self._pending_dictation_target is not None
@@ -1003,7 +1043,7 @@ class DesktopApplication:
             self._last_target_sample = now
             self._observe_foreground()
         target_done = time.perf_counter()
-        snapshot = self.controller.snapshot()
+        snapshot = self.controller.snapshot(include_live_text=False)
         if (
             self._deferred_settings
             and not self._settings_write_running
@@ -1027,6 +1067,16 @@ class DesktopApplication:
             "ERROR_FATAL",
             "COMPLETED",
         }
+        if (snapshot.state == "STARTING" and self._last_state != "STARTING") or (
+            snapshot.state == "LISTENING"
+            and self._last_state
+            in {
+                "IDLE",
+                "COMPLETED",
+                "ERROR_RECOVERABLE",
+            }
+        ):
+            self._overlay_dismissed = False
         if snapshot.state != self._last_state and snapshot.state == "COMPLETED":
             privacy = self.runtime.settings.privacy
             if not self.controller.policy.disable_history and (
@@ -1039,9 +1089,10 @@ class DesktopApplication:
         elif snapshot.state in {"STARTING", "MODEL_LOADING", "LISTENING"}:
             self._result_dismissed = False
         if (
-            active
+            (active or self._overlay_requested)
             and not (self._system_locked or self._system_sleeping)
-            and self.runtime.settings.general.show_overlay
+            and (self.runtime.settings.general.show_overlay or self._overlay_requested)
+            and not self._overlay_dismissed
             and not (snapshot.state == "COMPLETED" and self._result_dismissed)
         ):
             overlay = self._overlay
@@ -1507,6 +1558,7 @@ class DesktopApplication:
                 ),
             ),
             ("Открыть транскрипции", lambda: self._navigate_desktop("files")),
+            ("Показать окно диктовки", self._restore_dictation_overlay),
             ("Открыть блокнот диктовки", self._open_scratchpad),
             (
                 "Запись: удерживать клавиши",

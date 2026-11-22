@@ -21,6 +21,7 @@ if PYSIDE6_AVAILABLE:
         pause_toggle_requested = Signal()
         language_change_requested = Signal(str)
         open_window_requested = Signal()
+        open_overlay_requested = Signal()
         settings_requested = Signal()
         quit_requested = Signal()
 
@@ -64,6 +65,8 @@ if PYSIDE6_AVAILABLE:
             self.open_action = QAction("Открыть VoxType", self.menu)
             self.open_action.setObjectName("trayOpenAction")
             self.settings_action = QAction("Настройки", self.menu)
+            self.overlay_action = QAction("Показать окно диктовки", self.menu)
+            self.menu.addAction(self.overlay_action)
             self.settings_action.setObjectName("traySettingsAction")
             self.menu.insertAction(self.toggle_action, self.open_action)
             self.menu.insertSeparator(self.toggle_action)
@@ -85,6 +88,7 @@ if PYSIDE6_AVAILABLE:
             self.pause_action.triggered.connect(self.pause_toggle_requested)
             self.language_group.triggered.connect(self._language_triggered)
             self.open_action.triggered.connect(self.open_window_requested)
+            self.overlay_action.triggered.connect(self.open_overlay_requested)
             self.settings_action.triggered.connect(self.settings_requested)
             self.quit_action.triggered.connect(self.quit_requested)
             self.icon.activated.connect(self._activated)
@@ -95,6 +99,7 @@ if PYSIDE6_AVAILABLE:
             dpr = self.menu.devicePixelRatioF()
             for action, symbol in (
                 (self.open_action, "home"),
+                (self.overlay_action, "expand"),
                 (self.toggle_action, "stop" if active else "mic"),
                 (self.pause_action, "pause"),
                 (self.settings_action, "settings"),

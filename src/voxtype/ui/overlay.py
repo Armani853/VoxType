@@ -60,6 +60,8 @@ if PYSIDE6_AVAILABLE:
         copy_all_requested = Signal()
         insert_requested = Signal()
         close_result_requested = Signal()
+        hide_requested = Signal()
+        open_buffer_requested = Signal()
 
         def __init__(
             self,
@@ -94,6 +96,9 @@ if PYSIDE6_AVAILABLE:
                 stored_mode if stored_mode in ("mini", "standard", "expanded") else "standard"
             )
             self._mode = ""
+            self._preview = ""
+            self._preview_changed = ("", -1)
+            self._hypothesis = ""
             self._controller_connections: list[tuple[Any, Callable[..., Any]]] = []
             self._build_ui()
             self._connect_ui()
@@ -125,7 +130,9 @@ if PYSIDE6_AVAILABLE:
             self.timer_label.setObjectName("overlayTimerLabel")
             self.mini_wave = WaveformWidget(self.panel, bars=13, height=24)
             self.stop_button = self._overlay_button("stop", "Остановить")
-            self.expand_button = self._overlay_button("menu", "Размер индикатора")
+            self.expand_button = self._overlay_button("expand", "Развернуть буфер")
+            self.minimize_button = self._overlay_button("minimize", "Свернуть в трей")
+            self.hide_button = self._overlay_button("close", "Скрыть окно")
             for widget in (
                 self.status_dot,
                 self.status_label,
@@ -133,7 +140,9 @@ if PYSIDE6_AVAILABLE:
                 self.language_label,
                 self.timer_label,
                 self.stop_button,
+                self.minimize_button,
                 self.expand_button,
+                self.hide_button,
             ):
                 line.addWidget(widget, 1 if widget is self.status_label else 0)
             content.addLayout(line)
@@ -153,6 +162,7 @@ if PYSIDE6_AVAILABLE:
             self.result_text = QPlainTextEdit(self.expanded_panel)
             self.result_text.setObjectName("overlayResultText")
             self.result_text.setReadOnly(True)
+            self.result_text.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             self.result_text.hide()
             self.queue_label = QLabel(self.expanded_panel)
             self.queue_label.hide()
@@ -166,11 +176,18 @@ if PYSIDE6_AVAILABLE:
             actions.setSpacing(2)
             self.copy_all_button = self._overlay_button("snippets", "Копировать результат")
             self.insert_button = self._overlay_button("check", "Повторить вставку")
-            self.close_result_button = self._overlay_button("close", "Закрыть результат")
-            for button in (self.copy_all_button, self.insert_button, self.close_result_button):
+            self.open_buffer_button = self._overlay_button("files", "Открыть буфер")
+            self.start_button = self._overlay_button("mic", "Начать новую диктовку")
+            for button in (
+                self.copy_all_button,
+                self.insert_button,
+                self.open_buffer_button,
+                self.start_button,
+            ):
                 actions.addWidget(button)
             details.addWidget(self.result_buttons)
             content.addWidget(self.expanded_panel)
+            content.addWidget(self.result_text, 1)
             outer.addWidget(self.panel)
 
         def _overlay_button(self, icon: str, label: str) -> QPushButton:
@@ -187,11 +204,19 @@ if PYSIDE6_AVAILABLE:
 
         def _connect_ui(self) -> None:
             self.expand_button.clicked.connect(self.toggle_compact)
+            self.minimize_button.clicked.connect(self.minimize_panel)
+            self.hide_button.clicked.connect(self._request_hide)
+            self.open_buffer_button.clicked.connect(self.open_buffer_requested)
+            self.start_button.clicked.connect(self.stop_requested)
             self.pause_button.clicked.connect(self.pause_requested)
             self.stop_button.clicked.connect(self._request_stop)
             self.copy_all_button.clicked.connect(self.copy_all_requested)
             self.insert_button.clicked.connect(self.insert_requested)
-            self.close_result_button.clicked.connect(self.close_result_requested)
+
+        def _request_hide(self) -> None:
+            self._save_position()
+            self.hide()
+            self.hide_requested.emit()
 
         def _request_stop(self) -> None:
             if self._state.state is AppStatus.FINISHING:
@@ -246,33 +271,40 @@ if PYSIDE6_AVAILABLE:
                     meter.set_level(rms_to_meter(state.input_rms))
             self.processing_label.setText(self._processing_text(state))
             self.processing_label.setToolTip(self._processing_text(state))
+            live = getattr(snapshot, "live_transcript", None)
+            key = (live.session_id, live.revision) if live is not None else ("", -1)
+            if key != self._preview_changed:
+                self._preview_changed = key
+                self._hypothesis = (
+                    " ".join(
+                        (*[part.text for part in live.stable_segments], live.unstable_text)
+                    ).strip()
+                    if live is not None
+                    else ""
+                )
             transcript = (
                 state.full_transcript
                 if completed
-                else state.provisional_text or state.last_committed_text
+                else (self._hypothesis or state.last_committed_text or state.provisional_text)
             )
-            if transcript != (
-                previous.full_transcript
-                if previous.state is AppStatus.COMPLETED
-                else previous.provisional_text or previous.last_committed_text
-            ):
-                self.provisional_label.setText(text_preview(transcript, 130))
-                self.provisional_label.setToolTip(text_preview(transcript, 420))
-                if completed:
-                    self.result_text.setPlainText(transcript)
+            preview = text_preview(transcript, 700)
+            if preview != self._preview:
+                self._preview = preview
+                self.provisional_label.setText(text_preview(preview, 160))
+                self.provisional_label.setToolTip(text_preview(preview, 420))
+                if self._mode != "mini":
+                    self.result_text.setPlainText(preview)
             finishing = state.state is AppStatus.FINISHING
             self.stop_button.setToolTip("Отменить обработку" if finishing else "Остановить")
             self.stop_button.setAccessibleName(self.stop_button.toolTip())
-            self.stop_button.setVisible(
-                self._mode != "mini" and (state.state.active or finishing) and not completed
-            )
-            self.pause_button.setVisible(not completed)
+            self.stop_button.setVisible((state.state.active or finishing) and not completed)
+            self.pause_button.setVisible(state.state.active and not finishing)
             self.pause_button.setToolTip(
                 "Продолжить"
                 if state.state in {AppStatus.PAUSED, AppStatus.PAUSED_TARGET_LOST}
                 else "Пауза"
             )
-            self.result_buttons.setVisible(completed)
+            self.result_buttons.setVisible(completed or state.state is AppStatus.IDLE)
             self.copy_all_button.setEnabled(bool(transcript))
             self.insert_button.setEnabled(
                 state.delivery_status in {"failed", "queued_target_inactive"}
@@ -314,27 +346,34 @@ if PYSIDE6_AVAILABLE:
             widget.update()
 
         def toggle_compact(self) -> None:
-            modes = ("mini", "standard", "expanded")
-            self.set_mode(modes[(modes.index(self._mode) + 1) % len(modes)])
+            self.set_mode("expanded" if self._mode == "standard" else "standard")
+
+        def minimize_panel(self) -> None:
+            self.set_mode("mini")
+            self._request_hide()
 
         def set_compact(self, compact: bool, *, persist: bool = True) -> None:
             self.set_mode("standard" if compact else "expanded", persist=persist)
 
         def set_mode(self, mode: str, *, persist: bool = True) -> None:
-            sizes = {"mini": (168, 42), "standard": (260, 62), "expanded": (320, 100)}
             self._mode = mode
             self._compact = mode != "expanded"
             self.mini_wave.setVisible(mode == "mini")
-            self.status_label.setVisible(mode != "mini")
+            self.status_label.show()
             self.language_label.setVisible(mode != "mini")
             self.timer_label.setVisible(mode == "expanded")
             self.audio_meter.setVisible(mode != "mini")
             self.processing_label.setVisible(mode != "mini")
-            self.stop_button.setVisible(mode != "mini" and self._state.state.active)
-            self.result_buttons.setVisible(self._state.state is AppStatus.COMPLETED)
-            self.pause_button.setVisible(self._state.state is not AppStatus.COMPLETED)
-            self.expanded_panel.setVisible(mode == "expanded")
-            self.setFixedSize(*sizes[mode])
+            self.stop_button.setVisible(self._state.state.active)
+            self.result_buttons.setVisible(
+                self._state.state in {AppStatus.IDLE, AppStatus.COMPLETED}
+            )
+            self.pause_button.setVisible(self._state.state.active)
+            self.expanded_panel.setVisible(mode != "mini")
+            self.result_text.setVisible(mode != "mini")
+            if mode != "mini":
+                self.result_text.setPlainText(self._preview)
+            self._resize_to_screen()
             if persist:
                 self._preferred_mode = mode
                 self._settings.setValue("ui/overlayMode", mode)
@@ -344,6 +383,16 @@ if PYSIDE6_AVAILABLE:
 
         def is_compact(self) -> bool:
             return self._compact
+
+        def _resize_to_screen(self) -> None:
+            width, height = {"mini": (300, 64), "standard": (420, 180), "expanded": (520, 330)}[
+                self._mode
+            ]
+            screen = QApplication.screenAt(self.pos()) or QApplication.primaryScreen()
+            if screen is not None:
+                area = screen.availableGeometry()
+                width, height = min(width, area.width()), min(height, area.height())
+            self.setFixedSize(width, height)
 
         def place_near_caret(self, rect: tuple[int, int, int, int] | None) -> None:
             if self._drag_offset is not None:
@@ -524,6 +573,7 @@ if PYSIDE6_AVAILABLE:
                 handle.screenChanged.connect(self._screen_changed)
 
         def _screen_changed(self, _screen: object) -> None:
+            self._resize_to_screen()
             point = self._clamped_position(self.pos())
             if point != self.pos():
                 self.move(point)

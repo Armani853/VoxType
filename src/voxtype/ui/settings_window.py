@@ -298,11 +298,26 @@ if PYSIDE6_AVAILABLE:
                 "По одному имени, термину или сокращению на строку (до 200)"
             )
             self.vocabulary_edit.setMaximumHeight(110)
-            self.live_preview_check = QCheckBox("Предварительный текст во время диктовки", page)
+            self.live_preview_check = QCheckBox("Потоковый текст во время диктовки", page)
             self.live_preview_check.setToolTip(
-                "Текст будет отправлен в целевое окно после остановки."
+                "Текст по мере распознавания добавляется в буфер VoxType."
             )
+            self.live_insertion_check = QCheckBox("Потоковая вставка в выбранное поле", page)
+            self.live_insertion_check.setToolTip(
+                "Подтверждённый текст будет добавляться в выбранное поле по мере распознавания. "
+                "Голосовые действия в этом режиме отключены."
+            )
+            self.streaming_speed_combo = self._combo(
+                (
+                    ("Максимально быстро", "fast"),
+                    ("Сбалансированно", "balanced"),
+                    ("Экономично", "eco"),
+                ),
+                page,
+            )
+            self.live_preview_check.toggled.connect(self._update_streaming_controls)
             self.auto_insert_check = QCheckBox("Автоматически вставлять подтверждённый текст", page)
+            self._update_streaming_controls(self.live_preview_check.isChecked())
             self.copy_complete_check = QCheckBox(
                 "Копировать весь текст в буфер после завершения", page
             )
@@ -362,6 +377,8 @@ if PYSIDE6_AVAILABLE:
             compatibility.clicked.connect(lambda: self.input_compatibility_requested.emit())
             form.addRow(compatibility)
             form.addRow(self.live_preview_check)
+            form.addRow(self.live_insertion_check)
+            form.addRow("Скорость появления текста", self.streaming_speed_combo)
             form.addRow(self.auto_insert_check)
             form.addRow(self.copy_complete_check)
             form.addRow(self.auto_hide_result_check)
@@ -370,6 +387,11 @@ if PYSIDE6_AVAILABLE:
             form.addRow("Задержка перед вставкой", self.insertion_delay_spin)
             form.addRow(self.spacing_check)
             form.addRow(self.capitalize_check)
+
+        def _update_streaming_controls(self, enabled: bool) -> None:
+            self.live_insertion_check.setEnabled(enabled)
+            self.streaming_speed_combo.setEnabled(enabled)
+            self.auto_insert_check.setEnabled(not enabled)
 
         def _build_audio_page(self) -> None:
             page, form = self._page("Аудио", "Микрофон и осторожная обработка сигнала.")
@@ -864,6 +886,7 @@ if PYSIDE6_AVAILABLE:
                 self.sounds_check,
                 self.voice_commands_check,
                 self.live_preview_check,
+                self.live_insertion_check,
                 self.auto_stop_enabled,
                 self.safe_terminal_check,
                 self.caret_overlay_check,
@@ -888,6 +911,7 @@ if PYSIDE6_AVAILABLE:
                 check.toggled.connect(self._mark_dirty)
             combos = (
                 self.theme_combo,
+                self.streaming_speed_combo,
                 self.dictation_mode_combo,
                 self.update_channel_combo,
                 self.interface_language_combo,
@@ -962,6 +986,8 @@ if PYSIDE6_AVAILABLE:
                         if line.strip()
                     ][:200],
                     "live_preview": self.live_preview_check.isChecked(),
+                    "live_insertion": self.live_insertion_check.isChecked(),
+                    "streaming_speed": self.streaming_speed_combo.currentData(),
                     "mode": self.dictation_mode_combo.currentData(),
                     "safe_terminal_input": self.safe_terminal_check.isChecked(),
                     "caret_overlay": self.caret_overlay_check.isChecked(),
@@ -1089,8 +1115,15 @@ if PYSIDE6_AVAILABLE:
                 ):
                     spin.setValue(int(str(_setting(auto_stop, key, default=default))))
                 self.live_preview_check.setChecked(
-                    bool(_setting(dictation, "live_preview", default=False))
+                    bool(_setting(dictation, "live_preview", default=True))
                 )
+                self.live_insertion_check.setChecked(
+                    bool(_setting(dictation, "live_insertion", default=False))
+                )
+                speed = str(_setting(dictation, "streaming_speed", default="balanced"))
+                index = self.streaming_speed_combo.findData(speed)
+                self.streaming_speed_combo.setCurrentIndex(index if index >= 0 else 1)
+                self._update_streaming_controls(self.live_preview_check.isChecked())
                 self.auto_insert_check.setChecked(
                     bool(_setting(dictation, "auto_insert", default=True))
                 )

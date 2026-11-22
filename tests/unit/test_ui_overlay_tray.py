@@ -110,7 +110,7 @@ def test_completed_overlay_persists_full_result_and_exposes_actions(qtbot) -> No
     assert overlay.copy_all_button.isEnabled()
     assert overlay.copy_all_button.accessibleName() == "Копировать результат"
     assert overlay.insert_button.isEnabled()
-    assert (overlay.width(), overlay.height()) == (320, 100)
+    assert (overlay.width(), overlay.height()) == (520, 330)
     assert overlay.provisional_label.full_text() == "полный подтверждённый результат"
     assert overlay.processing_label.full_text() == "Вернитесь в целевое окно"
     assert not overlay.pause_button.isVisible()
