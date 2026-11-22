@@ -24,7 +24,9 @@ from PySide6.QtCore import (
     QAbstractEventDispatcher,
     QAbstractNativeEventFilter,
     QByteArray,
+    QIODevice,
     QObject,
+    QSaveFile,
     QSettings,
     Qt,
     QTimer,
@@ -174,6 +176,7 @@ class _WorkerSignals(QObject):
     recovery_ready = Signal(str, bool, str)
     draft_restored = Signal(str, str, object)
     history_ready = Signal(int, object)
+    history_changed = Signal()
     delivery_outbox_ready = Signal(object)
     pending_flush_ready = Signal()
     hardware_ready = Signal(str, str)
@@ -260,6 +263,8 @@ class DesktopApplication:
     """Own Qt views and adapt them to the Qt-independent controller."""
 
     _local_automation: LocalAutomation | None = None
+    _default_audio_endpoint_id = ""
+    _system_default_missing = False
 
     def __init__(
         self, application: QApplication, runtime: RuntimeBundle, *, main: MainWindow | None = None
@@ -293,6 +298,13 @@ class DesktopApplication:
         if main is not None:
             self.main.set_interface_language(runtime.settings.general.ui_language)
             self.main.set_minimize_to_tray(runtime.settings.general.minimize_to_tray)
+        paint = self.main.first_paint_seconds
+        if paint is None:
+            self.main.first_paint.connect(
+                lambda elapsed: self.controller.metrics.record_operation("startup_paint", elapsed)
+            )
+        else:
+            self.controller.metrics.record_operation("startup_paint", paint)
         if os.environ.get("VOXTYPE_DATA_DIRECTORY", "").strip():
             geometry = QSettings(str(runtime.data_directory / "ui.ini"), QSettings.Format.IniFormat)
         else:
@@ -350,6 +362,7 @@ class DesktopApplication:
         self.power_events = PowerEventCoordinator(
             on_suspend=lambda: self.signals.system_event.emit("suspend"),
             on_resume=lambda: self.signals.system_event.emit("resume"),
+            on_power_change=lambda: self.signals.system_event.emit("power"),
         )
         self.hotkey_filter = _HotkeyEventFilter(
             self.hotkeys,
@@ -579,6 +592,9 @@ class DesktopApplication:
         self.signals.history_ready.connect(
             self._on_history_ready, Qt.ConnectionType.QueuedConnection
         )
+        self.signals.history_changed.connect(
+            self._refresh_history, Qt.ConnectionType.QueuedConnection
+        )
         self.signals.delivery_outbox_ready.connect(
             self._show_delivery_outbox, Qt.ConnectionType.QueuedConnection
         )
@@ -788,6 +804,7 @@ class DesktopApplication:
             return
         duration_ms = (time.perf_counter() - started) * 1_000.0
         if duration_ms >= 100.0:
+            self.controller.metrics.record_operation("ui_stall", duration_ms / 1000)
             _LOGGER.warning(
                 "UI_DISPATCH_SLOW state=%s duration_ms=%.1f",
                 self.controller.state.name,
@@ -1108,6 +1125,9 @@ class DesktopApplication:
     def _on_system_event(self, event: str | DeviceEvent) -> None:
         if self._closing:
             return
+        if event == "power":
+            self._apply_motion_profile()
+            return
         if isinstance(event, DeviceEvent):
             if not self._system_locked and not self._system_sleeping:
                 audio = self.runtime.settings.audio
@@ -1137,6 +1157,8 @@ class DesktopApplication:
             return
         if event in {"suspend", "resume"}:
             self._system_sleeping = event == "suspend"
+            if not self._system_sleeping:
+                self._apply_motion_profile()
         elif event in {"lock", "unlock"}:
             self._system_locked = event == "lock"
         if self._system_locked or self._system_sleeping:
@@ -2909,23 +2931,36 @@ class DesktopApplication:
         self.history_window.set_sessions(list(sessions))
 
     def _delete_history_session(self, session_id: str) -> None:
-        if self.runtime.session_repository.delete(session_id):
-            _remove_owned_path(
-                self.runtime.data_directory / "audio" / f"{session_id}.wav",
-                self.runtime.data_directory,
-            )
-            _remove_owned_path(self.controller.spool_root / session_id, self.controller.spool_root)
-            self.history_window.remove_session(session_id)
-            self._refresh_history()
+        def delete() -> None:
+            try:
+                if not self.runtime.session_repository.delete(session_id):
+                    return
+                _remove_owned_path(
+                    self.runtime.data_directory / "audio" / f"{session_id}.wav",
+                    self.runtime.data_directory,
+                )
+                _remove_owned_path(
+                    self.controller.spool_root / session_id, self.controller.spool_root
+                )
+            except (OSError, sqlite3.Error) as exc:
+                _LOGGER.warning("history_delete_failed type=%s", type(exc).__name__)
+                self.signals.data_status.emit("Не удалось удалить все данные записи", False)
+            finally:
+                self.signals.history_changed.emit()
+
+        self._run_background("voxtype-history-delete", delete, finish_on_close=True)
 
     def _clear_finished_history(self) -> None:
-        try:
-            self.runtime.session_repository.delete_all_finished()
-        except Exception as exc:
-            _LOGGER.warning("history_clear_failed type=%s", type(exc).__name__)
-            self.tray.show_message("VoxType", "Не удалось очистить историю", critical=True)
-        else:
-            self._refresh_history()
+        def clear() -> None:
+            try:
+                self.runtime.session_repository.delete_all_finished()
+            except (OSError, sqlite3.Error) as exc:
+                _LOGGER.warning("history_clear_failed type=%s", type(exc).__name__)
+                self.signals.data_status.emit("Не удалось очистить историю", False)
+            else:
+                self.signals.history_changed.emit()
+
+        self._run_background("voxtype-history-clear", clear, finish_on_close=True)
 
     def _open_restored_draft(
         self, identifier: str, text: str, versions: tuple[TranscriptRevision, ...]
@@ -3379,15 +3414,38 @@ class DesktopApplication:
             self.onboarding.set_model_ready(ready, message)
 
     def _delete_model(self, model_id: str) -> None:
-        if self.controller.state.name != "IDLE" or model_id == self.controller.backend.model_id:
+        if (
+            model_id == self.controller.backend.model_id
+            or not self.controller.reserve_storage_maintenance()
+        ):
             self.settings_window.set_diagnostics_status("Нельзя удалить активную модель", False)
             return
-        removed = self.runtime.model_manager.remove(model_id)
-        self.settings_window.set_diagnostics_status(
-            "Модель удалена" if removed else "Модель не найдена", removed
-        )
-        if removed:
-            self._run_background("voxtype-model-list-refresh", self._scan_settings_models)
+
+        def remove() -> None:
+            manager = self.runtime.model_manager
+            try:
+                if not any(
+                    item.model_id != model_id
+                    and self.controller.policy.model_allowed(item.model_id)
+                    for item in manager.list_installed()
+                ):
+                    self.signals.settings_status.emit(
+                        "Сохраните хотя бы одну разрешённую модель", False
+                    )
+                    return
+                removed = manager.remove(model_id)
+                self.signals.settings_status.emit(
+                    "Модель удалена" if removed else "Модель не найдена", removed
+                )
+                if removed:
+                    self._scan_settings_models()
+            except (OSError, ValueError):
+                self.signals.settings_status.emit("Не удалось удалить модель", False)
+            finally:
+                self.controller.release_storage_maintenance()
+
+        if not self._run_background("voxtype-model-delete", remove, finish_on_close=True):
+            self.controller.release_storage_maintenance()
 
     def _benchmark_model(self, model_id: str) -> None:
         selected = _coerce_asr_profile(model_id)
@@ -3524,6 +3582,8 @@ class DesktopApplication:
                 self.signals.data_status.emit("Часть данных не удалось очистить", False)
             else:
                 self.signals.data_status.emit(f"Удалены локальные записи: {removed}", True)
+                if self._history_window is not None:
+                    self.signals.history_changed.emit()
             finally:
                 self.controller.release_storage_maintenance()
 
@@ -3542,27 +3602,43 @@ class DesktopApplication:
         )
         if not selected:
             return
-        hardware = probe_hardware()
-        payload = {
-            "version": __version__,
-            "hardware": {
-                "os": hardware.os_name,
-                "cpu": hardware.cpu_name,
-                "physical_cores": hardware.physical_cores,
-                "logical_cores": hardware.logical_cores,
-                "ram_bytes": hardware.total_ram_bytes,
-                "gpu": hardware.gpu_names,
-            },
-            "metrics": self.controller.metrics.snapshot(),
-            "checks": [
-                {"name": item.name, "ok": item.ok, "detail": item.detail}
-                for item in run_health_checks(self.runtime.data_directory)
-            ],
-        }
-        Path(selected).write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2, default=str) + "\n",
-            encoding="utf-8",
-        )
+
+        def export() -> None:
+            try:
+                hardware = probe_hardware()
+                payload = {
+                    "version": __version__,
+                    "hardware": {
+                        "os": hardware.os_name,
+                        "cpu": hardware.cpu_name,
+                        "physical_cores": hardware.physical_cores,
+                        "logical_cores": hardware.logical_cores,
+                        "ram_bytes": hardware.total_ram_bytes,
+                        "gpu": hardware.gpu_names,
+                    },
+                    "metrics": self.controller.metrics.snapshot(),
+                    "checks": [
+                        {"name": item.name, "ok": item.ok, "detail": item.detail}
+                        for item in run_health_checks(self.runtime.data_directory)
+                    ],
+                }
+                data = (
+                    json.dumps(payload, ensure_ascii=False, indent=2, default=str) + "\n"
+                ).encode("utf-8")
+                file = QSaveFile(selected)
+                if (
+                    not file.open(QIODevice.OpenModeFlag.WriteOnly)
+                    or file.write(data) != len(data)
+                    or not file.commit()
+                ):
+                    raise OSError("Diagnostic export could not be committed")
+            except Exception as exc:
+                _LOGGER.warning("diagnostics_export_failed kind=%s", type(exc).__name__)
+                self.signals.data_status.emit("Не удалось сохранить диагностику", False)
+            else:
+                self.signals.data_status.emit("Диагностика экспортирована", True)
+
+        self._run_background("voxtype-diagnostics-export", export)
 
     def _test_phrase(self, language: str) -> None:
         wizard = self.onboarding
@@ -3697,6 +3773,7 @@ class DesktopApplication:
         if self._professional_window is not None:
             self._professional_window.flush_editor_draft()
         self._closing = True
+        self._shutdown_started = time.perf_counter()
         if self._local_automation is not None:
             self._local_automation.close()
         self.controller.begin_shutdown()
@@ -3764,6 +3841,9 @@ class DesktopApplication:
             )
             return
         self._closed = True
+        elapsed = time.perf_counter() - self._shutdown_started
+        self.controller.metrics.record_operation("shutdown", elapsed)
+        _LOGGER.info("shutdown_complete duration_ms=%.1f", elapsed * 1000)
         self.runtime.session_repository.close_current_thread()
         self._disconnect_state_listener()
         if self._event_dispatcher is not None:

@@ -539,6 +539,7 @@ if PYSIDE6_AVAILABLE:
             self.power_mode_combo = QComboBox(page)
             self.power_mode_combo.addItem("Экономия энергии", "energy")
             self.power_mode_combo.addItem("Баланс", "balanced")
+            self.power_mode_combo.addItem("Автоматически (Windows)", "automatic")
             self.power_mode_combo.addItem("Максимальная производительность", "maximum")
             self.decoding_preset_combo = QComboBox(page)
             self.decoding_preset_combo.addItem("Быстро", "fast")

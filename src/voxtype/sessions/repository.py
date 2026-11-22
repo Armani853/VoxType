@@ -559,6 +559,22 @@ class SessionRepository:
                 raise KeyError(session_id)
         return sequence
 
+    def live_recovery_text(self, session_id: str) -> str:
+        """Read opt-in finalized speech fragments from an interrupted Live session."""
+        with self._lock:
+            rows = self._connection.execute(
+                """SELECT payload_json FROM session_events
+                   WHERE session_id=? AND event_type='live_recovery_fragment'
+                   ORDER BY sequence""",
+                (session_id,),
+            )
+            parts: list[str] = []
+            for (payload,) in rows:
+                data = json.loads(payload)
+                if isinstance(data, dict) and isinstance(text := data.get("text"), str):
+                    parts.append(text)
+        return "".join(parts)
+
     def add_warning(self, session_id: str, warning: str, suspicious: bool = False) -> None:
         column = "suspicious_json" if suspicious else "warnings_json"
         with self._lock, self._connection:

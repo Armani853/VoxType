@@ -7,9 +7,11 @@ import threading
 import time
 from collections import deque
 from dataclasses import asdict, dataclass
-from typing import Any
+from typing import Any, Literal
 
 import psutil
+
+type TimedOperation = Literal["startup_paint", "model_load", "ui_stall", "delivery", "shutdown"]
 
 
 @dataclass(slots=True)
@@ -45,6 +47,7 @@ class PerformanceMonitor:
         self._cascade_retry_chunks = 0
         self._uncertain_chunks = 0
         self._current_model = ""
+        self._durations: dict[TimedOperation, tuple[int, float, float]] = {}
         self._lock = threading.RLock()
         self._process = psutil.Process()
         self._process.cpu_percent(None)
@@ -71,6 +74,12 @@ class PerformanceMonitor:
     def record_drop(self, frames: int) -> None:
         with self._lock:
             self.audio.dropped_frames += frames
+
+    def record_operation(self, operation: TimedOperation, seconds: float) -> None:
+        with self._lock:
+            count, total, longest = self._durations.get(operation, (0, 0.0, 0.0))
+            elapsed = max(0.0, seconds)
+            self._durations[operation] = (count + 1, total + elapsed, max(longest, elapsed))
 
     def sync_audio(
         self,
@@ -161,6 +170,10 @@ class PerformanceMonitor:
                     self._cascade_retry_chunks * 100.0 / processed if processed else 0.0
                 ),
                 "uncertain_chunks": self._uncertain_chunks,
+                "operation_timings_ms": {
+                    name: {"count": count, "average": 1000 * total / count, "max": 1000 * longest}
+                    for name, (count, total, longest) in self._durations.items()
+                },
                 "samples": [asdict(sample) for sample in samples],
             }
 

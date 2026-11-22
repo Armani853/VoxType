@@ -1822,6 +1822,8 @@ class ProfessionalWindow(QDialog):
         selection_button.setToolTip(selection.reason)
         self._button("Предпросмотр", self._preview_edit, row)
         self._button("Применить локально", self._apply_edit, row)
+        layout.addLayout(row)
+        row = QHBoxLayout()
         self._button("Отменить предпросмотр", self._clear_preview, row)
         self._button("Отменить правку", self._undo_edit, row)
         self.suggest_button = self._button(
@@ -1841,6 +1843,8 @@ class ProfessionalWindow(QDialog):
         self.voice_edit_button.setEnabled(self.controller.policy.allow_voice_commands)
         self.voice_edit_button.setToolTip("Например: «удали последнее слово»")
         self._button("Версии", self._show_editor_versions, scratchpad)
+        layout.addLayout(scratchpad)
+        scratchpad = QHBoxLayout()
         self._button(
             "Скопировать",
             lambda: (
@@ -2191,6 +2195,11 @@ class ProfessionalWindow(QDialog):
         selection, text = self._selection, self._preview_result
         if selection is None or self._preview_source != selection.text or not text:
             self.feedback.setText("Считайте выделение заново и создайте предпросмотр")
+            return
+        if selection.native_range is None:
+            self.feedback.setText(
+                "Редактор не подтвердил границы выделения. Скопируйте текст из предпросмотра."
+            )
             return
         if (
             QMessageBox.question(

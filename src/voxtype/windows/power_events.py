@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ctypes
 import logging
+import os
 import struct
 import threading
 import uuid
@@ -27,6 +28,32 @@ PBT_APMRESUMEAUTOMATIC = 0x0012
 PBT_POWERSETTINGCHANGE = 0x8013
 
 MAX_POWER_SETTING_DATA = 1024 * 1024
+
+
+def on_battery_power() -> bool | None:
+    if os.name != "nt":
+        return None
+
+    class PowerStatus(ctypes.Structure):
+        _fields_ = (
+            ("ac", ctypes.c_ubyte),
+            ("battery", ctypes.c_ubyte),
+            ("percentage", ctypes.c_ubyte),
+            ("system", ctypes.c_ubyte),
+            ("life", ctypes.c_uint32),
+            ("full_life", ctypes.c_uint32),
+        )
+
+    status = PowerStatus()
+    try:
+        function = ctypes.WinDLL("kernel32").GetSystemPowerStatus
+        function.argtypes = (ctypes.POINTER(PowerStatus),)
+        function.restype = ctypes.c_int
+        if function(ctypes.byref(status)) and status.ac in (0, 1):
+            return bool(status.ac == 0 and status.battery != 128)
+    except (AttributeError, OSError):
+        pass
+    return None
 
 
 class PowerEventKind(StrEnum):
@@ -175,11 +202,13 @@ class PowerEventCoordinator:
         *,
         on_suspend: Callable[[], None],
         on_resume: Callable[[], None],
+        on_power_change: Callable[[], None] | None = None,
         dispatcher: PowerEventDispatcher | None = None,
     ) -> None:
         self.dispatcher = dispatcher or PowerEventDispatcher()
         self._on_suspend = on_suspend
         self._on_resume = on_resume
+        self._on_power_change = on_power_change
         self.dispatcher.subscribe(self._handle)
 
     def _handle(self, event: NativePowerEvent) -> None:
@@ -187,6 +216,8 @@ class PowerEventCoordinator:
             self._on_suspend()
         elif event.is_resume:
             self._on_resume()
+        elif event.kind is PowerEventKind.POWER_STATUS_CHANGE and self._on_power_change is not None:
+            self._on_power_change()
 
     def handle_message(self, message: int, wparam: int, lparam: int = 0) -> NativePowerEvent | None:
         return self.dispatcher.handle_message(message, wparam, lparam)

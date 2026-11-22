@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import gc
 import zlib
+from dataclasses import replace
 from inspect import signature
 from pathlib import Path
 from threading import RLock
@@ -66,7 +66,10 @@ class FasterWhisperBackend:
         self._model_factory = model_factory
         self._slot = engine_slot if engine_slot is not None else WhisperEngineSlot()
         self._lock = self._slot.lock
-        self._engine_key = (
+        self._engine_key = self._resident_key()
+
+    def _resident_key(self) -> tuple[Any, ...]:
+        return (
             self.model,
             self.device,
             tuple(self.device_index) if isinstance(self.device_index, list) else self.device_index,
@@ -76,6 +79,12 @@ class FasterWhisperBackend:
             self.allow_download,
             self._model_factory,
         )
+
+    def configure_cpu_threads(self, threads: int) -> None:
+        with self._lock:
+            if self.profile.cpu_threads != threads:
+                self.profile = replace(self.profile, cpu_threads=threads)
+                self._engine_key = self._resident_key()
 
     @property
     def model_id(self) -> str:
@@ -227,7 +236,6 @@ class FasterWhisperBackend:
             and self._slot is other._slot
             and self._engine_key == other._engine_key
         )
-        gc.collect()
 
     def __enter__(self) -> FasterWhisperBackend:
         self.load()

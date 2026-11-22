@@ -8,6 +8,7 @@ import pytest
 
 from voxtype.asr.model_manager import DEFAULT_MODEL_SPECS
 from voxtype.asr.profiles import ASRProfile, get_profile
+from voxtype.core.compute_budget import ComputeBudget
 from voxtype.core.models import InjectionMode, Language, ModelProfile, PreprocessingProfile
 from voxtype.core.profiles import DictationContext, ProfileManager
 from voxtype.monitoring.metrics import PerformanceMonitor
@@ -44,6 +45,16 @@ def test_editor_revisions_survive_reopen_and_follow_draft_deletion(tmp_path: Pat
         assert repository.editor_revisions(history.id) == ()
     finally:
         repository.close()
+
+
+def test_windows_power_budget_is_opt_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("voxtype.core.compute_budget.os.cpu_count", lambda: 8)
+    monkeypatch.setattr("voxtype.windows.power_events.on_battery_power", lambda: True)
+    assert ComputeBudget.from_settings("automatic").asr_intra_threads == 2
+    assert ComputeBudget.from_settings("automatic", 3).asr_intra_threads == 3
+    assert ComputeBudget.from_settings("balanced").asr_intra_threads == 4
+    monkeypatch.setattr("voxtype.windows.power_events.on_battery_power", lambda: None)
+    assert ComputeBudget.from_settings("automatic").asr_intra_threads == 4
 
 
 def test_organization_vocabulary_is_scoped_and_keeps_its_prompt_priority(tmp_path: Path) -> None:

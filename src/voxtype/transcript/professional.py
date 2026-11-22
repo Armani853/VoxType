@@ -486,6 +486,7 @@ class TextPipeline:
         *,
         command_mode: bool = False,
         allow_commands: bool = True,
+        format_commands_only: bool = False,
     ) -> ProcessedDictation:
         preserve_language = profile.output_language == OutputLanguagePolicy.PRESERVE_SPOKEN_LANGUAGE
         entries = tuple(
@@ -541,6 +542,11 @@ class TextPipeline:
             if allow_commands
             else None
         )
+        if format_commands_only and (
+            action is not None
+            and action.action_type not in {"FormatStructured", "InsertNewline", "InsertParagraph"}
+        ):
+            action = None
         if (
             action is not None
             and action.action_type == "InsertSnippet"

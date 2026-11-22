@@ -26,13 +26,14 @@ from voxtype.asr.base import (
     TranscriptionSegment,
     bounded_prompt,
 )
+from voxtype.asr.faster_whisper_backend import FasterWhisperBackend
 from voxtype.asr.hallucination_guard import GuardedTranscription, HallucinationGuard
 from voxtype.asr.live import LiveSpeechSession, LiveTranscript, SpeechKind, SpeechSegment
 from voxtype.audio.capture import AudioCaptureService, AudioIngressOverflowError
 from voxtype.audio.models import AudioQueueStats
 from voxtype.audio.quality import AudioQualityMonitor, AudioQualitySnapshot
 from voxtype.audio.spool import AudioQueueLease, DiskSpool, LosslessAudioQueue, SpoolError
-from voxtype.core.compute_budget import ResourcePhase
+from voxtype.core.compute_budget import ComputeBudget, ResourcePhase
 from voxtype.core.feedback import FAILURES, FailureCode
 from voxtype.core.gestures import DictationMode, SilenceAutoStopSettings
 from voxtype.core.models import (
@@ -207,6 +208,7 @@ class ApplicationController:
         self._audio_review_required = False
         self._system_unavailable = False
         self._session_interrupted = False
+        self._handling_runtime_error = False
         self._target_reselect_required = False
         self._professional_session_number = 0
         self._session_text_pipeline = self.professional_content.snapshot()
@@ -312,6 +314,7 @@ class ApplicationController:
             self.state_machine.transition(AppState.IDLE, "application initialized")
 
     def _preload_model(self) -> None:
+        started = time.perf_counter()
         try:
             self.backend.load()
         except Exception as exc:
@@ -324,6 +327,8 @@ class ApplicationController:
             self._loaded_backend = self.backend
             if self.state is AppState.MODEL_LOADING:
                 self.state_machine.transition(AppState.IDLE, "model preloaded")
+        finally:
+            self.metrics.record_operation("model_load", time.perf_counter() - started)
 
     def toggle_dictation(self) -> None:
         current = self.state
@@ -535,6 +540,7 @@ class ApplicationController:
                     self._file_backend = backend
                     if previous_alternate is not None:
                         previous_alternate.unload()
+            self._apply_backend_budget(backend)
             session_id = self.session_repository.create(
                 language,
                 backend.model_id,
@@ -652,7 +658,11 @@ class ApplicationController:
                 capture.arm_pre_roll()
                 capture.start(cancel=self._start_cancelled)
             if not self._start_cancelled.is_set():
-                backend.load()
+                started = time.perf_counter()
+                try:
+                    backend.load()
+                finally:
+                    self.metrics.record_operation("model_load", time.perf_counter() - started)
             with self._lock:
                 cancelled = self._start_cancelled.is_set() or self._shutdown_requested.is_set()
                 audio_queue = self._audio_queue
@@ -898,6 +908,17 @@ class ApplicationController:
         # Delivery warnings are tracked separately from ASR/session failures.
         # A temporarily inactive target must not mark recognized speech as an
         # errored history session.
+        canceled_by_command = (
+            action is not None
+            and action.action_type == "CancelCurrentSession"
+            and not action.confirmation_required
+        )
+        if canceled_by_command:
+            with self._lock:
+                self._live_command_claimed = True
+                self._status_message = "Диктовка отменена голосовой командой"
+            self._complete_session("cancelled")
+            return
         self._complete_session("interrupted" if self._session_interrupted else "completed")
         resolution = self._live_command_resolution
         if action is not None and resolution is not None and self.professional_action is not None:
@@ -1371,8 +1392,8 @@ class ApplicationController:
                     and self._practice_language is None
                     and not self._terminal_input
                     and not self._local_only
-                    and not live
                 ),
+                format_commands_only=live,
             )
             action = processed.voice_action
             if action is None:
@@ -1452,6 +1473,8 @@ class ApplicationController:
                 raise RuntimeError("committed text has no active journal")
             if self._live_session is None:
                 journal.commit_text(outcome.insertion_text)
+            elif journal.persist_text:
+                journal.append("live_recovery_fragment", {"text": outcome.insertion_text})
             with self._lock:
                 self._last_fragment = outcome.insertion_text.strip()
                 self._provisional = ""
@@ -1530,6 +1553,8 @@ class ApplicationController:
                 with self._lock:
                     if (
                         self._processing_cancelled.is_set()
+                        or self._shutdown_requested.is_set()
+                        or self._handling_runtime_error
                         or self._session_interrupted
                         or self._system_unavailable
                         or self._audio_review_required
@@ -1544,6 +1569,7 @@ class ApplicationController:
                     journal = self._journal
                     if journal is not None:
                         journal.append("delivery_attempted", {"delivery_id": fragment_id})
+                    submitted_at = time.perf_counter()
                     injection = (
                         self.injection_service.submit(
                             text,
@@ -1555,6 +1581,7 @@ class ApplicationController:
                         if isinstance(self.injection_service, TextInjectionService)
                         else self.injection_service.submit(text)
                     )
+                    self.metrics.record_operation("delivery", time.perf_counter() - submitted_at)
                 except Exception as exc:
                     self._record_delivery_outcome(
                         fragment_id, durable, "failed", type(exc).__name__
@@ -1925,6 +1952,7 @@ class ApplicationController:
                 alternate = self.profile_backend_factory(profile.model_id)
                 self._file_backend = alternate
             backend = alternate
+        self._apply_backend_budget(backend)
         language_preference = language if language in {"ru", "en"} else profile.language
         selected_language: LanguageCode = "en" if language_preference == "en" else "ru"
         pipeline = self.professional_content.snapshot()
@@ -1948,6 +1976,18 @@ class ApplicationController:
                 pipeline.process(request, text, profile, allow_commands=False).final_text
             ),
         )
+
+    def _apply_backend_budget(self, backend: ASRBackend) -> None:
+        settings = self.settings.model
+        if settings.power_mode != "automatic":
+            return
+        threads = ComputeBudget.from_settings(
+            settings.power_mode, settings.cpu_threads
+        ).asr_intra_threads
+        if isinstance(backend, FasterWhisperBackend):
+            backend.configure_cpu_threads(threads)
+        if backend is self.backend and isinstance(self.retry_backend, FasterWhisperBackend):
+            self.retry_backend.configure_cpu_threads(threads)
 
     def journal_file_result(
         self,
@@ -2008,9 +2048,19 @@ class ApplicationController:
         spool_directory = (self.spool_root / session_id).resolve()
         if not spool_directory.is_relative_to(self.spool_root.resolve()):
             raise ValueError("Recovery path is outside VoxType storage")
+        committed_text = record.committed_text
+        if (
+            not committed_text
+            and record.finished_at is None
+            and self.settings.privacy.save_history
+            and not self.policy.disable_history
+        ):
+            committed_text = self.session_repository.live_recovery_text(session_id)
+            if committed_text:
+                self.session_repository.commit_next_text(session_id, committed_text)
         if self.policy.disable_audio_storage or not spool_directory.exists():
             self.session_repository.finish(session_id, status="recovered")
-            return record.committed_text
+            return committed_text
 
         spool = DiskSpool(spool_directory, max_bytes=4 * 1024**3)
         segmenter = self.segmenter_factory()
@@ -2037,7 +2087,7 @@ class ApplicationController:
                         self._merge_recovered_segment(
                             segment,
                             language,
-                            record.committed_text,
+                            committed_text,
                             merger,
                             pipeline,
                             profile,
@@ -2048,26 +2098,26 @@ class ApplicationController:
                     language = Language(language_code)
                 for segment in segmenter.process(chunk.samples):
                     self._merge_recovered_segment(
-                        segment, language, record.committed_text, merger, pipeline, profile, context
+                        segment, language, committed_text, merger, pipeline, profile, context
                     )
             for segment in segmenter.flush():
                 self._merge_recovered_segment(
-                    segment, language, record.committed_text, merger, pipeline, profile, context
+                    segment, language, committed_text, merger, pipeline, profile, context
                 )
 
-            recovered = deduplicate_text_boundary(record.committed_text, merger.committed_text)
+            recovered = deduplicate_text_boundary(committed_text, merger.committed_text)
             mode = (
                 "code"
                 if profile.output_language == OutputLanguagePolicy.PRESERVE_SPOKEN_LANGUAGE
                 else profile.formatting_mode
             )
             insertion = format_fragment_boundary(
-                record.committed_text,
+                committed_text,
                 recovered,
                 add_space=self.settings.dictation.add_fragment_space
                 and not (
                     mode == "code"
-                    and (record.committed_text.endswith("_") or recovered.startswith(("_", "(")))
+                    and (committed_text.endswith("_") or recovered.startswith(("_", "(")))
                 ),
                 capitalize=self.settings.dictation.capitalize_sentences
                 and mode not in {"code", "verbatim"},
@@ -2084,7 +2134,7 @@ class ApplicationController:
             return (
                 updated.committed_text
                 if updated is not None and persists
-                else record.committed_text + insertion
+                else committed_text + insertion
             )
         except Exception:
             for sequence in leased_sequences:
@@ -2598,7 +2648,30 @@ class ApplicationController:
         self.metrics.sample_resources(round(queued / 0.03), spool_bytes)
 
     def _handle_runtime_error(self, user_message: str, error: BaseException) -> None:
+        with self._lock:
+            if self._handling_runtime_error:
+                return
+            self._handling_runtime_error = True
+        try:
+            self._resolve_runtime_error(user_message, error)
+        finally:
+            with self._lock:
+                self._handling_runtime_error = False
+                if self.state not in {
+                    AppState.ERROR_RECOVERABLE,
+                    AppState.ERROR_FATAL,
+                    AppState.SHUTTING_DOWN,
+                }:
+                    try:
+                        self.state_machine.transition(
+                            AppState.ERROR_RECOVERABLE, "runtime component failed"
+                        )
+                    except (RuntimeError, ValueError):
+                        self.logger.warning("error_state_transition_rejected")
+
+    def _resolve_runtime_error(self, user_message: str, error: BaseException) -> None:
         self.logger.error("runtime_error phase=%s kind=%s", self.state.name, type(error).__name__)
+        code = FailureCode.ASR_FAILED
         if isinstance(error, ASRModelUnavailable):
             code = (
                 FailureCode.MODEL_LOAD_FAILED
@@ -2616,9 +2689,7 @@ class ApplicationController:
         elif isinstance(error, InferenceTimeoutError):
             user_message = FAILURES[FailureCode.ASR_FAILED].text()
         elif isinstance(error, ProcessingCancelled):
-            user_message = (
-                "Обработка отменена. Текст и оставшееся аудио сохранены для восстановления."
-            )
+            user_message = "Обработка отменена"
         with self._lock:
             self._error_message = user_message
             self._status_message = (
@@ -2641,23 +2712,15 @@ class ApplicationController:
                 self.session_repository.add_warning(session_id, type(error).__name__)
             except (KeyError, OSError, sqlite3.Error) as exc:
                 self.logger.warning("session_warning_failed kind=%s", type(exc).__name__)
-        target_state = AppState.ERROR_RECOVERABLE
-        if self.state not in {
-            AppState.ERROR_RECOVERABLE,
-            AppState.ERROR_FATAL,
-            AppState.SHUTTING_DOWN,
-        }:
-            try:
-                self.state_machine.transition(target_state, "runtime component failed")
-            except Exception:
-                self.logger.exception("error_state_transition_failed")
         if session_id is not None:
             recoverable = self._practice_language is None and (
                 self._spool is not None
                 or (self._journal is not None and self._journal.persist_text)
             )
             self._finalize_session(
-                "recovery_required" if recoverable else "failed", requires_recovery=recoverable
+                "recovery_required" if recoverable else "failed",
+                requires_recovery=recoverable,
+                failure_code=code.value,
             )
 
     def handle_ui_exception(self, error: BaseException) -> None:
@@ -2882,6 +2945,8 @@ class ApplicationController:
                 self._delivery_busy = False
 
     def replace_professional_selection(self, selection: SelectedText, text: str) -> bool:
+        if selection.native_range is None:
+            return False
         with self._lock:
             if (
                 self._delivery_busy
@@ -2917,7 +2982,11 @@ class ApplicationController:
                     current = self._selection_provider.read(selection.target)
                 except SelectionUnavailable:
                     return False
-                return current.text == selection.text and current.control_id == selection.control_id
+                return (
+                    current.text == selection.text
+                    and current.control_id == selection.control_id
+                    and current.native_range == selection.native_range
+                )
 
             return self.injection_service.dispatch_explicit(
                 text, selection.target, verify_selection=verify_selection
@@ -3101,7 +3170,9 @@ class ApplicationController:
                 self._error_message = FAILURES[FailureCode.INSERTION_FAILED].text()
         return False
 
-    def _finalize_session(self, status: str, *, requires_recovery: bool = False) -> None:
+    def _finalize_session(
+        self, status: str, *, requires_recovery: bool = False, failure_code: str = ""
+    ) -> None:
         with self._lock:
             self._cancel_duration_timer()
             session_id = self._session_id
@@ -3227,7 +3298,9 @@ class ApplicationController:
                 self._worker_language,
                 tuple(self._recognized_segments),
                 outcome,
-                FailureCode.ASR_FAILED.value if outcome is RecognitionStatus.FAILED else "",
+                (failure_code or FailureCode.ASR_FAILED.value)
+                if outcome is RecognitionStatus.FAILED
+                else "",
                 profile_id=self._session_profile.id,
             )
             self._raw_asr_parts.clear()
@@ -3252,7 +3325,7 @@ class ApplicationController:
                 self._status_message = (
                     "Сеанс прерван. Скопируйте текст или выберите новое целевое окно."
                 )
-            elif live_command is not None and not completed_text:
+            elif live_command is not None and not completed_text and status == "completed":
                 self._delivery_status = "no_result"
                 self._status_message = "Распознана голосовая команда"
             elif (
@@ -3275,7 +3348,7 @@ class ApplicationController:
             and self._practice_language is None
         ):
             self.workflows.dispatch("dictation", self._session_profile.id, completed_text)
-        if self.state is AppState.FINISHING:
+        if self.state is AppState.FINISHING and status in {"completed", "interrupted", "cancelled"}:
             self.state_machine.transition(AppState.COMPLETED, "session drained and committed")
             if (
                 status == "completed"

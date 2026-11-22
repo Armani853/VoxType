@@ -81,6 +81,7 @@ if PYSIDE6_AVAILABLE:
     _LOGGER = logging.getLogger("voxtype.ui.main_window")
 
     class MainWindow(QMainWindow):
+        first_paint = Signal(float)
         dictation_toggle_requested = Signal()
         pause_toggle_requested = Signal()
         language_change_requested = Signal(str)
@@ -119,6 +120,7 @@ if PYSIDE6_AVAILABLE:
             self._controller_connections: list[tuple[Any, Callable[..., Any]]] = []
             self._constructed_at = time.perf_counter()
             self._first_content_paint_seen = False
+            self.first_paint_seconds: float | None = None
             self.setObjectName("mainWindow")
             self.setWindowTitle("VoxType — локальная диктовка")
             self.setWindowIcon(create_app_icon())
@@ -381,10 +383,13 @@ if PYSIDE6_AVAILABLE:
                 and event.type() is QEvent.Type.Paint
             ):
                 self._first_content_paint_seen = True
+                elapsed = time.perf_counter() - self._constructed_at
+                self.first_paint_seconds = elapsed
+                self.first_paint.emit(elapsed)
                 canvas = dashboard.widget()
                 _LOGGER.info(
                     "first_content_paint elapsed_ms=%.1f viewport=%dx%d canvas=%dx%d visible=%s",
-                    (time.perf_counter() - self._constructed_at) * 1_000.0,
+                    elapsed * 1_000.0,
                     dashboard.viewport().width(),
                     dashboard.viewport().height(),
                     canvas.width() if canvas is not None else 0,

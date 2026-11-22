@@ -15,6 +15,10 @@ class PerformanceProfile(StrEnum):
     @classmethod
     def resolve(cls, value: str) -> PerformanceProfile:
         mode = value.strip().casefold()
+        if mode == "automatic":
+            from voxtype.windows.power_events import on_battery_power
+
+            return cls.ECO if on_battery_power() is True else cls.BALANCED
         if mode in {"energy", "energy_saving", "eco"}:
             return cls.ECO
         if mode in {"maximum", "performance", "max_performance"}:

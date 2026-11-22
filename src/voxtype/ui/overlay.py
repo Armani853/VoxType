@@ -18,7 +18,7 @@ from .models import (
 
 if PYSIDE6_AVAILABLE:
     from PySide6.QtCore import QPoint, QSettings, Qt, Signal
-    from PySide6.QtGui import QCloseEvent, QKeyEvent, QMouseEvent, QShowEvent
+    from PySide6.QtGui import QCloseEvent, QKeyEvent, QMouseEvent, QScreen, QShowEvent
     from PySide6.QtWidgets import (
         QApplication,
         QFrame,
@@ -351,9 +351,35 @@ if PYSIDE6_AVAILABLE:
             if rect is None:
                 self._restore_position()
                 return
-            left, top, _right, bottom = rect
-            screen = None
-            if sys.platform == "win32":
+            geometry = self._logical_caret_geometry(rect)
+            if geometry is None:
+                self._restore_position()
+                return
+            screen, left, top, bottom = geometry
+            area = screen.availableGeometry()
+            if area.width() < self.width() or area.height() < self.height():
+                self._restore_position()
+                return
+            y = top - self.height() - 14
+            if y < area.top():
+                y = bottom + 14
+            if y + self.height() > area.bottom() + 1:
+                self._restore_position()
+                return
+            x = max(area.left(), min(left, area.right() - self.width() + 1))
+            self.move(x, y)
+
+        @staticmethod
+        def _logical_caret_geometry(
+            rect: tuple[int, int, int, int],
+        ) -> tuple[QScreen, int, int, int] | None:
+            left, top, right, bottom = rect
+            if right < left or bottom < top:
+                return None
+            if sys.platform != "win32":
+                screen = QApplication.screenAt(QPoint(left, top))
+                return (screen, left, top, bottom) if screen is not None else None
+            try:
                 from ctypes import wintypes
 
                 class MonitorInfo(ctypes.Structure):
@@ -375,35 +401,27 @@ if PYSIDE6_AVAILABLE:
                 handle = monitor_at(wintypes.POINT(left, top), 0)
                 info = MonitorInfo()
                 info.size = ctypes.sizeof(info)
-                if handle and monitor_info(handle, ctypes.byref(info)):
-                    screen = next(
-                        (
-                            item
-                            for item in QApplication.screens()
-                            if item.name().casefold() == info.device.casefold()
-                        ),
-                        None,
-                    )
-                    if screen is not None:
-                        origin = screen.geometry().topLeft()
-                        scale = screen.devicePixelRatio()
-                        left = origin.x() + round((left - info.monitor.left) / scale)
-                        top = origin.y() + round((top - info.monitor.top) / scale)
-                        bottom = origin.y() + round((bottom - info.monitor.top) / scale)
-            else:
-                screen = QApplication.screenAt(QPoint(left, top))
-            if screen is None:
-                self._restore_position()
-                return
-            area = screen.availableGeometry()
-            y = top - self.height() - 14
-            if y < area.top():
-                y = bottom + 14
-            if y + self.height() > area.bottom() + 1:
-                self._restore_position()
-                return
-            x = max(area.left(), min(left, area.right() - self.width() + 1))
-            self.move(x, y)
+                if not handle or not monitor_info(handle, ctypes.byref(info)):
+                    return None
+                screen = next(
+                    (
+                        item
+                        for item in QApplication.screens()
+                        if item.name().casefold() == info.device.casefold()
+                    ),
+                    None,
+                )
+                if screen is None or (scale := screen.devicePixelRatio()) <= 0:
+                    return None
+                origin = screen.geometry().topLeft()
+                return (
+                    screen,
+                    origin.x() + round((left - info.monitor.left) / scale),
+                    origin.y() + round((top - info.monitor.top) / scale),
+                    origin.y() + round((bottom - info.monitor.top) / scale),
+                )
+            except (AttributeError, OSError, OverflowError):
+                return None
 
         def show_without_activating(self) -> None:
             if not self.isVisible() or self._hiding:
