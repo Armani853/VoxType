@@ -69,6 +69,7 @@ class TranscriptionRequest:
     compression_ratio_threshold: float | None = None
     metadata: Mapping[str, str] = field(default_factory=dict)
     hotwords: tuple[str, ...] = ()
+    word_timestamps: bool | None = None
 
     def __post_init__(self) -> None:
         audio = mono_float32(self.audio, copy=True)

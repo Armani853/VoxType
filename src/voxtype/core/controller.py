@@ -1214,7 +1214,7 @@ class ApplicationController:
                         ),
                     )
                 if segments and preview is not None:
-                    self._finish_live_preview(preview)
+                    self._finish_live_preview(preview, live)
                     preview = None
                 for segment in segments:
                     self._transcribe_segment(segment, self._worker_language)
@@ -1302,9 +1302,18 @@ class ApplicationController:
                     "live preview inference exceeded the native inference deadline"
                 ) from None
             return False
+        self._accept_live_preview(live, job, result)
+        return True
+
+    def _accept_live_preview(
+        self,
+        live: LiveSpeechSession,
+        job: _LivePreviewJob,
+        result: TranscriptionResult | BaseException,
+    ) -> None:
         if isinstance(result, BaseException):
             self.logger.debug("live_preview_failed kind=%s", type(result).__name__)
-            return True
+            return
         with self._lock:
             if (
                 self._live_session is live
@@ -1328,14 +1337,17 @@ class ApplicationController:
                     if not live.first_stable and live.snapshot.stable_segments:
                         live.first_stable = True
                         self.metrics.record_operation("audio_to_stable_text", latency)
-        return True
 
-    def _finish_live_preview(self, job: _LivePreviewJob) -> None:
-        # A final segment has priority. Discard preview output and wait only
-        # for the existing native call, using its original deadline.
-        self._wait_inference(
+    def _finish_live_preview(
+        self, job: _LivePreviewJob, live: LiveSpeechSession | None = None
+    ) -> None:
+        # The native call already owns the engine. Its hypothesis may remain on
+        # screen during a boundary decode, but is ignored after Stop.
+        outcome = self._wait_inference(
             job.results, self._processing_cancelled, job.started + self.inference_timeout_s
         )
+        if live is not None:
+            self._accept_live_preview(live, job, outcome)
 
     def _transcribe_segment(self, segment: AudioSegment, language: Language) -> None:
         if not segment.samples.size or segment.session_id not in {

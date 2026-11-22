@@ -145,7 +145,11 @@ class FasterWhisperBackend:
                 "temperature": request.temperature,
                 "beam_size": request.beam_size or self.profile.beam_size,
                 "best_of": self.profile.best_of,
-                "word_timestamps": self.profile.word_timestamps,
+                "word_timestamps": (
+                    self.profile.word_timestamps
+                    if request.word_timestamps is None
+                    else request.word_timestamps
+                ),
                 "condition_on_previous_text": request.condition_on_previous_text,
                 "initial_prompt": request.initial_prompt[:600] or None,
                 "vad_filter": False,

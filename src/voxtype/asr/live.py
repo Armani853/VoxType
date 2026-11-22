@@ -154,6 +154,7 @@ class LiveSpeechSession:
             self.language,
             start_offset_seconds=(self.processed_offset - self._size) / self.sample_rate,
             beam_size=self.config.preview_beam_size,
+            word_timestamps=self.first_text,
             hotwords=self.hotwords,
             metadata={
                 "kind": "preview",
