@@ -53,7 +53,7 @@ class LiveTranscript:
 @dataclass(frozen=True, slots=True)
 class StreamingConfig:
     first_decode_audio_ms: int = 500
-    active_decode_interval_ms: int = 450
+    active_decode_interval_ms: int = 600
     idle_decode_interval_ms: int = 1200
     min_new_audio_ms: int = 250
     max_decode_window_ms: int = 8000

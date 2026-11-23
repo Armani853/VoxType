@@ -14,6 +14,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from queue import Empty, Full, Queue
 from typing import TYPE_CHECKING
+from uuid import uuid4
 
 import numpy as np
 
@@ -110,6 +111,23 @@ class InferenceTimeoutError(RuntimeError):
 
 class ProcessingCancelled(RuntimeError):
     """The user stopped processing pending audio."""
+
+
+@dataclass(frozen=True, slots=True)
+class SessionIdentity:
+    session_id: str
+    generation: int
+    started_monotonic_ns: int
+
+
+@dataclass(frozen=True, slots=True)
+class DeliveryChunk:
+    session_id: str
+    chunk_id: str
+    source_start_sample: int
+    source_end_sample: int
+    text: str
+    target_identity: ForegroundContext | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -270,6 +288,10 @@ class ApplicationController:
         self._pending_delivery_thread: threading.Thread | None = None
         self._pause_intervals: deque[tuple[float, float | None]] = deque()
         self._worker_language = self._language
+        self._auto_language = False
+        self._auto_language_confirmed = False
+        self._auto_language_candidate: Language | None = None
+        self._next_language_probe_s = 0.0
         self._user_paused = False
         self._last_fragment = ""
         self._provisional = ""
@@ -278,6 +300,7 @@ class ApplicationController:
         self._last_stats: AudioQueueStats | None = None
         self._processing_seconds = 0.0
         self._prompt_language: Language | None = None
+        self._confirmed_prompt_text = ""
         self._last_prompt_segment_end_s: float | None = None
         self._last_prompt_result_uncertain = False
         self._audio_archive: wave.Wave_write | None = None
@@ -288,7 +311,10 @@ class ApplicationController:
         self._processing_cancelled = threading.Event()
         self._delivery_busy = False
         self._outbox_session_id: str | None = None
-        self._delivery_queue: Queue[tuple[str, str, bool] | None] = Queue(maxsize=256)
+        self._identity: SessionIdentity | None = None
+        self._unconfirmed_tail = ""
+        self._delivery_sequence = -1
+        self._delivery_queue: Queue[tuple[DeliveryChunk, bool] | None] = Queue(maxsize=256)
         self._delivery_thread = threading.Thread(
             target=self._delivery_loop,
             name="voxtype-text-delivery",
@@ -460,7 +486,21 @@ class ApplicationController:
                 if self._session_profile.language
                 else self._language
             )
+            self._auto_language = (
+                self.settings.dictation.auto_detect_language
+                and practice_language is None
+                and not self._session_profile.language
+            )
+            self._auto_language_confirmed = False
+            self._auto_language_candidate = None
+            self._next_language_probe_s = 0.0
             self._professional_session_number += 1
+            identity = SessionIdentity(
+                str(uuid4()), self._professional_session_number, time.monotonic_ns()
+            )
+            self._identity = identity
+            self._delivery_sequence = -1
+            self._unconfirmed_tail = ""
             self._session_text_pipeline = self.professional_content.snapshot()
             if not self.settings.dictation.user_text_transformations:
                 self._session_text_pipeline = replace(
@@ -475,10 +515,9 @@ class ApplicationController:
             self._raw_asr_parts.clear()
             self._recognized_segments.clear()
             self.state_machine.transition(AppState.STARTING, "user requested dictation")
-            self._session_started_monotonic = time.monotonic()
+            self._session_started_monotonic = identity.started_monotonic_ns / 1_000_000_000
             self._session_stopped_monotonic = None
             self._completed_duration_s = 0.0
-            self._completed_transcript = ""
             self._last_stats = None
             self._delivery_status = "pending"
             self._last_fragment = ""
@@ -488,13 +527,14 @@ class ApplicationController:
             self._user_paused = False
             self._processing_seconds = 0.0
             self._prompt_language = None
+            self._confirmed_prompt_text = ""
             self._last_prompt_segment_end_s = None
             self._last_prompt_result_uncertain = False
             self._pause_intervals.clear()
             self.merger.reset()
             starter = threading.Thread(
                 target=self._prepare_and_start_runtime,
-                args=(decision, practice_capture or self.capture_factory),
+                args=(identity, decision, practice_capture or self.capture_factory),
                 name="voxtype-session-starter",
                 daemon=True,
             )
@@ -502,7 +542,9 @@ class ApplicationController:
             starter.start()
         return True
 
-    def _prepare_and_start_runtime(self, decision: object, capture_factory: CaptureFactory) -> None:
+    def _prepare_and_start_runtime(
+        self, identity: SessionIdentity, decision: object, capture_factory: CaptureFactory
+    ) -> None:
         """Build disk/audio/model runtime away from the Qt and hotkey threads."""
 
         try:
@@ -510,6 +552,16 @@ class ApplicationController:
             target_name = target.process_name if target is not None else ""
             profile = self.settings.dictation.model_profile
             professional = self._session_profile
+            style = self.settings.dictation.text_style
+            if professional.formatting_mode in {"general", "verbatim"} and style in {
+                "clean",
+                "verbatim",
+            }:
+                professional = replace(
+                    professional, formatting_mode="general" if style == "clean" else "verbatim"
+                )
+                with self._lock:
+                    self._session_profile = professional
             service = self.injection_service
             if isinstance(service, TextInjectionService) and service.context_provider is not None:
                 seed = self._input_context
@@ -560,6 +612,7 @@ class ApplicationController:
                 backend.model_id,
                 profile,
                 target_name,
+                identity.session_id,
                 profile_id=professional.id,
             )
             journal = SessionJournal(
@@ -569,6 +622,9 @@ class ApplicationController:
                 and not self.policy.disable_history
                 and not practice,
             )
+            with self._lock:
+                self._session_id = session_id
+                self._journal = journal
             journal.append(
                 "session_started",
                 {
@@ -597,6 +653,7 @@ class ApplicationController:
                 audio_archive = wave.open(  # noqa: SIM115 - session owns it until finalization
                     str(audio_directory / f"{session_id}.wav"), "wb"
                 )
+                self._audio_archive = audio_archive
                 audio_archive.setnchannels(1)
                 audio_archive.setsampwidth(2)
                 audio_archive.setframerate(16_000)
@@ -608,6 +665,7 @@ class ApplicationController:
                 or not self.settings.privacy.save_audio
                 else DiskSpool(session_spool, max_bytes=4 * 1024**3)
             )
+            self._spool = spool
             if journal.persist_text or spool is not None:
                 self.session_repository.mark_recoverable(session_id)
             audio_queue = LosslessAudioQueue(
@@ -616,16 +674,12 @@ class ApplicationController:
                 spill_threshold=0.70,
                 max_inflight=2048,
                 durable=spool is not None,
-                session_id=self._professional_session_number,
+                session_id=identity.generation,
             )
+            self._audio_queue = audio_queue
             segmenter = self.segmenter_factory()
             capture = capture_factory(audio_queue)
             with self._lock:
-                self._session_id = session_id
-                self._journal = journal
-                self._audio_archive = audio_archive
-                self._spool = spool
-                self._audio_queue = audio_queue
                 self._segmenter = segmenter
                 self._capture = capture
                 self._worker_language = language
@@ -743,11 +797,13 @@ class ApplicationController:
                         capture.activate_session()
                     self._pipeline_thread = threading.Thread(
                         target=self._pipeline_loop,
+                        args=(self._identity,),
                         name="voxtype-transcription",
                         daemon=True,
                     )
                     self._pipeline_thread.start()
                     self._capture_started_monotonic = time.monotonic()
+                    self._completed_transcript = ""
                     self._status_message = "Слушаю"
                     self.state_machine.transition(AppState.IDLE, "model ready for session")
                     self.state_machine.transition(AppState.LISTENING, "microphone capture started")
@@ -1076,24 +1132,41 @@ class ApplicationController:
             )
         return self._session_text_pipeline.inline_action(action, self._session_profile)
 
-    def _enqueue_delivery(self, delivery_id: str, text: str, *, whole_result: bool = False) -> None:
+    def _enqueue_delivery(self, segment: AudioSegment, text: str) -> None:
         journal = self._journal
-        durable = journal is not None and journal.persist_text
+        if journal is None:
+            return
+        with self._lock:
+            if (
+                self._session_id != journal.session_id
+                or segment.sequence <= self._delivery_sequence
+            ):
+                return
+            self._delivery_sequence = segment.sequence
+            chunk = DeliveryChunk(
+                journal.session_id,
+                f"{journal.session_id}:{segment.sequence}",
+                segment.start_sample,
+                segment.end_sample,
+                text,
+                self._input_context,
+            )
+        delivery_id = chunk.chunk_id
+        durable = journal.persist_text
         try:
-            if journal is not None:
-                if durable:
-                    self._outbox_session_id = journal.session_id
-                if durable and not self.session_repository.queue_delivery(
+            if durable:
+                self._outbox_session_id = journal.session_id
+                if not self.session_repository.queue_delivery(
                     delivery_id,
                     journal.session_id,
                     text,
                     self._session_profile.insertion_mode
                     or self.settings.dictation.injection_mode.value,
-                    whole_result=whole_result,
+                    whole_result=False,
                 ):
                     return
-                journal.append("delivery_queued", {"delivery_id": delivery_id, "durable": durable})
-            self._delivery_queue.put_nowait((delivery_id, text, durable))
+            journal.append("delivery_queued", {"delivery_id": delivery_id, "durable": durable})
+            self._delivery_queue.put_nowait((chunk, durable))
         except (Full, OSError, RuntimeError, sqlite3.Error):
             with self._lock:
                 self._live_delivery_halted = self._live_insertion
@@ -1111,8 +1184,10 @@ class ApplicationController:
             self._status_message = "Останавливаю обработку; записанный текст сохранён"
             return True
 
-    def _pipeline_loop(self) -> None:
+    def _pipeline_loop(self, identity: SessionIdentity | None) -> None:
         with self._lock:
+            if identity is None or identity != self._identity:
+                return
             audio_queue = self._audio_queue
             segmenter = self._segmenter
         if audio_queue is None or segmenter is None:
@@ -1126,7 +1201,6 @@ class ApplicationController:
         pending_seconds = 0.0
         input_overflow_reported = False
         consumed_offset = 0
-        capture_gap = False
 
         def ack_pending() -> None:
             nonlocal pending_seconds
@@ -1171,7 +1245,9 @@ class ApplicationController:
                     continue
                 offset = lease.chunk.sample_offset
                 if offset is not None and offset != consumed_offset:
-                    capture_gap = True
+                    self.metrics.record_fault("sample_discontinuity", abs(offset - consumed_offset))
+                    pending.append(lease)
+                    raise AudioIngressOverflowError("The PCM sample sequence has a gap")
                 consumed_offset = (
                     offset if offset is not None else consumed_offset
                 ) + lease.chunk.frames
@@ -1205,6 +1281,13 @@ class ApplicationController:
                         else None
                     )
                     status = quality.observe(observation, speech=speech)
+                    if observation.nonfinite_samples or speech is False:
+                        self.metrics.record_input_quality(
+                            nonfinite_samples=observation.nonfinite_samples,
+                            silence_seconds=observation.frames / observation.sample_rate
+                            if speech is False
+                            else 0.0,
+                        )
                     if status is not None:
                         with self._lock:
                             self._audio_quality = status
@@ -1252,7 +1335,7 @@ class ApplicationController:
             capture = self._capture
             if isinstance(capture, AudioCaptureService) and capture.finalization is not None:
                 finalization = capture.finalization
-                if capture_gap or consumed_offset != finalization.last_published_sample:
+                if consumed_offset != finalization.last_published_sample:
                     raise AudioIngressOverflowError(
                         "The VAD did not receive the complete published audio"
                     )
@@ -1332,8 +1415,18 @@ class ApplicationController:
                 and not self._processing_cancelled.is_set()
             ):
                 now = time.monotonic()
+                previous = live.snapshot
                 live.publish(job.request, result, now - job.started)
                 self._live_transcript = live.snapshot
+                if (
+                    previous is not None
+                    and live.snapshot is not None
+                    and (
+                        previous.revision != live.snapshot.revision
+                        and previous.unstable_text != live.snapshot.unstable_text
+                    )
+                ):
+                    self.metrics.record_reconciliation(revised_preview=True)
                 self.metrics.record_operation("preview_inference", result.processing_seconds)
                 if live.snapshot is not None and self._capture_started_monotonic is not None:
                     latency = now - self._capture_started_monotonic
@@ -1359,6 +1452,7 @@ class ApplicationController:
             self._accept_live_preview(live, job, outcome)
 
     def _transcribe_segment(self, segment: AudioSegment, language: Language) -> None:
+        identity = self._identity
         if not segment.samples.size or segment.session_id not in {
             None,
             self._professional_session_number,
@@ -1372,6 +1466,7 @@ class ApplicationController:
         self.state_machine.transition_if(
             {AppState.SPEECH_DETECTED}, AppState.TRANSCRIBING, "ASR inference started"
         )
+        language = self._detect_segment_language(segment, language)
         committed = self.merger.recent_text
         with self._lock:
             capture = self._capture
@@ -1389,19 +1484,24 @@ class ApplicationController:
             self._session_context,
             self.vocabulary.entries,
         )
+        self._confirmed_prompt_text = self._safe_prompt_context(
+            segment, language, self._confirmed_prompt_text
+        )
         request = TranscriptionRequest(
             audio=segment.samples,
             sample_rate=segment.sample_rate,
             language=language.value,
             start_offset_seconds=segment.start_seconds,
             initial_prompt=bounded_prompt(
-                self._safe_prompt_context(segment, language, committed),
+                self._confirmed_prompt_text,
                 professional_request.hotwords,
             ),
             hotwords=self._live_session.hotwords
             if self._live_session is not None
             else professional_request.hotwords,
             condition_on_previous_text=False,
+            word_timestamps=True,
+            vad_speech_seconds=segment.speech_seconds,
             metadata={
                 "kind": "final",
                 "segment_sequence": str(segment.sequence),
@@ -1412,9 +1512,11 @@ class ApplicationController:
             self._provisional = "Распознаю…"
         inference_started = time.perf_counter()
         guarded = self._transcribe_guarded_with_timeout(
-            request, committed, cancel_event=self._processing_cancelled
+            request,
+            committed if segment.leading_overlap_seconds > 0 else "",
+            cancel_event=self._processing_cancelled,
         )
-        if self._processing_cancelled.is_set():
+        if self._processing_cancelled.is_set() or self._identity != identity:
             raise ProcessingCancelled()
         result = guarded.result
         with self._lock:
@@ -1469,10 +1571,14 @@ class ApplicationController:
         )
         processed: ProcessedDictation | None = None
         deferred_action: VoiceAction | None = None
+        novel_asr = ""
 
         def transform(novel_text: str) -> str:
-            nonlocal processed, deferred_action
+            nonlocal processed, deferred_action, novel_asr
+            novel_asr = novel_text
             live = self._live_session is not None
+            if guarded.assessment.suspicious:
+                self._live_command_text = None
             if live and self._live_command_text is not None:
                 candidate = f"{self._live_command_text} {novel_text}".strip()
                 self._live_command_text = candidate if len(candidate) <= 2048 else None
@@ -1483,6 +1589,7 @@ class ApplicationController:
                 command_mode=self._command_mode,
                 allow_commands=(
                     self.policy.allow_voice_commands
+                    and not guarded.assessment.suspicious
                     and self._practice_language is None
                     and not self._terminal_input
                     and not self._local_only
@@ -1523,6 +1630,14 @@ class ApplicationController:
                 self._last_processed = replace(
                     processed, raw_text=result.text, final_text=outcome.insertion_text
                 )
+        if outcome.skipped_prefix_words:
+            self.metrics.record_reconciliation(overlap_words=outcome.skipped_prefix_words)
+        if guarded.assessment.suspicious or result.possible_inaccuracy:
+            self._confirmed_prompt_text = ""
+        elif novel_asr and (processed is None or processed.voice_action is None):
+            self._confirmed_prompt_text = bounded_prompt(
+                f"{self._confirmed_prompt_text} {novel_asr}"
+            )
         with self._lock:
             capture_started = self._capture_started_monotonic
         end_to_end_latency = result.processing_seconds
@@ -1531,8 +1646,7 @@ class ApplicationController:
                 result.processing_seconds,
                 time.monotonic() - (capture_started + segment.end_seconds),
             )
-            if self._live_session is not None:
-                self.metrics.record_operation("final_segment_latency", end_to_end_latency)
+        self.metrics.record_operation("final_segment_latency", end_to_end_latency)
         self.metrics.record_processed(
             result.audio_duration_seconds,
             result.processing_seconds,
@@ -1579,7 +1693,7 @@ class ApplicationController:
                 self._last_fragment = outcome.insertion_text.strip()
                 self._provisional = ""
                 clipping = self._audio_quality is not None and self._audio_quality.clipping_detected
-                if guarded.assessment.score >= 4 or (clipping and guarded.assessment.suspicious):
+                if guarded.assessment.suspicious or clipping:
                     self._audio_review_required = True
                     self._error_message = (
                         "Распознавание неуверенное. Проверьте результат перед вставкой."
@@ -1613,8 +1727,7 @@ class ApplicationController:
                     self._delivery_status = "pending"
                     self._status_message = "Подтверждённый текст ожидает вставки"
             if auto_insert:
-                fragment_id = f"{journal.session_id}:{segment.sequence}"
-                self._enqueue_delivery(fragment_id, outcome.insertion_text)
+                self._enqueue_delivery(segment, outcome.insertion_text)
         else:
             with self._lock:
                 self._provisional = ""
@@ -1631,6 +1744,10 @@ class ApplicationController:
         status: str,
         error: str | None = None,
     ) -> None:
+        if status == "failed" or error == InjectionStatus.UNKNOWN.value:
+            self.metrics.record_fault("delivery_failure")
+        if error in {InjectionStatus.BLOCKED.value, InjectionStatus.QUEUED.value}:
+            self.metrics.record_fault("target_or_guard_rejected_delivery")
         if durable:
             try:
                 self.session_repository.finish_delivery(delivery_id, status, error)
@@ -1647,7 +1764,8 @@ class ApplicationController:
             try:
                 if item is None:
                     return
-                fragment_id, text, durable = item
+                chunk, durable = item
+                fragment_id, text = chunk.chunk_id, chunk.text
                 with self._lock:
                     if (
                         self._processing_cancelled.is_set()
@@ -1657,11 +1775,12 @@ class ApplicationController:
                         or self._system_unavailable
                         or self._audio_review_required
                         or self._live_delivery_halted
-                        or self._session_id != fragment_id.rsplit(":", 1)[0]
+                        or self._session_id != chunk.session_id
                     ):
                         continue
                     self._delivery_busy = True
                     owns_delivery = True
+                dispatched = False
                 try:
                     if durable and not self.session_repository.claim_delivery(fragment_id):
                         continue
@@ -1669,12 +1788,13 @@ class ApplicationController:
                     if journal is not None:
                         journal.append("delivery_attempted", {"delivery_id": fragment_id})
                     submitted_at = time.perf_counter()
+                    dispatched = True
                     if self._live_insertion:
                         service = self.injection_service
                         live_status = (
                             service.submit_live_fragment(
                                 text,
-                                self._input_context,
+                                chunk.target_identity,
                                 strategy=self._session_profile.insertion_mode or None,
                             )
                             if isinstance(service, TextInjectionService)
@@ -1716,13 +1836,20 @@ class ApplicationController:
                     self.metrics.record_operation("delivery", time.perf_counter() - submitted_at)
                 except Exception as exc:
                     self._record_delivery_outcome(
-                        fragment_id, durable, "failed", type(exc).__name__
+                        fragment_id,
+                        durable,
+                        "submitted_unconfirmed" if dispatched else "failed",
+                        InjectionStatus.UNKNOWN.value if dispatched else type(exc).__name__,
                     )
                     self.logger.warning("delivery_failed kind=%s", type(exc).__name__)
                     with self._lock:
                         self._live_delivery_halted = self._live_insertion
-                        self._delivery_status = "failed"
-                        self._error_message = "Вставка не удалась; весь текст сохранён"
+                        self._delivery_status = "copy_required" if dispatched else "failed"
+                        self._error_message = (
+                            "Вставка не подтверждена. Проверьте целевое окно."
+                            if dispatched
+                            else "Вставка не удалась; весь текст сохранён"
+                        )
                     continue
                 if injection.status == InjectionStatus.DUPLICATE:
                     continue
@@ -1797,6 +1924,52 @@ class ApplicationController:
                         self._delivery_busy = False
                 self._delivery_queue.task_done()
 
+    def _detect_segment_language(self, segment: AudioSegment, current: Language) -> Language:
+        backend = self._session_backend
+        if (
+            not self._auto_language
+            or not isinstance(backend, FasterWhisperBackend)
+            or segment.speech_seconds < 2.5
+            or segment.end_seconds < self._next_language_probe_s
+        ):
+            return current
+        self._next_language_probe_s = segment.end_seconds + (
+            8.0 if self._auto_language_confirmed else 3.0
+        )
+        try:
+            detected = self._run_inference(
+                lambda: backend.detect_language(segment.samples), self._processing_cancelled
+            )
+        except (ASRModelUnavailable, ValueError, AttributeError, TypeError):
+            return current
+        if detected is None or detected[1] < 0.85:
+            self._auto_language_candidate = None
+            return current
+        language = Language(detected[0])
+        if (
+            self._auto_language_confirmed
+            and language is not current
+            and language is not self._auto_language_candidate
+        ):
+            self._auto_language_candidate = language
+            return current
+        self._auto_language_confirmed = True
+        self._auto_language_candidate = None
+        with self._lock:
+            self._worker_language = language
+            live = self._live_session
+            if live is not None and live.language != language.value:
+                live.language = language.value
+                live.hotwords = self._session_text_pipeline.request(
+                    self._professional_session_number,
+                    language.value,
+                    backend.model_id,
+                    self._session_profile,
+                    self._session_context,
+                    self.vocabulary.entries,
+                ).hotwords
+        return language
+
     def _safe_prompt_context(
         self,
         segment: AudioSegment,
@@ -1818,8 +1991,6 @@ class ApplicationController:
         if previous_language is not None and previous_language is not language:
             return ""
         if previous_end is not None and segment.start_seconds - previous_end > reset_after_s:
-            return ""
-        if committed_text.rstrip().endswith((".", "!", "?", "…")):
             return ""
         return committed_text
 
@@ -2772,6 +2943,7 @@ class ApplicationController:
                 ),
                 target_application=target.process_name if target is not None else "",
                 confirmed_tail="" if self._system_unavailable else self.merger.recent_text[-700:],
+                unconfirmed_tail="" if self._system_unavailable else self._unconfirmed_tail,
             )
 
     def resource_counters(self) -> dict[str, int | float | bool]:
@@ -2874,6 +3046,8 @@ class ApplicationController:
             user_message = FAILURES[FailureCode.ASR_FAILED].text()
         elif isinstance(error, ProcessingCancelled):
             user_message = "Обработка отменена"
+        if code is FailureCode.ASR_FAILED and not isinstance(error, ProcessingCancelled):
+            self.metrics.record_fault("asr_error")
         with self._lock:
             self._error_message = user_message
             if code in {FailureCode.AUDIO_CAPTURE_FAILED, FailureCode.MICROPHONE_BUSY}:
@@ -2918,6 +3092,12 @@ class ApplicationController:
                 requires_recovery=recoverable,
                 failure_code=code.value,
             )
+        else:
+            with self._lock:
+                self._identity = None
+                self._session_started_monotonic = None
+                if not self._pending_insertion_count:
+                    self.target_manager.end_session()
 
     def handle_ui_exception(self, error: BaseException) -> None:
         """Convert an uncaught Qt callback exception into a recoverable state."""
@@ -3399,6 +3579,7 @@ class ApplicationController:
             # Claim finalization before I/O so safe-copy and foreground polling
             # cannot finish the same SQLite session concurrently.
             self._session_id = None
+            self._identity = None
             capture = self._capture
             spool = self._spool
             audio_archive = self._audio_archive
@@ -3406,13 +3587,18 @@ class ApplicationController:
             self._audio_archive = None
             stats = capture.stats() if capture is not None else self._last_stats
             completed_text = self.merger.committed_text
+            if status in {"failed", "recovery_required"} and self._live_transcript is not None:
+                preview = self._live_transcript
+                self._unconfirmed_tail = " ".join(
+                    [*(segment.text for segment in preview.stable_segments), preview.unstable_text]
+                ).strip()[-2000:]
             live_command = self._live_command_resolution
             save_unsent_live = (
                 self._live_session is not None and not self._live_text_committed and completed_text
             )
             started = self._session_started_monotonic
             stopped = self._session_stopped_monotonic or time.monotonic()
-        if session_id is not None:
+        try:
             if stats is not None:
                 self.session_repository.update_metrics(
                     session_id,
@@ -3460,6 +3646,11 @@ class ApplicationController:
                 )
             ):
                 self.session_repository.delete(session_id)
+        except (OSError, sqlite3.Error):
+            self.logger.warning("session_storage_finalization_failed")
+            with self._lock:
+                self._delivery_status = "copy_required"
+                self._error_message = "Не удалось записать историю. Текст доступен для копирования."
         # Retain the original window identity while committed fragments still
         # await delivery. Otherwise a completed session can never flush when
         # the user returns to that window.
@@ -3469,7 +3660,12 @@ class ApplicationController:
         ):
             self.target_manager.end_session()
         if audio_archive is not None:
-            audio_archive.close()
+            try:
+                audio_archive.close()
+            except OSError:
+                self.logger.warning("session_audio_archive_close_failed")
+                with self._lock:
+                    self._error_message = "Не удалось завершить сохранение аудио. Текст доступен."
         no_result = status == "completed" and not completed_text.strip() and live_command is None
         capture_empty = stats is not None and stats.processed_audio_seconds == 0
         if no_result:
@@ -3496,7 +3692,8 @@ class ApplicationController:
             self._spool = None
             self._segmenter = None
             self._journal = None
-            self._completed_transcript = completed_text
+            if completed_text or status == "completed":
+                self._completed_transcript = completed_text
             outcome = (
                 RecognitionStatus.EMPTY
                 if no_result

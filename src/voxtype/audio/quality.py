@@ -62,14 +62,17 @@ class AudioQualityMonitor:
         # Keep all input channels here. Downmix may otherwise hide clipping on one channel.
         if not pcm.size:
             return AudioInputObservation(0.0, 0.0, 0.0, sample_rate)
-        if not np.isfinite(pcm).all():
-            pcm = np.nan_to_num(pcm, nan=0.0, posinf=1.0, neginf=-1.0)
+        nonfinite = pcm.size - int(np.count_nonzero(np.isfinite(pcm)))
+        if nonfinite:
+            pcm = np.nan_to_num(pcm, nan=0.0, posinf=0.0, neginf=0.0)
         absolute = np.abs(pcm)
         return AudioInputObservation(
             min(1.0, float(np.sqrt(np.mean(np.square(pcm, dtype=np.float64))))),
             min(1.0, float(np.max(absolute))),
             float(np.count_nonzero(absolute >= 0.98) / pcm.size),
             sample_rate,
+            int(pcm.shape[0]),
+            nonfinite,
         )
 
     def observe(

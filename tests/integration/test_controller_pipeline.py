@@ -321,7 +321,10 @@ def test_prompt_context_resets_for_sentence_pause_uncertainty_and_language(
         )
 
     assert controller._safe_prompt_context(segment(0, 0.0, 1.0), Language.RU, "не закончено")
-    assert controller._safe_prompt_context(segment(1, 1.1, 2.0), Language.RU, "Закончено.") == ""
+    assert (
+        controller._safe_prompt_context(segment(1, 1.1, 2.0), Language.RU, "Закончено.")
+        == "Закончено."
+    )
     controller._last_prompt_result_uncertain = True
     assert controller._safe_prompt_context(segment(2, 2.1, 3.0), Language.RU, "сомнительно") == ""
     controller._last_prompt_result_uncertain = False

@@ -147,14 +147,23 @@ class TranscriptMerger:
                 )
             absolute = self._absolute_words(fragment)
             overlap_count = (
-                self._find_overlap(absolute, fragment.chunk_start_s)
+                self._find_overlap(
+                    absolute, fragment.chunk_start_s, strict=fragment.absolute_word_timestamps
+                )
                 if absolute
+                else 0
+                if fragment.absolute_word_timestamps
                 else self._find_text_overlap(fragment.text, fragment.chunk_start_s)
             )
             # A previous backend result may have text but no word stamps.  In
             # that mixed case the timestamp matcher has no history to compare,
             # so fall back to the time-gated text boundary matcher.
-            if absolute and overlap_count == 0 and not self._words:
+            if (
+                absolute
+                and overlap_count == 0
+                and not self._words
+                and not fragment.absolute_word_timestamps
+            ):
                 overlap_count = self._find_text_overlap(fragment.text, fragment.chunk_start_s)
             remaining = absolute[overlap_count:]
             raw_insertion = self._text_after_prefix(fragment.text, overlap_count)
@@ -210,7 +219,9 @@ class TranscriptMerger:
             else words
         )
 
-    def _find_overlap(self, new_words: list[WordStamp], chunk_start_s: float) -> int:
+    def _find_overlap(
+        self, new_words: list[WordStamp], chunk_start_s: float, *, strict: bool = False
+    ) -> int:
         if not self._words or not new_words:
             return 0
         # A repeated phrase in a later, non-overlapping chunk is real speech.
@@ -238,6 +249,16 @@ class TranscriptMerger:
                 abs(new_start - previous_start) <= self.timestamp_tolerance_s
                 and abs(new_end - previous_end) <= self.timestamp_tolerance_s
             )
+            if strict:
+                temporally_aligned = (
+                    timestamps_valid
+                    and all(
+                        min(old.end_s, new.end_s, self._last_chunk_end_s)
+                        > max(old.start_s, new.start_s, chunk_start_s)
+                        for old, new in zip(self._words[-size:], new_words[:size], strict=True)
+                    )
+                    and temporally_aligned
+                )
             if temporally_aligned:
                 return size
         return 0

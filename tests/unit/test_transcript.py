@@ -66,6 +66,34 @@ def test_merger_removes_exact_timed_overlap() -> None:
     assert result.committed_text == "Hello from VoxType today"
 
 
+def test_absolute_overlap_does_not_remove_a_new_word_with_matching_spelling() -> None:
+    merger = TranscriptMerger()
+    merger.merge(
+        TranscriptFragment(
+            0,
+            "да",
+            (WordStamp("да", 0.5, 0.65, 0.95),),
+            0.0,
+            0.75,
+            Language.RU,
+            absolute_word_timestamps=True,
+        )
+    )
+    result = merger.merge(
+        TranscriptFragment(
+            1,
+            "да",
+            (WordStamp("да", 0.8, 0.95, 0.95),),
+            0.45,
+            1.25,
+            Language.RU,
+            absolute_word_timestamps=True,
+        )
+    )
+    assert result.skipped_prefix_words == 0
+    assert result.committed_text == "Да да"
+
+
 def test_recovery_boundary_removes_only_replayed_suffix_prefix() -> None:
     assert (
         deduplicate_text_boundary(

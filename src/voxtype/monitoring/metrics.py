@@ -37,6 +37,8 @@ class AudioCounters:
     callback_overflows: int = 0
     current_input_rms: float = 0.0
     clipping_percentage: float = 0.0
+    nonfinite_samples: int = 0
+    silent_audio_seconds: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +61,11 @@ class PerformanceMonitor:
         self._retry_chunks = 0
         self._cascade_retry_chunks = 0
         self._uncertain_chunks = 0
+        self._revised_previews = 0
+        self._overlap_words_removed = 0
+        self._inference_audio_seconds = 0.0
+        self._inference_wall_seconds = 0.0
+        self._faults: dict[str, int] = {}
         self._current_model = ""
         self._durations: dict[TimedOperation, tuple[int, float, float]] = {}
         self._lock = threading.RLock()
@@ -88,11 +95,31 @@ class PerformanceMonitor:
         with self._lock:
             self.audio.dropped_frames += frames
 
+    def record_reconciliation(
+        self, *, revised_preview: bool = False, overlap_words: int = 0
+    ) -> None:
+        with self._lock:
+            self._revised_previews += int(revised_preview)
+            self._overlap_words_removed += overlap_words
+
     def record_operation(self, operation: TimedOperation, seconds: float) -> None:
         with self._lock:
             count, total, longest = self._durations.get(operation, (0, 0.0, 0.0))
             elapsed = max(0.0, seconds)
             self._durations[operation] = (count + 1, total + elapsed, max(longest, elapsed))
+
+    def record_fault(self, category: str, amount: int = 0) -> None:
+        with self._lock:
+            self._faults[category] = self._faults.get(category, 0) + 1
+            if amount and category == "sample_discontinuity":
+                self._faults["discontinuous_samples"] = (
+                    self._faults.get("discontinuous_samples", 0) + amount
+                )
+
+    def record_input_quality(self, *, nonfinite_samples: int, silence_seconds: float) -> None:
+        with self._lock:
+            self.audio.nonfinite_samples += nonfinite_samples
+            self.audio.silent_audio_seconds += silence_seconds
 
     def sync_audio(
         self,
@@ -135,6 +162,8 @@ class PerformanceMonitor:
             # here would double-count audio while still useful for RTF.
             if audio_seconds > 0:
                 self._rtfs.append(inference_seconds / audio_seconds)
+            self._inference_audio_seconds += audio_seconds
+            self._inference_wall_seconds += inference_seconds
             self._latencies.append(max(0.0, latency_s))
             self._processed_chunks += 1
             self._retry_chunks += int(retried)
@@ -183,6 +212,11 @@ class PerformanceMonitor:
                     self._cascade_retry_chunks * 100.0 / processed if processed else 0.0
                 ),
                 "uncertain_chunks": self._uncertain_chunks,
+                "faults": dict(self._faults),
+                "revised_previews": self._revised_previews,
+                "overlap_words_removed": self._overlap_words_removed,
+                "final_inference_audio_seconds": self._inference_audio_seconds,
+                "final_inference_wall_seconds": self._inference_wall_seconds,
                 "operation_timings_ms": {
                     name: {"count": count, "average": 1000 * total / count, "max": 1000 * longest}
                     for name, (count, total, longest) in self._durations.items()

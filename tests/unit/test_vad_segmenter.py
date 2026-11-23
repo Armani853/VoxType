@@ -59,6 +59,21 @@ def test_short_pause_does_not_end_speech() -> None:
     assert segments[0].end_sample >= 2_480
 
 
+def test_conversational_vad_keeps_weak_speech_after_an_onset() -> None:
+    class LevelProbabilityVAD(AmplitudeVAD):
+        def speech_probability(self, samples: np.ndarray, sample_rate: int) -> float:
+            return float(np.max(samples, initial=0.0))
+
+    segmenter = StreamingSegmenter(
+        LevelProbabilityVAD(), sample_rate=1_000, settings=SegmentationSettings.conversational(0.5)
+    )
+    audio = np.repeat(np.array([0.35, 0.7, 0.35, 0.0], dtype=np.float32), [640, 640, 640, 800])
+    segments = _feed(segmenter, audio)
+    assert len(segments) == 1
+    assert segments[0].speech_seconds == pytest.approx(1.28)
+    assert segments[0].end_sample == 2320
+
+
 def test_forced_segmentation_limits_unbroken_speech_and_carries_overlap() -> None:
     settings = SegmentationSettings(
         preferred_segment_seconds=12.0,

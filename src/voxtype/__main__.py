@@ -19,7 +19,7 @@ from voxtype.monitoring.hardware import probe_hardware
 from voxtype.monitoring.health import run_health_checks
 from voxtype.runtime import build_runtime, data_directory_path, install_silero_vad
 from voxtype.settings.updates import StagedUpdate
-from voxtype.version import __version__, version_info
+from voxtype.version import __version__, build_identity
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -32,7 +32,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--ui-smoke-test", action="store_true")
     parser.add_argument("--ui-smoke-duration-ms", type=int)
     parser.add_argument("--inference-smoke-test", action="store_true")
-    parser.add_argument("--install-model", choices=("fast", "balanced", "maximum_accuracy"))
+    parser.add_argument("--install-model", choices=tuple(profile.value for profile in ASRProfile))
     return parser
 
 
@@ -40,9 +40,11 @@ def _diagnostics() -> dict[str, object]:
     data = data_directory_path()
     hardware = probe_hardware()
     checks = run_health_checks(data)
+    identity = build_identity()
     return {
         "version": __version__,
-        "build_id": version_info().build_id,
+        "build_id": identity.git_commit,
+        "build_identity": asdict(identity),
         "hardware": {
             "os": hardware.os_name,
             "cpu": hardware.cpu_name,

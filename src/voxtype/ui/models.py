@@ -82,6 +82,7 @@ class DictationLanguage(StrEnum):
 class ModelProfile(StrEnum):
     FAST = "fast"
     BALANCED = "balanced"
+    MEDIUM = "medium"
     ACCURATE = "accurate"
 
     @classmethod

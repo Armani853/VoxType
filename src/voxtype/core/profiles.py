@@ -97,6 +97,7 @@ BUILTIN_PROFILES = (
     DictationProfile("legal", "Legal", vocabulary_id="legal"),
     DictationProfile("medical", "Medical", vocabulary_id="medical"),
     DictationProfile("verbatim", "Verbatim", formatting_mode="verbatim"),
+    DictationProfile("conversation", "Разговор", formatting_mode="verbatim"),
 )
 BUILTIN_IDS = frozenset(profile.id for profile in BUILTIN_PROFILES)
 
@@ -293,7 +294,7 @@ class ProfileManager:
             or profile.formatting_mode not in FORMATTING_MODES
         ):
             raise ValueError("Язык или форматирование не поддерживается")
-        if profile.model_id not in ("", "small", "large-v3-turbo"):
+        if profile.model_id not in ("", "small", "medium", "large-v3-turbo"):
             raise ValueError("Модель не поддерживается")
         if profile.insertion_mode not in (
             "",

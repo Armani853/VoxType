@@ -53,6 +53,10 @@ $PortableCommit = (Get-Content -LiteralPath $PortableCommitFile -Raw).Trim()
 if ($PortableCommit -ne $ExpectedFullCommit) {
     throw "Portable build belongs to $PortableCommit, not current commit $ExpectedFullCommit"
 }
+$PortableIdentity = Get-Content -LiteralPath (Join-Path $RepoRoot 'dist\VoxType\build-identity.json') -Raw | ConvertFrom-Json
+if ($PortableIdentity.git_commit -ne $ExpectedFullCommit -or -not $PortableIdentity.asr_pipeline_version -or -not $PortableIdentity.build_time_utc) {
+    throw 'The portable build identity is missing or does not match this commit'
+}
 $ExpectedPortableArchive = Join-Path $ReleaseRoot "VoxType-0.2.4-$BuildCommit-win64-portable.zip"
 if (-not (Test-Path -LiteralPath $ExpectedPortableArchive) -or -not (Test-Path -LiteralPath "$ExpectedPortableArchive.sha256")) {
     throw "Matching portable archive and checksum are required: $ExpectedPortableArchive"
@@ -151,7 +155,9 @@ $Manifest = [ordered]@{
     product = 'VoxType'
     version = $ProductVersion
     git_commit = $ExpectedFullCommit
-    build_timestamp_utc = [DateTime]::UtcNow.ToString('o')
+    build_timestamp_utc = $PortableIdentity.build_time_utc
+    build_channel = $PortableIdentity.build_channel
+    asr_pipeline_version = $PortableIdentity.asr_pipeline_version
     installer_smoke_passed = -not $SkipInstallerSmoke
     artifacts = @(
         [ordered]@{

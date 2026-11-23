@@ -341,6 +341,15 @@ if PYSIDE6_AVAILABLE:
             self.new_text_label.setProperty("muted", True)
             self.new_text_label.hide()
             fragment.content_layout.addWidget(self.new_text_label)
+            self.unconfirmed_label = QLabel(fragment)
+            self.unconfirmed_label.setTextFormat(Qt.TextFormat.PlainText)
+            self.unconfirmed_label.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextSelectableByMouse
+            )
+            self.unconfirmed_label.setWordWrap(True)
+            self.unconfirmed_label.setProperty("muted", True)
+            self.unconfirmed_label.hide()
+            fragment.content_layout.addWidget(self.unconfirmed_label)
             self.result_editor.verticalScrollBar().valueChanged.connect(self._hide_new_text_at_end)
             result_actions = QHBoxLayout()
             self.result_copy = VoxButton("Копировать", fragment)
@@ -497,6 +506,11 @@ if PYSIDE6_AVAILABLE:
                 self.new_text_label.hide()
 
         def _update_result_editor(self, snapshot: object, state: UIState) -> None:
+            unconfirmed = getattr(snapshot, "unconfirmed_tail", "")
+            note = f"Неподтверждённый фрагмент\n{unconfirmed}" if unconfirmed else ""
+            if note != self.unconfirmed_label.text():
+                self.unconfirmed_label.setText(note)
+                self.unconfirmed_label.setVisible(bool(note))
             session = getattr(snapshot, "live_session_id", None)
             active = state.state.active
             if active and session is not None and self._live_source is not None:

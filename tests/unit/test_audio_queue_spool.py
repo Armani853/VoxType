@@ -8,7 +8,7 @@ import pytest
 
 from voxtype.audio.capture import AudioCaptureConfig, AudioCaptureService
 from voxtype.audio.levels import InputLevelStatus, LevelAnalyzer
-from voxtype.audio.models import AudioChunk, mono_float32
+from voxtype.audio.models import AudioChunk, CaptureDownmixer, mono_float32
 from voxtype.audio.preprocessing import (
     AudioPreprocessor,
     PreprocessingProfile,
@@ -21,6 +21,15 @@ from voxtype.audio.spool import (
     LosslessAudioQueue,
     SpoolCorruptionError,
 )
+
+
+def test_capture_downmix_preserves_antiphase_audio_and_ignores_nonfinite_pcm() -> None:
+    left = np.array([0.2, -0.3, 0.4, np.nan], dtype=np.float32)
+    pcm = np.column_stack((left, -left))
+    downmixer = CaptureDownmixer()
+    np.testing.assert_array_equal(downmixer.process(pcm), np.nan_to_num(left))
+    pcm[-1] = np.inf
+    np.testing.assert_array_equal(downmixer.process(pcm), np.nan_to_num(left))
 
 
 def test_mono_float32_scales_integer_pcm_and_mixes_stereo() -> None:

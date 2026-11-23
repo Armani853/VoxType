@@ -34,12 +34,17 @@ class SegmentationSettings:
     maximum_segment_seconds: float = 25.0
     overlap_seconds: float = 0.8
     forced_pause_ms: int = 180
+    negative_threshold: float | None = None
 
     def __post_init__(self) -> None:
         if not 10 <= self.frame_ms <= 100:
             raise ValueError("frame_ms must be between 10 and 100")
         if not 0.0 < self.speech_threshold < 1.0:
             raise ValueError("speech_threshold must be in (0, 1)")
+        if self.negative_threshold is not None and not (
+            0.0 < self.negative_threshold <= self.speech_threshold
+        ):
+            raise ValueError("negative_threshold must be within the speech threshold")
         if self.pre_roll_ms < 300 or self.post_roll_ms < 250:
             raise ValueError("pre-roll must be >=300 ms and post-roll >=250 ms")
         if self.minimum_speech_ms <= 0 or self.end_silence_ms < self.post_roll_ms:
@@ -52,6 +57,17 @@ class SegmentationSettings:
             raise ValueError("overlap must be between 0.8 and 1.5 seconds")
         if self.overlap_seconds >= self.preferred_segment_seconds:
             raise ValueError("overlap must be shorter than a segment")
+
+    @classmethod
+    def conversational(cls, sensitivity: float) -> SegmentationSettings:
+        threshold = min(0.75, max(0.25, 0.70 - sensitivity * 0.5))
+        return cls(
+            speech_threshold=threshold,
+            negative_threshold=threshold - 0.15,
+            minimum_speech_ms=160,
+            post_roll_ms=400,
+            maximum_segment_seconds=15.0,
+        )
 
     @classmethod
     def quiet_room(cls) -> SegmentationSettings:
@@ -104,7 +120,7 @@ class AudioSegment:
 class _Frame:
     start: int
     samples: FloatAudio = field(repr=False)
-    probability: float
+    speech: bool
 
     @property
     def end(self) -> int:
@@ -213,8 +229,13 @@ class StreamingSegmenter:
 
     def _process_frame(self, samples: FloatAudio, start: int) -> list[AudioSegment]:
         probability = self.detector.speech_probability(samples, self.sample_rate)
-        frame = _Frame(start, samples, probability)
-        is_speech = probability >= self.settings.speech_threshold
+        threshold = self.settings.speech_threshold
+        if self.settings.negative_threshold is not None and (
+            self.active or self._speech_run_start is not None
+        ):
+            threshold = self.settings.negative_threshold
+        is_speech = probability >= threshold
+        frame = _Frame(start, samples, is_speech)
         if is_speech:
             self.speech_samples += samples.size
         if not self.active:
@@ -294,9 +315,7 @@ class StreamingSegmenter:
         selected = self._slice_frames(self._history, start, self._history[-1].end)
         self._active = deque(selected)
         self._active_start = selected[0].start
-        speech_frames = [
-            frame for frame in selected if frame.probability >= self.settings.speech_threshold
-        ]
+        speech_frames = [frame for frame in selected if frame.speech]
         self._last_speech_end = max(frame.end for frame in speech_frames)
         self._silence_samples = 0
         self._pause_recorded = False
@@ -317,7 +336,7 @@ class StreamingSegmenter:
         )
         speech_samples = 0
         for frame in frames:
-            if frame.probability >= self.settings.speech_threshold:
+            if frame.speech:
                 speech_samples += frame.samples.size
         segment = AudioSegment(
             sequence=self._segment_sequence,
@@ -342,11 +361,7 @@ class StreamingSegmenter:
         self._leading_overlap = boundary - new_start
         self._new_content_boundary = boundary
         self._pause_candidates = [value for value in self._pause_candidates if value > boundary]
-        speech_ends = [
-            frame.end
-            for frame in self._active
-            if frame.probability >= self.settings.speech_threshold
-        ]
+        speech_ends = [frame.end for frame in self._active if frame.speech]
         self._last_speech_end = max(speech_ends, default=boundary)
         trailing = max(0, current_end - self._last_speech_end)
         self._silence_samples = trailing
@@ -365,10 +380,7 @@ class StreamingSegmenter:
         if boundary is None:
             return False
         return any(
-            frame.probability >= self.settings.speech_threshold
-            and frame.end > boundary
-            and frame.start < end
-            for frame in self._active
+            frame.speech and frame.end > boundary and frame.start < end for frame in self._active
         )
 
     @staticmethod
@@ -382,7 +394,7 @@ class StreamingSegmenter:
             offset_left = left - frame.start
             offset_right = right - frame.start
             selected.append(
-                _Frame(left, frame.samples[offset_left:offset_right].copy(), frame.probability)
+                _Frame(left, frame.samples[offset_left:offset_right].copy(), frame.speech)
             )
         return selected
 

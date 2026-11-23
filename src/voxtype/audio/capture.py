@@ -14,7 +14,7 @@ import numpy as np
 import numpy.typing as npt
 
 from .devices import _sounddevice
-from .models import AudioChunk, AudioQueueStats, FloatAudio
+from .models import AudioChunk, AudioFormat, AudioQueueStats, CaptureDownmixer, FloatAudio
 from .preprocessing import AudioPreprocessor, NoiseSuppressionBackend, PreprocessorSettings
 from .quality import AudioQualityMonitor
 from .resampler import StreamingResampler
@@ -132,8 +132,15 @@ class AudioCaptureService:
             preprocessing,
             denoiser=denoiser,
         )
+        self.input_format = AudioFormat(
+            self.config.input_sample_rate,
+            self.config.input_channels,
+            "float32",
+            "default" if self.config.device is None else str(self.config.device),
+        )
+        self._downmixer = CaptureDownmixer()
         self.resampler = StreamingResampler(
-            self.config.input_sample_rate, self.config.target_sample_rate
+            self.input_format.sample_rate_hz, self.config.target_sample_rate
         )
         self._stream_factory = stream_factory
         self._pre_roll: AudioPreRollBuffer | None = None
@@ -198,9 +205,9 @@ class AudioCaptureService:
                     factory = _sounddevice().InputStream
                 self._stream = factory(
                     device=self.config.device,
-                    samplerate=self.config.input_sample_rate,
-                    channels=self.config.input_channels,
-                    dtype="float32",
+                    samplerate=self.input_format.sample_rate_hz,
+                    channels=self.input_format.channels,
+                    dtype=self.input_format.sample_format,
                     blocksize=self.config.block_frames,
                     callback=self.audio_callback,
                 )
@@ -374,11 +381,7 @@ class AudioCaptureService:
             self._running = False
 
     def _process_callback_block(self, block: _CallbackBlock) -> None:
-        mono = (
-            block.samples.mean(axis=1, dtype=np.float32)
-            if block.samples.ndim == 2
-            else block.samples
-        )
+        mono = self._downmixer.process(block.samples)
         resampled = self.resampler.process(mono)
         if resampled.size:
             processed = self.preprocessor.process(resampled)

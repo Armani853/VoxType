@@ -31,6 +31,7 @@ class HallucinationIssue(StrEnum):
     REPEATED_WORD = "repeated_word"
     DUPLICATE_COMMITTED_TEXT = "duplicate_committed_text"
     MODEL_NO_SPEECH = "model_no_speech"
+    INVALID_TIMESTAMPS = "invalid_timestamps"
     RETRY_FAILED = "retry_failed"
 
 
@@ -88,6 +89,7 @@ class HallucinationGuard:
         HallucinationIssue.REPEATED_WORD: 4,
         HallucinationIssue.DUPLICATE_COMMITTED_TEXT: 3,
         HallucinationIssue.MODEL_NO_SPEECH: 2,
+        HallucinationIssue.INVALID_TIMESTAMPS: 2,
         HallucinationIssue.RETRY_FAILED: 1,
     }
 
@@ -114,8 +116,18 @@ class HallucinationGuard:
             else 0.0
         )
         dbfs = 20.0 * math.log10(max(rms, 1e-12))
-        if dbfs <= self.settings.silence_dbfs:
+        if dbfs <= self.settings.silence_dbfs and (
+            request.vad_speech_seconds is None or request.vad_speech_seconds < 0.16
+        ):
             issues.append(HallucinationIssue.TEXT_ON_SILENCE)
+        if request.metadata.get("kind") == "final":
+            start = request.start_offset_seconds
+            end = start + request.duration_seconds
+            if any(
+                segment.start < start - 0.1 or segment.end > end + 0.3
+                for segment in result.segments
+            ):
+                issues.append(HallucinationIssue.INVALID_TIMESTAMPS)
 
         probability = result.average_word_probability
         if probability is None:
@@ -139,7 +151,7 @@ class HallucinationGuard:
             for item in result.segments
             if item.no_speech_probability is not None
         ]
-        if no_speech and max(no_speech) >= 0.8:
+        if no_speech and min(no_speech) >= 0.8:
             issues.append(HallucinationIssue.MODEL_NO_SPEECH)
 
         sentences = [_normalize(item) for item in _SENTENCE.split(text) if len(_tokens(item)) >= 3]
@@ -163,6 +175,15 @@ class HallucinationGuard:
 
         unique = tuple(dict.fromkeys(issues))
         score = sum(self._weights[issue] for issue in unique)
+        if HallucinationIssue.SUBTITLE_JUNK in unique and not any(
+            issue in unique
+            for issue in (
+                HallucinationIssue.TEXT_ON_SILENCE,
+                HallucinationIssue.LOW_PROBABILITY,
+                HallucinationIssue.MODEL_NO_SPEECH,
+            )
+        ):
+            score -= self._weights[HallucinationIssue.SUBTITLE_JUNK]
         return GuardAssessment(score >= self.settings.suspicious_score, score, unique)
 
     @staticmethod
@@ -213,6 +234,10 @@ class HallucinationGuard:
 
         first = backend.transcribe(request)
         first_assessment = self.assess(request, first, committed_text=committed_text)
+        if first.text and not np.any(request.audio):
+            return GuardedTranscription(
+                replace(first, text="", segments=()), first_assessment, first_assessment, False
+            )
         if not first_assessment.suspicious:
             return GuardedTranscription(first, first_assessment, first_assessment, False)
         retry_engine = retry_backend or backend
@@ -246,7 +271,19 @@ class HallucinationGuard:
                 perf_counter() - retry_started,
             )
 
-        if retry_assessment.score < first_assessment.score:
+        if (
+            not retry.text.strip()
+            and first.text.strip()
+            and not any(
+                issue in first_assessment.issues
+                for issue in (
+                    HallucinationIssue.TEXT_ON_SILENCE,
+                    HallucinationIssue.MODEL_NO_SPEECH,
+                )
+            )
+        ):
+            chosen, assessment = first, first_assessment
+        elif retry_assessment.score < first_assessment.score:
             chosen, assessment = retry, retry_assessment
         elif retry_assessment.score > first_assessment.score:
             chosen, assessment = first, first_assessment

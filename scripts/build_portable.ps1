@@ -38,6 +38,11 @@ $BuildCommitFull = (& git rev-parse HEAD).Trim()
 if ($LASTEXITCODE -ne 0 -or $BuildCommitFull -notmatch '^[0-9a-f]{40}$') {
     throw 'Cannot determine full source commit for portable provenance'
 }
+$BuildTimeUtc = [DateTime]::UtcNow.ToString('o')
+$PipelineVersion = (& $Python -c 'from voxtype.version import ASR_PIPELINE_VERSION; print(ASR_PIPELINE_VERSION)').Trim()
+if ($LASTEXITCODE -ne 0 -or $PipelineVersion -notmatch '^[0-9]+$') {
+    throw 'Cannot determine the ASR pipeline version'
+}
 $ArchiveName = "VoxType-0.2.4-$BuildCommit-win64-portable.zip"
 $Archive = Join-Path $ReleaseRoot $ArchiveName
 $Checksum = "$Archive.sha256"
@@ -127,6 +132,14 @@ $Executable = Join-Path $PortableRoot 'VoxType.exe'
 if (-not (Test-Path -LiteralPath $Executable)) { throw "Missing portable executable: $Executable" }
 if ((Get-Item -LiteralPath $Executable).Length -eq 0) { throw 'Portable executable is empty' }
 Set-Content -LiteralPath (Join-Path $PortableRoot 'build-commit.txt') -Encoding ascii -NoNewline -Value $BuildCommitFull
+$BuildIdentity = [ordered]@{
+    app_version = '0.2.4'
+    git_commit = $BuildCommitFull
+    build_time_utc = $BuildTimeUtc
+    build_channel = 'stable'
+    asr_pipeline_version = $PipelineVersion
+}
+$BuildIdentity | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $PortableRoot 'build-identity.json') -Encoding ascii
 
 Write-Host '[5/6] Smoke-testing packaged executable'
 $PackagedSmokeStopwatch = [Diagnostics.Stopwatch]::StartNew()

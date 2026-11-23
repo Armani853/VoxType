@@ -221,6 +221,17 @@ def test_hallucination_guard_flags_committed_duplicate() -> None:
     assert HallucinationIssue.DUPLICATE_COMMITTED_TEXT in assessment.issues
 
 
+def test_guard_drops_silent_output_but_keeps_a_spoken_stock_phrase() -> None:
+    result = _result("Спасибо за просмотр.")
+    guard = HallucinationGuard()
+    silent = guard.transcribe_guarded(FakeBackend([result]), _request(silence=True))
+    assert silent.result.text == ""
+    assert not silent.retried
+    spoken = guard.transcribe_guarded(FakeBackend([result]), _request())
+    assert spoken.result.text == result.text
+    assert not spoken.assessment.suspicious
+
+
 def test_guard_retries_once_and_selects_more_plausible_result() -> None:
     suspicious = _result("слово слово слово слово слово слово слово слово слово")
     clean = _result("это нормальный результат распознавания")

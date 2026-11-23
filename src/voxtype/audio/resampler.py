@@ -42,9 +42,8 @@ class StreamingResampler:
             raise ValueError("filter_taps must be an odd integer of at least 7")
         self.source_rate = source_rate
         self.target_rate = target_rate
-        self._step = source_rate / target_rate
         self._total_input = 0
-        self._next_position = 0.0
+        self._output_samples = 0
         self._previous: float | None = None
         self._filter = self._design_filter(filter_taps) if target_rate < source_rate else None
         self._filter_state: FloatAudio | None = (
@@ -75,6 +74,7 @@ class StreamingResampler:
             return np.empty(0, dtype=np.float32)
         if self.source_rate == self.target_rate:
             self._total_input += int(audio.size)
+            self._output_samples += int(audio.size)
             self._previous = float(audio[-1])
             return audio.copy()
 
@@ -91,13 +91,15 @@ class StreamingResampler:
                 np.concatenate((np.array([self._previous], dtype=np.float32), filtered)),
             )
         result: FloatAudio
-        if self._next_position > end + 1e-12:
+        limit = end * self.target_rate // self.source_rate + 1
+        if self._output_samples >= limit:
             result = np.empty(0, dtype=np.float32)
         else:
-            count = int(np.floor((end - self._next_position) / self._step + 1e-12)) + 1
-            positions = self._next_position + np.arange(count, dtype=np.float64) * self._step
+            positions = (
+                np.arange(self._output_samples, limit, dtype=np.int64) * self.source_rate
+            ) / self.target_rate
             result = np.interp(positions, x, values).astype(np.float32)
-            self._next_position += count * self._step
+            self._output_samples = limit
         self._total_input += int(audio.size)
         self._previous = float(filtered[-1])
         return np.ascontiguousarray(result, dtype=np.float32)
@@ -107,16 +109,16 @@ class StreamingResampler:
 
         if self._previous is None or self.source_rate == self.target_rate:
             return np.empty(0, dtype=np.float32)
-        remaining = self._total_input - self._next_position
-        if remaining <= 1e-12:
+        expected = (self._total_input * self.target_rate + self.source_rate - 1) // self.source_rate
+        count = expected - self._output_samples
+        if count <= 0:
             return np.empty(0, dtype=np.float32)
-        count = int(np.ceil(remaining / self._step - 1e-12))
-        self._next_position += count * self._step
+        self._output_samples = expected
         return np.full(count, self._previous, dtype=np.float32)
 
     def reset(self) -> None:
         self._total_input = 0
-        self._next_position = 0.0
+        self._output_samples = 0
         self._previous = None
         if self._filter_state is not None:
             self._filter_state.fill(0.0)

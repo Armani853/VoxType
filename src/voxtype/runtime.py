@@ -96,7 +96,7 @@ def configured_profile(
     if preset == DecodingPreset.FAST:
         return replace(profile, beam_size=1, best_of=1)
     if preset == DecodingPreset.ACCURATE:
-        return replace(profile, beam_size=max(3, profile.beam_size))
+        return replace(profile, beam_size=5)
     return profile
 
 
@@ -243,9 +243,16 @@ class RuntimeBundle:
     def backend_for_model(self, model_id: str) -> FasterWhisperBackend:
         if not self.model_manager.is_installed(model_id):
             raise ASRModelUnavailable("Selected profile model is not installed")
-        profile = (
-            ASRProfile.MAXIMUM_ACCURACY if model_id == "large-v3-turbo" else ASRProfile.BALANCED
+        profile = next(
+            (
+                candidate
+                for candidate, spec in DEFAULT_MODEL_SPECS.items()
+                if spec.model_id == model_id and candidate != ASRProfile.FAST
+            ),
+            None,
         )
+        if profile is None:
+            raise ASRModelUnavailable("Selected profile model is not supported")
         return self.backend_for(profile)
 
     def close(self) -> bool:
@@ -409,9 +416,9 @@ def build_runtime(*, verbose: bool = False) -> RuntimeBundle:
     def segmenter_factory() -> StreamingSegmenter:
         model_path = data_directory / "models" / "silero-vad" / "silero_vad.onnx"
         detector = SileroVAD(model_path, strict=False)
-        base = SegmentationSettings()
-        threshold = min(0.75, max(0.25, 0.70 - settings.audio.vad_sensitivity * 0.5))
-        return StreamingSegmenter(detector, settings=replace(base, speech_threshold=threshold))
+        return StreamingSegmenter(
+            detector, settings=SegmentationSettings.conversational(settings.audio.vad_sensitivity)
+        )
 
     controller = ApplicationController(
         settings_repository=settings_repository,

@@ -10,6 +10,7 @@ from threading import RLock
 from time import perf_counter
 from typing import Any
 
+from voxtype.audio.models import FloatAudio
 from voxtype.core.compute_budget import ComputeBudget
 
 from .base import (
@@ -130,6 +131,23 @@ class FasterWhisperBackend:
                     f"Не удалось загрузить модель '{self.model_id}'."
                 ) from exc
             self._slot.key = self._engine_key
+
+    def detect_language(self, audio: FloatAudio) -> tuple[LanguageCode, float] | None:
+        with self._lock:
+            self.load()
+            engine = self._slot.engine
+            detect = getattr(engine, "detect_language", None)
+            if not callable(detect):
+                return None
+            try:
+                language, probability, _scores = detect(audio=audio, vad_filter=False)
+            except (RuntimeError, OSError) as exc:
+                raise ASRModelUnavailable("Language detection failed") from exc
+            if language == "ru":
+                return "ru", float(probability)
+            if language == "en":
+                return "en", float(probability)
+            return None
 
     def transcribe(self, request: TranscriptionRequest) -> TranscriptionResult:
         if request.sample_rate != 16_000:

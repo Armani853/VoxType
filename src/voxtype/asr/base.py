@@ -70,6 +70,7 @@ class TranscriptionRequest:
     metadata: Mapping[str, str] = field(default_factory=dict)
     hotwords: tuple[str, ...] = ()
     word_timestamps: bool | None = None
+    vad_speech_seconds: float | None = None
 
     def __post_init__(self) -> None:
         audio = mono_float32(self.audio, copy=True)

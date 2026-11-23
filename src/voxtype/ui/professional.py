@@ -154,7 +154,16 @@ class ProfessionalWindow(QDialog):
         self.name = VoxTextField(page)
         self.language = self._choices(("Язык настроек", "", "Русский", "ru", "English", "en"))
         self.model = self._choices(
-            ("Модель настроек", "", "small", "small", "large-v3-turbo", "large-v3-turbo")
+            (
+                "Модель настроек",
+                "",
+                "small",
+                "small",
+                "medium",
+                "medium",
+                "large-v3-turbo",
+                "large-v3-turbo",
+            )
         )
         self.formatting = self._choices(
             tuple(value for mode in FORMATTING_MODES for value in (mode, mode))

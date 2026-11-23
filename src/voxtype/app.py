@@ -15,7 +15,7 @@ import time
 import traceback
 from collections.abc import Callable
 from contextlib import suppress
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, cast
@@ -122,7 +122,7 @@ from voxtype.ui.obsidian import ModelDownloadDialog
 from voxtype.ui.presentation import DictationPresentationResolver
 from voxtype.vad.segmenter import SegmentationSettings, StreamingSegmenter
 from voxtype.vad.silero import SileroVAD
-from voxtype.version import __version__, version_info
+from voxtype.version import __version__, build_identity, version_info
 from voxtype.windows.device_events import DeviceEvent, DeviceEventType, WindowsSystemEventBridge
 from voxtype.windows.foreground import capture_foreground, get_foreground_hwnd
 from voxtype.windows.foreground_events import ForegroundEvents
@@ -722,6 +722,13 @@ class DesktopApplication:
             window.self_test_requested.connect(self.show_diagnostics)
             self.signals.settings_status.connect(window.set_diagnostics_status)
             self.signals.audio_level.connect(window.update_microphone_level)
+        identity = build_identity()
+        window.build_identity_label.setText(
+            f"VoxType {identity.app_version} · {identity.build_channel}\n"
+            f"Git {identity.git_commit}\n"
+            f"UTC {identity.build_time_utc or '—'}\n"
+            f"ASR {self.controller.backend.model_id} · тракт {identity.asr_pipeline_version}"
+        )
         return window
 
     @property
@@ -2193,6 +2200,7 @@ class DesktopApplication:
     ) -> None:
         models = [
             (f"small — быстро/баланс{' ✓' if 'small' in installed else ''}", "small"),
+            (f"medium — баланс качества{' ✓' if 'medium' in installed else ''}", "medium"),
             (
                 f"large-v3-turbo — максимум{' ✓' if 'large-v3-turbo' in installed else ''}",
                 "large-v3-turbo",
@@ -2217,6 +2225,7 @@ class DesktopApplication:
         installed = self._installed_model_sizes
         descriptions = {
             "small": "Модель для повседневной диктовки и работы на CPU.",
+            "medium": "Многоязычная модель для сложной речи. Загрузка около 1,53 ГБ.",
             "large-v3-turbo": "Режим максимальной точности для сложных текстов.",
         }
         policy = self.controller.policy
@@ -2604,8 +2613,7 @@ class DesktopApplication:
         sensitivity = self.runtime.settings.audio.vad_sensitivity
 
         def factory() -> StreamingSegmenter:
-            threshold = min(0.75, max(0.25, 0.70 - sensitivity * 0.5))
-            settings = replace(SegmentationSettings(), speech_threshold=threshold)
+            settings = SegmentationSettings.conversational(sensitivity)
             return StreamingSegmenter(SileroVAD(vad_path, strict=False), settings=settings)
 
         self.controller.segmenter_factory = factory
@@ -3220,10 +3228,15 @@ class DesktopApplication:
                         "≥" if not complete else ""
                     ) + f"{size / 1024**2:.1f} МиБ"
                 version = version_info(self.runtime.settings.general.release_channel)
+                identity = build_identity()
                 libraries: dict[str, str] = {
                     "VoxType": version.app_version,
                     "Сборка": version.build_id,
                     "Канал обновлений": version.release_channel.value,
+                    "Дата сборки UTC": identity.build_time_utc or "—",
+                    "Канал сборки": identity.build_channel,
+                    "Тракт ASR": identity.asr_pipeline_version,
+                    "Модель ASR": self.controller.backend.model_id,
                 }
                 for name in ("PySide6", "faster-whisper", "ctranslate2", "onnxruntime", "numpy"):
                     try:
@@ -3734,6 +3747,7 @@ class DesktopApplication:
                 hardware = probe_hardware()
                 payload = {
                     "version": __version__,
+                    "build_identity": asdict(build_identity()),
                     "hardware": {
                         "os": hardware.os_name,
                         "cpu": hardware.cpu_name,
@@ -4042,8 +4056,8 @@ def _coerce_asr_profile(value: str) -> ASRProfile:
         "maximum_accuracy",
     }:
         return ASRProfile.MAXIMUM_ACCURACY
-    if normalized == "balanced":
-        return ASRProfile.BALANCED
+    if normalized in {"balanced", "medium"}:
+        return ASRProfile(normalized)
     return ASRProfile.FAST
 
 

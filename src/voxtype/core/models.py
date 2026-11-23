@@ -24,6 +24,7 @@ class Language(StrEnum):
 class ModelProfile(StrEnum):
     FAST = "fast"
     BALANCED = "balanced"
+    MEDIUM = "medium"
     MAXIMUM_ACCURACY = "maximum_accuracy"
 
 
@@ -207,3 +208,4 @@ class ControllerSnapshot:
     target_unsafe: bool = False
     target_application: str = ""
     confirmed_tail: str = ""
+    unconfirmed_tail: str = ""

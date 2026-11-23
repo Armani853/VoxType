@@ -92,6 +92,12 @@ DEFAULT_MODEL_SPECS: dict[ASRProfile, ModelSpec] = {
         repository_id="Systran/faster-whisper-small",
         revision="536b0662742c02347bc0e980a01041f333bce120",
     ),
+    ASRProfile.MEDIUM: ModelSpec(
+        "medium",
+        repository_id="Systran/faster-whisper-medium",
+        revision="08e178d48790749d25932bbc082711ddcfdfbc4f",
+        expected_size_bytes=1_540_000_000,
+    ),
     ASRProfile.MAXIMUM_ACCURACY: ModelSpec(
         "large-v3-turbo",
         repository_id="mobiuslabsgmbh/faster-whisper-large-v3-turbo",

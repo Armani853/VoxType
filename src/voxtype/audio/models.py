@@ -11,6 +11,45 @@ import numpy.typing as npt
 FloatAudio = npt.NDArray[np.float32]
 
 
+@dataclass(frozen=True, slots=True)
+class AudioFormat:
+    sample_rate_hz: int
+    channels: int
+    sample_format: str
+    device_id: str
+
+
+class CaptureDownmixer:
+    """Average coherent stereo and retain one channel when averaging cancels speech."""
+
+    def __init__(self) -> None:
+        self._energy: npt.NDArray[np.float64] | None = None
+        self._combined_energy = 0.0
+        self._selected: int | None = None
+
+    def process(self, samples: FloatAudio) -> FloatAudio:
+        finite = np.nan_to_num(samples, nan=0.0, posinf=0.0, neginf=0.0)
+        if finite.ndim == 1 or finite.shape[1] == 1:
+            return finite.reshape(-1)
+        if not finite.size:
+            return np.empty(0, dtype=np.float32)
+        mixed = finite.mean(axis=1, dtype=np.float32)
+        energy = np.square(finite, dtype=np.float64).mean(axis=0)
+        combined = float(np.square(mixed, dtype=np.float64).mean())
+        if self._energy is None:
+            self._energy = energy
+            self._combined_energy = combined
+        else:
+            self._energy = 0.8 * self._energy + 0.2 * energy
+            self._combined_energy = 0.8 * self._combined_energy + 0.2 * combined
+        strongest = int(np.argmax(self._energy))
+        if self._selected is None and self._combined_energy < 0.16 * self._energy[strongest]:
+            self._selected = strongest
+        if self._selected is not None:
+            return finite[:, self._selected]
+        return np.asarray(mixed, dtype=np.float32)
+
+
 def mono_float32(samples: npt.ArrayLike, *, copy: bool = False) -> FloatAudio:
     """Return contiguous, finite mono PCM in the canonical ``[-1, 1]`` range.
 
@@ -45,6 +84,8 @@ class AudioInputObservation:
     peak: float
     clipping_ratio: float
     sample_rate: int
+    frames: int = 0
+    nonfinite_samples: int = 0
 
 
 @dataclass(frozen=True, slots=True)

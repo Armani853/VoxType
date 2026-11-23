@@ -39,6 +39,8 @@ class GeneralSettings:
 @dataclass(slots=True)
 class DictationSettings:
     language: Language = Language.RU
+    auto_detect_language: bool = False
+    text_style: str = "profile"
     # BALANCED is the local-first product default. It uses small normally and
     # only adds the lazy turbo retry when that optional model is installed.
     model_profile: ModelProfile = ModelProfile.BALANCED

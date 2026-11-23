@@ -284,10 +284,30 @@ if PYSIDE6_AVAILABLE:
             self.default_language_combo = self._combo(
                 (("RU — Русский", "ru"), ("EN — English", "en")), page
             )
+            self.auto_language_check = VoxCheckBox("Определять RU/EN по речи", page)
+            self.auto_language_check.setToolTip(
+                "Выбранный язык используется до уверенного определения по речевому фрагменту."
+            )
+            self.text_style_combo = self._combo(
+                (("По профилю", "profile"), ("Чистый текст", "clean"), ("Дословно", "verbatim")),
+                page,
+            )
+            self.decoding_preset_combo = self._combo(
+                (
+                    ("Быстро", "fast"),
+                    ("Сбалансировано", "balanced"),
+                    ("Максимальная точность", "accurate"),
+                ),
+                page,
+            )
+            self.decoding_preset_combo.setToolTip(
+                "Управляет глубиной финального декодирования. Предварительный текст остаётся быстрым."
+            )
             self.profile_combo = self._combo(
                 (
                     ("Быстро", "fast"),
                     ("Баланс", "balanced"),
+                    ("Баланс качества · medium", "medium"),
                     ("Максимальная точность", "maximum_accuracy"),
                 ),
                 page,
@@ -346,7 +366,10 @@ if PYSIDE6_AVAILABLE:
                 "Применять личный словарь и правила замены", page
             )
             form.addRow("Язык по умолчанию", self.default_language_combo)
+            form.addRow(self.auto_language_check)
             form.addRow("Профиль модели", self.profile_combo)
+            form.addRow("Качество финального прохода", self.decoding_preset_combo)
+            form.addRow("Стиль обычной диктовки", self.text_style_combo)
             form.addRow(self.voice_commands_check)
             form.addRow("Пользовательский словарь", self.vocabulary_edit)
             form.addRow(self.text_transformations_check)
@@ -586,10 +609,6 @@ if PYSIDE6_AVAILABLE:
             self.power_mode_combo.addItem("Баланс", "balanced")
             self.power_mode_combo.addItem("Автоматически (Windows)", "automatic")
             self.power_mode_combo.addItem("Максимальная производительность", "maximum")
-            self.decoding_preset_combo = VoxComboBox(page)
-            self.decoding_preset_combo.addItem("Быстро", "fast")
-            self.decoding_preset_combo.addItem("Стандартное", "balanced")
-            self.decoding_preset_combo.addItem("Точнее (выше нагрузка)", "accurate")
             self.memory_policy_combo = VoxComboBox(page)
             self.memory_policy_combo.addItem("Оставлять модель в памяти", "keep_loaded")
             self.memory_policy_combo.addItem("Выгружать после простоя", "unload_after_idle")
@@ -613,7 +632,6 @@ if PYSIDE6_AVAILABLE:
             controls.setContentsMargins(0, 0, 0, 0)
             controls.addRow("Потоки CPU", self.cpu_threads_spin)
             controls.addRow("Режим питания", self.power_mode_combo)
-            controls.addRow("Декодирование", self.decoding_preset_combo)
             controls.addRow("Модель в памяти", self.memory_policy_combo)
             controls.addRow("Выгрузка после", self.idle_unload_spin)
             controls.addRow(self.release_models_button)
@@ -846,6 +864,12 @@ if PYSIDE6_AVAILABLE:
             page, form = self._page(
                 "Диагностика", "Логи не содержат продиктованный текст или PCM-аудио."
             )
+            self.build_identity_label = QLabel(page)
+            self.build_identity_label.setWordWrap(True)
+            self.build_identity_label.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextSelectableByMouse
+            )
+            form.addRow("О программе", self.build_identity_label)
             self.open_log_button = VoxButton("Открыть технический лог", page)
             self.export_diagnostics_button = VoxButton("Экспортировать отчёт", page)
             self.self_test_button = VoxButton("Выполнить self-test", page)
@@ -909,6 +933,7 @@ if PYSIDE6_AVAILABLE:
                 self.overlay_check,
                 self.sounds_check,
                 self.voice_commands_check,
+                self.auto_language_check,
                 self.live_preview_check,
                 self.live_insertion_check,
                 self.live_provisional_check,
@@ -943,6 +968,7 @@ if PYSIDE6_AVAILABLE:
                 self.update_channel_combo,
                 self.interface_language_combo,
                 self.default_language_combo,
+                self.text_style_combo,
                 self.profile_combo,
                 self.target_policy_combo,
                 self.audio_device_combo,
@@ -1005,6 +1031,8 @@ if PYSIDE6_AVAILABLE:
                 },
                 "dictation": {
                     "language": self.default_language_combo.currentData(),
+                    "auto_detect_language": self.auto_language_check.isChecked(),
+                    "text_style": self.text_style_combo.currentData(),
                     "model_profile": self.profile_combo.currentData(),
                     "voice_commands": self.voice_commands_check.isChecked(),
                     "custom_vocabulary": [
@@ -1109,6 +1137,12 @@ if PYSIDE6_AVAILABLE:
                 _select_data(
                     self.default_language_combo,
                     _setting(dictation, "language", "default_language", default="ru"),
+                )
+                self.auto_language_check.setChecked(
+                    bool(_setting(dictation, "auto_detect_language", default=False))
+                )
+                _select_data(
+                    self.text_style_combo, _setting(dictation, "text_style", default="profile")
                 )
                 _select_data(
                     self.profile_combo,

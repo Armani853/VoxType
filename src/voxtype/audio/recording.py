@@ -10,7 +10,7 @@ from typing import Any
 import numpy as np
 
 from voxtype.audio.devices import InputDevice, _sounddevice, choose_capture_channels
-from voxtype.audio.models import AudioInputObservation
+from voxtype.audio.models import AudioInputObservation, CaptureDownmixer
 from voxtype.audio.quality import AudioQualityMonitor
 
 
@@ -74,4 +74,4 @@ def record_input(
         raise RuntimeError("PortAudio reported an input overflow during microphone test")
     if observe_levels is not None:
         observe_levels(AudioQualityMonitor.measure(samples, sample_rate))
-    return np.mean(samples, axis=1, dtype=np.float32) if channels == 2 else samples[:, 0].copy()
+    return CaptureDownmixer().process(samples)

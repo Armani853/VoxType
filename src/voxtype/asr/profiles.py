@@ -9,6 +9,7 @@ from enum import StrEnum
 class ASRProfile(StrEnum):
     FAST = "fast"
     BALANCED = "balanced"
+    MEDIUM = "medium"
     MAXIMUM_ACCURACY = "maximum_accuracy"
 
 
@@ -50,14 +51,21 @@ DEFAULT_PROFILES: dict[ASRProfile, ASRProfileConfig] = {
         profile=ASRProfile.BALANCED,
         model_name="small",
         compute_type="int8",
-        beam_size=1,
+        beam_size=3,
+        best_of=1,
+    ),
+    ASRProfile.MEDIUM: ASRProfileConfig(
+        profile=ASRProfile.MEDIUM,
+        model_name="medium",
+        compute_type="int8",
+        beam_size=3,
         best_of=1,
     ),
     ASRProfile.MAXIMUM_ACCURACY: ASRProfileConfig(
         profile=ASRProfile.MAXIMUM_ACCURACY,
         model_name="large-v3-turbo",
         compute_type="int8",
-        beam_size=1,
+        beam_size=5,
         best_of=1,
     ),
 }
