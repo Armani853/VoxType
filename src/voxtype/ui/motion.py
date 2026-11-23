@@ -9,9 +9,249 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
-from PySide6.QtCore import QEasingCurve, QEvent, QObject, QSettings, QVariantAnimation, Signal
-from PySide6.QtGui import QColor
+from PySide6.QtCore import (
+    QAbstractAnimation,
+    QEasingCurve,
+    QEvent,
+    QObject,
+    QSettings,
+    Qt,
+    QVariantAnimation,
+    Signal,
+)
+from PySide6.QtGui import QColor, QFocusEvent
 from PySide6.QtWidgets import QApplication, QGraphicsOpacityEffect, QWidget
+
+
+@dataclass(frozen=True, slots=True)
+class MotionDurations:
+    hover_enter: int = 140
+    hover_leave: int = 170
+    press_in: int = 75
+    press_out: int = 135
+    focus_in: int = 140
+    focus_out: int = 160
+    selection: int = 170
+    toggle: int = 170
+    border: int = 150
+    icon: int = 140
+    tooltip_delay: int = 600
+    sidebar_selection: int = 180
+    tab_indicator: int = 190
+    card_emphasis: int = 160
+    toast_enter: int = 200
+    toast_exit: int = 160
+
+
+DURATIONS = MotionDurations()
+OUT = QEasingCurve.Type.OutCubic
+PRESS_IN = QEasingCurve.Type.OutQuad
+TOGGLE = QEasingCurve.Type.InOutCubic
+_OUT_CURVE = QEasingCurve(OUT)
+_PRESS_CURVE = QEasingCurve(PRESS_IN)
+
+
+class InteractionState(StrEnum):
+    NORMAL = "normal"
+    HOVERED = "hovered"
+    PRESSED = "pressed"
+    SELECTED = "selected"
+    FOCUSED = "focused"
+    DISABLED = "disabled"
+
+
+@dataclass(slots=True)
+class InteractionFlags:
+    hovered: bool = False
+    pressed: bool = False
+    selected: bool = False
+    focused: bool = False
+    enabled: bool = True
+
+
+def blend(start: QColor, end: QColor, progress: float) -> QColor:
+    return QColor.fromRgbF(
+        start.redF() + (end.redF() - start.redF()) * progress,
+        start.greenF() + (end.greenF() - start.greenF()) * progress,
+        start.blueF() + (end.blueF() - start.blueF()) * progress,
+        start.alphaF() + (end.alphaF() - start.alphaF()) * progress,
+    )
+
+
+class InteractionVisualState(QObject):
+    """Retarget four paint-only channels with one reusable timeline."""
+
+    def __init__(
+        self,
+        widget: QWidget,
+        *,
+        mouse_focus: bool = False,
+        pointer: bool = False,
+        hover_duration: int = DURATIONS.hover_enter,
+    ) -> None:
+        super().__init__(widget)
+        self.widget = widget
+        self.mouse_focus = mouse_focus
+        self.pointer = pointer
+        self.hover_duration = hover_duration
+        self.flags = InteractionFlags(enabled=widget.isEnabled())
+        self.values: tuple[float, ...] = (0.0, 0.0, 0.0, 0.0)
+        self._from: tuple[float, ...] = self.values
+        self._to: tuple[float, ...] = self.values
+        self._timing: tuple[tuple[int, QEasingCurve], ...] = ()
+        self._animation: QVariantAnimation | None = None
+        self._motion = AnimationCoordinator.instance()
+        self._motion.preference_updated.connect(self._preference_changed)
+        widget.installEventFilter(self)
+        self._sync_cursor()
+
+    def _sync_cursor(self) -> None:
+        if self.pointer:
+            self.widget.setCursor(
+                Qt.CursorShape.PointingHandCursor
+                if self.flags.enabled
+                else Qt.CursorShape.ArrowCursor
+            )
+
+    def resolve_visual_target(self) -> tuple[InteractionState, bool]:
+        flags = self.flags
+        if not flags.enabled:
+            return InteractionState.DISABLED, False
+        if flags.pressed:
+            return InteractionState.PRESSED, flags.focused
+        if flags.selected:
+            return InteractionState.SELECTED, flags.focused
+        if flags.hovered:
+            return InteractionState.HOVERED, flags.focused
+        return (
+            InteractionState.FOCUSED if flags.focused else InteractionState.NORMAL
+        ), flags.focused
+
+    def set_pressed(self, pressed: bool) -> None:
+        flags = self.flags
+        flags.pressed = pressed and flags.enabled
+        self.transition_to_target()
+
+    def set_selected(self, selected: bool) -> None:
+        self.flags.selected = selected
+        self.transition_to_target()
+
+    def transition_to_target(self, *, immediate: bool = False) -> None:
+        flags = self.flags
+        state, focused = self.resolve_visual_target()
+        enabled = state is not InteractionState.DISABLED
+        target = (
+            float(enabled and flags.hovered),
+            float(enabled and flags.pressed),
+            float(flags.selected),
+            float(focused),
+        )
+        if immediate or not self.widget.isVisible() or self._motion.reduced_motion_enabled():
+            if self._animation is not None:
+                self._animation.stop()
+            self._to = target
+            self._apply(target)
+            return
+        if target == self._to:
+            return
+        durations = (
+            self.hover_duration if target[0] else DURATIONS.hover_leave,
+            DURATIONS.press_in if target[1] else DURATIONS.press_out,
+            DURATIONS.selection,
+            DURATIONS.focus_in if target[3] else DURATIONS.focus_out,
+        )
+        animation = self._animation
+        running = animation is not None and animation.state() == QAbstractAnimation.State.Running
+        elapsed = animation.currentTime() if animation is not None else 0
+        previous = self._to
+        old_timing = self._timing
+        self._from, self._to = self.values, target
+        timing: list[tuple[int, QEasingCurve]] = []
+        for i, (duration, before, after) in enumerate(
+            zip(durations, self._from, target, strict=True)
+        ):
+            if before == after:
+                duration = 0
+            elif running and after == previous[i]:
+                duration = max(1, old_timing[i][0] - elapsed)
+            timing.append((duration, _PRESS_CURVE if i == 1 and after else _OUT_CURVE))
+        self._timing = tuple(timing)
+        if animation is not None:
+            animation.stop()
+        duration = max(ms for ms, _curve in self._timing)
+        if not duration:
+            return
+        if self._animation is None:
+            self._animation = QVariantAnimation(self)
+            self._animation.valueChanged.connect(self._tick)
+            self._animation.finished.connect(self._finish)
+        self._animation.setDuration(duration)
+        self._animation.setStartValue(0.0)
+        self._animation.setEndValue(float(duration))
+        self._animation.start()
+
+    def _apply(self, values: tuple[float, ...]) -> None:
+        if values != self.values:
+            self.values = values
+            if self.widget.isVisible():
+                self.widget.update()
+
+    def _tick(self, elapsed: float) -> None:
+        if (
+            self._animation is not None
+            and self._animation.state() == QAbstractAnimation.State.Running
+        ):
+            channels = zip(self._from, self._to, self._timing, strict=True)
+            self._apply(
+                tuple(
+                    start + (end - start) * curve.valueForProgress(min(1.0, elapsed / duration))
+                    if duration
+                    else end
+                    for start, end, (duration, curve) in channels
+                )
+            )
+
+    def _finish(self) -> None:
+        self._apply(self._to)
+
+    def _preference_changed(self) -> None:
+        if self._motion.reduced_motion_enabled():
+            self.transition_to_target(immediate=True)
+
+    def eventFilter(self, _owner: QObject, event: QEvent) -> bool:
+        kind = event.type()
+        flags = self.flags
+        immediate = kind in {
+            QEvent.Type.EnabledChange,
+            QEvent.Type.Show,
+            QEvent.Type.Hide,
+            QEvent.Type.WindowDeactivate,
+        }
+        if kind in {QEvent.Type.Enter, QEvent.Type.Leave}:
+            flags.hovered = kind == QEvent.Type.Enter and flags.enabled
+        elif kind in {QEvent.Type.FocusIn, QEvent.Type.FocusOut}:
+            # Mouse activation uses press feedback. Tab navigation keeps a ring.
+            flags.focused = (
+                kind == QEvent.Type.FocusIn
+                and isinstance(event, QFocusEvent)
+                and (self.mouse_focus or event.reason() != Qt.FocusReason.MouseFocusReason)
+            )
+        elif immediate:
+            flags.enabled = self.widget.isEnabled()
+            if kind == QEvent.Type.EnabledChange:
+                self._sync_cursor()
+            flags.hovered = (
+                flags.enabled
+                and kind not in {QEvent.Type.Hide, QEvent.Type.WindowDeactivate}
+                and self.widget.underMouse()
+            )
+            flags.pressed = False
+            if not flags.enabled or kind == QEvent.Type.Hide:
+                flags.focused = False
+        else:
+            return False
+        self.transition_to_target(immediate=immediate)
+        return False
 
 
 class MotionPreference(StrEnum):
@@ -43,24 +283,25 @@ class _Transition:
 
 class AnimationCoordinator(QObject):
     preference_updated = Signal()
-    HOVER = 120
-    PRESS = 80
+    HOVER = DURATIONS.hover_enter
+    PRESS = DURATIONS.press_in
     PAGE = 160
     SIDEBAR = 180
-    SELECTION = 160
-    TOAST_ENTER = 180
-    TOAST_EXIT = 140
+    SELECTION = DURATIONS.selection
+    TOAST_ENTER = DURATIONS.toast_enter
+    TOAST_EXIT = DURATIONS.toast_exit
     MODAL = 180
     PALETTE = 140
     OVERLAY_ENTER = 140
     OVERLAY_EXIT = 110
-    SWITCH = 150
+    SWITCH = DURATIONS.toggle
     RIPPLE = 240
 
     def __init__(self, application: QApplication) -> None:
         super().__init__(application)
         self._application = application
         self._running: dict[int, dict[str, _Transition]] = {}
+        self._animations: dict[int, dict[str, QVariantAnimation]] = {}
         self._observed: set[int] = set()
         self._system_motion = self._system_allows_motion()
         application.applicationStateChanged.connect(self._refresh_system_preference)
@@ -126,6 +367,7 @@ class AnimationCoordinator(QObject):
 
     def _forget(self, key: int) -> None:
         self._running.pop(key, None)
+        self._animations.pop(key, None)
         self._observed.discard(key)
 
     def _take(self, key: int, channel: str) -> _Transition | None:
@@ -142,7 +384,6 @@ class AnimationCoordinator(QObject):
         if transition is None:
             return
         transition.animation.stop()
-        transition.animation.deleteLater()
         if settle:
             transition.apply(transition.end)
         if transition.cleanup is not None:
@@ -178,7 +419,6 @@ class AnimationCoordinator(QObject):
             if retarget:
                 start = previous.animation.currentValue()
             previous.animation.stop()
-            previous.animation.deleteLater()
             if previous.cleanup is not None and cleanup is None:
                 previous.cleanup()
         if (
@@ -194,30 +434,36 @@ class AnimationCoordinator(QObject):
                 finished()
             return
         self._observe(owner)
-        animation = QVariantAnimation(owner)
+        animations = self._animations.setdefault(key, {})
+        animation = animations.get(channel)
+        if animation is None:
+            animation = animations[channel] = QVariantAnimation(owner)
+            animation.valueChanged.connect(lambda value: self._apply_frame(key, channel, value))
+            animation.finished.connect(lambda: self._finish_channel(key, channel))
         animation.setDuration(duration)
         animation.setStartValue(start)
         animation.setEndValue(end)
         animation.setEasingCurve(easing)
 
-        def done() -> None:
-            current = self._running.get(key, {}).get(channel)
-            if current is None or current.animation is not animation:
-                return
-            self._take(key, channel)
-            animation.deleteLater()
-            if cleanup is not None:
-                cleanup()
-            if finished is not None:
-                finished()
-
         self._running.setdefault(key, {})[channel] = _Transition(
             animation, end, callback, cleanup, finished
         )
-        animation.valueChanged.connect(callback)
-        animation.finished.connect(done)
         callback(start)
         animation.start()
+
+    def _apply_frame(self, key: int, channel: str, value: Any) -> None:
+        transition = self._running.get(key, {}).get(channel)
+        if transition is not None:
+            transition.apply(value)
+
+    def _finish_channel(self, key: int, channel: str) -> None:
+        transition = self._take(key, channel)
+        if transition is not None:
+            transition.apply(transition.end)
+            if transition.cleanup is not None:
+                transition.cleanup()
+            if transition.finished is not None:
+                transition.finished()
 
     def animate_color(
         self,

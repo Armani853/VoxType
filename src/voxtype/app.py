@@ -119,6 +119,7 @@ from voxtype.ui.messages import failure_message
 from voxtype.ui.models import AppStatus, UIState
 from voxtype.ui.motion import AnimationCoordinator, MotionPreference
 from voxtype.ui.obsidian import ModelDownloadDialog
+from voxtype.ui.presentation import DictationPresentationResolver
 from voxtype.vad.segmenter import SegmentationSettings, StreamingSegmenter
 from voxtype.vad.silero import SileroVAD
 from voxtype.version import __version__, version_info
@@ -517,6 +518,9 @@ class DesktopApplication:
         self.main.shell.about_requested.connect(self.show_diagnostics)
         self.main.shell.palette_requested.connect(self.show_command_palette)
         self.main.copy_result_requested.connect(self._copy_dashboard_result)
+        self.main.save_result_requested.connect(self._save_dashboard_result)
+        self.main.audio_settings_requested.connect(self._open_audio_settings)
+        self.main.overlay_requested.connect(self._restore_dictation_overlay)
         self.signals.dashboard_copied.connect(
             lambda copied: self._notify_desktop(
                 "copy-transcript",
@@ -556,6 +560,7 @@ class DesktopApplication:
         )
         self.tray.open_window_requested.connect(self._show_main)
         self.tray.open_overlay_requested.connect(self._restore_dictation_overlay)
+        self.tray.open_buffer_requested.connect(self._open_dictation_buffer)
         self.tray.settings_requested.connect(self.show_settings)
         self.tray.quit_requested.connect(self.quit)
         self.signals.model_progress.connect(self._on_model_progress)
@@ -652,6 +657,7 @@ class DesktopApplication:
                     str(self.runtime.data_directory / "overlay.ini"), QSettings.Format.IniFormat
                 )
             overlay = DictationOverlay(None, settings=settings)
+            overlay.set_locale(self.runtime.settings.general.ui_language)
             overlay.set_show_provisional(self.runtime.settings.dictation.show_live_provisional)
             self._overlay = overlay
             overlay.pause_requested.connect(
@@ -668,11 +674,7 @@ class DesktopApplication:
                     "voxtype-copy-result", self.controller.copy_full_transcript
                 )
             )
-            overlay.insert_requested.connect(
-                lambda: self._run_background(
-                    "voxtype-retry-insertion", self.controller.retry_completed_insertion
-                )
-            )
+            overlay.insert_requested.connect(self._insert_overlay_result)
             overlay.close_result_requested.connect(self._dismiss_result)
             overlay.hide_requested.connect(self._dismiss_dictation_overlay)
             overlay.close_overlay_requested.connect(self._close_dictation_overlay)
@@ -907,7 +909,7 @@ class DesktopApplication:
         snapshot = self.controller.snapshot(include_live_text=False)
         overlay.update_snapshot(snapshot)
         if snapshot.state in {"IDLE", "COMPLETED"} and overlay.is_compact():
-            overlay.set_mode("standard", persist=False)
+            overlay.set_mode("expanded", persist=False)
         self._poll()
 
     def _update_views_if_changed(self, snapshot: ControllerSnapshot) -> None:
@@ -942,6 +944,9 @@ class DesktopApplication:
         # Rewriting every Qt property also repaints the overlay and tray.
         if snapshot == self._last_rendered_snapshot:
             return
+        presentation = DictationPresentationResolver.resolve(
+            snapshot, self.runtime.settings.general.ui_language
+        )
         self._observe_practice(snapshot)
         self._observe_scratchpad(snapshot)
         if self._settings_window is not None and self._settings_window.isVisible():
@@ -951,10 +956,10 @@ class DesktopApplication:
                 snapshot.audio_quality, snapshot.microphone_name
             )
         if self.main.isVisible():
-            self.main.update_snapshot(snapshot)
-        self.tray.update_snapshot(snapshot)
+            self.main.update_snapshot(snapshot, presentation)
+        self.tray.update_snapshot(snapshot, presentation)
         if self._overlay is not None:
-            self._overlay.update_snapshot(snapshot)
+            self._overlay.update_snapshot(snapshot, presentation)
         self._last_rendered_snapshot = snapshot
 
     def _toggle_interactive_dictation(self) -> None:
@@ -1128,16 +1133,13 @@ class DesktopApplication:
         else:
             if self._overlay is not None:
                 self._overlay.hide()
-        if snapshot.state != self._last_state and snapshot.state == "ERROR_RECOVERABLE":
+        if (
+            snapshot.state != self._last_state
+            and snapshot.state == "ERROR_RECOVERABLE"
+            and not self.main.isVisible()
+        ):
             message = snapshot.error_message or snapshot.status_message
-            if self.main.isVisible():
-                self.main.shell.notifications.notify(
-                    "dictation-error",
-                    "Диктовка требует внимания",
-                    "error",
-                    details=message,
-                )
-            else:
+            if message:
                 self.tray.show_message("VoxType", message, critical=True)
         if (
             snapshot.state != self._last_state
@@ -1225,7 +1227,9 @@ class DesktopApplication:
                     and self.runtime.device.endpoint_id is not None
                     and event.endpoint_id.casefold() == self.runtime.device.endpoint_id.casefold()
                 ):
-                    self.controller.set_recording_availability(microphone=False)
+                    self.controller.set_recording_availability(
+                        microphone=False, microphone_failure="microphone_disconnected"
+                    )
                     self.controller.interrupt_dictation()
                 self._request_device_recovery()
             return
@@ -1270,11 +1274,12 @@ class DesktopApplication:
         if delay is None:
             self.controller.set_system_unavailable(False)
             self.controller.set_recording_availability(microphone=False)
-            self._notify_desktop(
-                "device-recovery",
-                "Микрофон недоступен. Подключите его и нажмите «Повторить».",
-                "warning",
-            )
+            if not self.main.isVisible():
+                self._notify_desktop(
+                    "device-recovery",
+                    "Микрофон недоступен. Подключите его и нажмите «Повторить».",
+                    "warning",
+                )
             self._poll()
         else:
             self._recovery_timer.start(delay)
@@ -1464,11 +1469,14 @@ class DesktopApplication:
 
         QTimer.singleShot(3000, self.main, deliver)
 
-    def _insert_dashboard_result(self) -> None:
+    def _insert_overlay_result(self) -> None:
+        self._insert_dashboard_result(self.controller.snapshot().full_transcript)
+
+    def _insert_dashboard_result(self, text: str | None = None) -> None:
         if self._dashboard_delivery_pending or self._closing:
             return
         state = self.controller.snapshot()
-        text = self.main.result_text()
+        text = self.main.result_text() if text is None else text
         if not text.strip() or not self._confirm_multiline_delivery(text):
             return
         if self.controller.injection_service.pending_fragments and (text != state.full_transcript):
@@ -1523,6 +1531,31 @@ class DesktopApplication:
                 self.controller.injection_service.copy_text_to_clipboard(text)
             ),
         )
+
+    def _save_dashboard_result(self) -> None:
+        text = self.main.result_text()
+        if not text.strip():
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self.main, "Сохранить текст диктовки", "VoxType.txt", "Текст UTF-8 (*.txt)"
+        )
+        if not path:
+            return
+        data = text.encode("utf-8")
+        file = QSaveFile(path)
+        if not file.open(QIODevice.OpenModeFlag.WriteOnly) or file.write(data) != len(data):
+            self._notify_desktop("save-transcript", "Не удалось сохранить текст", "error")
+            return
+        saved = file.commit()
+        self._notify_desktop(
+            "save-transcript",
+            "Текст сохранён" if saved else "Не удалось сохранить текст",
+            "success" if saved else "error",
+        )
+
+    def _open_audio_settings(self) -> None:
+        self.show_settings()
+        self.settings_window.open_audio()
 
     def _clear_dashboard_result(self) -> None:
         if self.controller.clear_last_result():
@@ -2461,6 +2494,9 @@ class DesktopApplication:
         self._update_idle_model_timer(self.controller.resource_phase)
         if language_changed:
             self.main.set_interface_language(updated.general.ui_language)
+            if self._overlay is not None:
+                self._overlay.set_locale(updated.general.ui_language)
+            self._last_rendered_snapshot = None
         if updated.dictation.mode != previous.dictation.mode or updated.hotkeys != previous.hotkeys:
             self._update_mode_indicator()
         if theme_changed:

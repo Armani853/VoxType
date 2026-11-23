@@ -110,6 +110,32 @@ LIGHT = dict(
     danger="#D34259",
 )
 
+# Interaction surfaces supplement the existing static Obsidian palette.
+DARK.update(
+    motion_hover="#1C2030",
+    motion_pressed="#252A40",
+    motion_selected="#252B46",
+    motion_border="#2B3040",
+    motion_border_hover="#434D70",
+    motion_focus="#818CF8",
+    motion_accent_hover="#929CFF",
+    motion_accent_pressed="#707BEB",
+    motion_danger_hover="#FA8490",
+    motion_danger_fill="#3B2531",
+)
+LIGHT.update(
+    motion_hover=LIGHT["surface_hover"],
+    motion_pressed=LIGHT["surface_raised"],
+    motion_selected=LIGHT["accent_soft"],
+    motion_border=LIGHT["border"],
+    motion_border_hover="#8991BC",
+    motion_focus=LIGHT["accent"],
+    motion_accent_hover=LIGHT["accent_hover"],
+    motion_accent_pressed=LIGHT["accent_pressed"],
+    motion_danger_hover="#A32940",
+    motion_danger_fill="#FFEBEF",
+)
+
 
 def _semantic(tokens: dict[str, str], *, dark: bool) -> SemanticPalette:
     t = tokens
@@ -188,6 +214,7 @@ def state_color(state: str, mode: ThemeMode | str | None = None) -> str:
     return {
         "neutral": colors.text_tertiary,
         "primary": colors.primary,
+        "recording": colors.error,
         "success": colors.success,
         "warning": colors.warning,
         "error": colors.error,
@@ -262,7 +289,7 @@ def stylesheet(mode: ThemeMode | str = ThemeMode.LIGHT) -> str:
         background: {colors.border};
         border-color: {colors.border_strong};
     }}
-    QPushButton:focus {{ border: 2px solid {colors.focus_ring}; }}
+    QPushButton:focus {{ border-color: {colors.focus_ring}; }}
     QPushButton:disabled {{
         color: {colors.disabled_text};
         background: {colors.disabled_surface};
@@ -343,7 +370,7 @@ def stylesheet(mode: ThemeMode | str = ThemeMode.LIGHT) -> str:
     }}
     QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus, QComboBox:focus,
     QSpinBox:focus, QDoubleSpinBox:focus, QKeySequenceEdit:focus {{
-        border: 2px solid {colors.focus_ring};
+        border-color: {colors.focus_ring};
     }}
     QLineEdit:disabled, QTextEdit:disabled, QPlainTextEdit:disabled,
     QComboBox:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled,
@@ -368,6 +395,13 @@ def stylesheet(mode: ThemeMode | str = ThemeMode.LIGHT) -> str:
     QComboBox QAbstractItemView::item:hover {{ background: {colors.surface_subtle}; }}
     QComboBox QAbstractItemView::item:selected {{ background: {colors.primary_subtle}; color: {colors.text_primary}; }}
     QCheckBox, QRadioButton {{ spacing: 8px; }}
+    QCheckBox:disabled, QRadioButton:disabled {{ color: {colors.disabled_text}; }}
+    QRadioButton::indicator {{ width: 14px; height: 14px; border-radius: 7px;
+        border: 1px solid {tokens["motion_border"]}; background: {colors.surface}; }}
+    QRadioButton::indicator:hover {{ border-color: {tokens["motion_border_hover"]}; }}
+    QRadioButton::indicator:checked {{ border-color: {colors.primary}; background: {colors.primary}; }}
+    QRadioButton::indicator:disabled {{ border-color: {colors.border}; background: {colors.disabled_surface}; }}
+    QRadioButton::indicator:checked:disabled {{ background: {colors.disabled_text}; }}
     QCheckBox:focus, QRadioButton:focus {{
         color: {colors.primary};
     }}
@@ -424,12 +458,14 @@ def stylesheet(mode: ThemeMode | str = ThemeMode.LIGHT) -> str:
         background: transparent;
         border-bottom: 2px solid transparent;
     }}
-    QTabBar::tab:hover {{ color: {colors.text_primary}; }}
+    QTabBar::tab:hover {{ color: {colors.text_primary}; background: {tokens["motion_hover"]}; }}
     QTabBar::tab:selected {{
         color: {colors.primary};
         border-bottom-color: {colors.primary};
-        font-weight: 600;
+        background: {tokens["motion_selected"]};
     }}
+    QTabBar[animatedIndicator="true"]::tab:selected {{ border-bottom-color: transparent; }}
+    QTabBar[animatedIndicator="true"]::tab:hover:!selected {{ background: transparent; }}
     QSplitter::handle {{ background: {colors.border}; }}
     QScrollArea {{ border: none; background: transparent; }}
     QScrollArea > QWidget > QWidget {{ background: transparent; }}
@@ -459,9 +495,11 @@ def stylesheet(mode: ThemeMode | str = ThemeMode.LIGHT) -> str:
     QPushButton[voiceControl="true"] {{
         min-height: 0; padding: 0; border-radius: 36px;
     }}
-    QPushButton[voiceControl="true"]:focus {{ border: 2px solid {tokens["text_primary"]}; }}
-    QLineEdit[animatedFocus="true"]:enabled,
-    QLineEdit[animatedFocus="true"]:enabled:focus {{ border: 1px solid transparent; }}
+    QPushButton[voiceControl="true"]:focus {{ border-color: {tokens["text_primary"]}; }}
+    QLineEdit[animatedFocus="true"]:enabled, QLineEdit[animatedFocus="true"]:enabled:focus,
+    QComboBox[animatedFocus="true"]:enabled, QComboBox[animatedFocus="true"]:enabled:focus
+    {{ border: 1px solid transparent; }}
+    QComboBox[animatedFocus="true"]::down-arrow {{ image: none; }}
     QToolTip {{
         color: {colors.text_primary};
         background: {colors.surface};
@@ -472,9 +510,25 @@ def stylesheet(mode: ThemeMode | str = ThemeMode.LIGHT) -> str:
 
 
 @lru_cache(maxsize=2)
-def overlay_stylesheet(translucent: bool = False) -> str:
-    colors = OVERLAY_PALETTE
-    surface = "rgba(25, 27, 35, 245)" if translucent else colors["background"]
+def overlay_stylesheet(translucent: bool = False, mode: ThemeMode = ThemeMode.DARK) -> str:
+    palette = DARK if mode is ThemeMode.DARK else LIGHT
+    colors = {
+        **OVERLAY_PALETTE,
+        "background": palette["surface"],
+        "surface": palette["surface_hover"],
+        "surface_hover": palette["surface_raised"],
+        "border": palette["border"],
+        "text_primary": palette["text_primary"],
+        "text_secondary": palette["text_secondary"],
+        "text_tertiary": palette["text_secondary"],
+        "primary": palette["accent"],
+        "primary_hover": palette["accent_hover"],
+        "primary_subtle": palette["accent_soft"],
+        "error": palette["danger"],
+        "error_hover": palette["motion_danger_hover"],
+    }
+    rgb = tuple(int(palette["surface"][i : i + 2], 16) for i in (1, 3, 5))
+    surface = f"rgba({rgb[0]}, {rgb[1]}, {rgb[2]}, 245)" if translucent else colors["background"]
     return f"""
     QFrame#overlayPanel {{
         background: {surface};
@@ -493,7 +547,7 @@ def overlay_stylesheet(translucent: bool = False) -> str:
         font-size: {TYPOGRAPHY.caption_pt}pt;
     }}
     QLabel[overlayLanguage="true"] {{
-        color: #C7C9FF;
+        color: {colors["text_primary"]};
         background: {colors["primary_subtle"]};
         border-radius: 6px;
         font-weight: 700;
@@ -504,8 +558,6 @@ def overlay_stylesheet(translucent: bool = False) -> str:
         font-weight: 600;
     }}
     QPushButton[overlayIcon="true"] {{ padding: 0; min-height: 0; border-radius: 6px; }}
-    QPushButton[overlayIcon="true"]:hover {{ background: {colors["surface_hover"]}; }}
-    QPushButton[overlayIcon="true"]:pressed {{ background: {colors["primary_subtle"]}; }}
     QPushButton {{
         color: {colors["text_primary"]};
         background: {colors["surface"]};
@@ -549,8 +601,30 @@ def overlay_stylesheet(translucent: bool = False) -> str:
 if PYSIDE6_AVAILABLE:
     from PySide6.QtCore import QObject, Qt, Signal
     from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPalette, QPen, QPixmap
+    from PySide6.QtWidgets import (
+        QProxyStyle,
+        QStyle,
+        QStyleFactory,
+        QStyleHintReturn,
+        QStyleOption,
+        QWidget,
+    )
+
+    from .motion import DURATIONS
 
     _APP_ICON_CACHE: dict[tuple[int, str], QIcon] = {}
+
+    class _ObsidianStyle(QProxyStyle):
+        def styleHint(
+            self,
+            hint: QStyle.StyleHint,
+            option: QStyleOption | None = None,
+            widget: QWidget | None = None,
+            returnData: QStyleHintReturn | None = None,
+        ) -> int:
+            if hint == QStyle.StyleHint.SH_ToolTip_WakeUpDelay:
+                return DURATIONS.tooltip_delay
+            return super().styleHint(hint, option, widget, returnData)
 
     class ThemeManager(QObject):
         theme_changed = Signal(object)
@@ -594,6 +668,10 @@ if PYSIDE6_AVAILABLE:
             )
             if self._applied and resolved is self.current_theme:
                 return resolved
+            if not self._applied:
+                style = QStyleFactory.create(self.app.style().objectName())
+                if style is not None:
+                    self.app.setStyle(_ObsidianStyle(style))
             self._applied = True
             self.current_theme = resolved
             self.app.setProperty("voxtypeTheme", resolved.value)

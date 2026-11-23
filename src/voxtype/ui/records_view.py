@@ -6,17 +6,20 @@ from collections.abc import Sequence
 
 from PySide6.QtCore import (
     QAbstractTableModel,
+    QEvent,
     QModelIndex,
     QPersistentModelIndex,
     QRect,
     QSortFilterProxyModel,
     Qt,
 )
-from PySide6.QtGui import QBrush, QColor, QPainter, QPalette
+from PySide6.QtGui import QBrush, QColor, QContextMenuEvent, QPainter, QPalette
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QHeaderView,
+    QMenu,
+    QPushButton,
     QStyle,
     QStyledItemDelegate,
     QStyleOptionViewItem,
@@ -24,7 +27,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .motion import AnimationCoordinator
+from .motion import DURATIONS, AnimationCoordinator, blend
 from .theme import theme_manager
 
 
@@ -108,25 +111,35 @@ class _SelectionDelegate(QStyledItemDelegate):
         index: QModelIndex | QPersistentModelIndex,
     ) -> None:
         strength = self.view.highlight_strength(index)
-        if strength is None:
+        selected = bool(option.state & QStyle.StateFlag.State_Selected)
+        hovered = self.view.is_hovered(index)
+        if strength is None and not (selected or hovered):
             super().paint(painter, option, index)
             return
         tinted = QStyleOptionViewItem(option)
         self.initStyleOption(tinted, index)
-        tinted.state &= ~QStyle.StateFlag.State_Selected
+        tinted.state &= ~(QStyle.StateFlag.State_Selected | QStyle.StateFlag.State_MouseOver)
         theme = theme_manager(QApplication.instance())
-        base = tinted.palette.color(QPalette.ColorRole.Base)
-        accent = QColor(theme.get_token("accent_soft"))
-        tinted.backgroundBrush = QBrush(
-            QColor.fromRgbF(
-                base.redF() + (accent.redF() - base.redF()) * strength,
-                base.greenF() + (accent.greenF() - base.greenF()) * strength,
-                base.blueF() + (accent.blueF() - base.blueF()) * strength,
-            )
+        base = (
+            QColor(theme.get_token("motion_hover"))
+            if hovered
+            else tinted.palette.color(QPalette.ColorRole.Base)
         )
+        amount = strength if strength is not None else float(selected)
+        accent = QColor(theme.get_token("motion_selected"))
+        tinted.backgroundBrush = QBrush(blend(base, accent, amount))
         self.view.style().drawControl(
             QStyle.ControlElement.CE_ItemViewItem, tinted, painter, self.view
         )
+        if amount and index.column() == self.view.horizontalHeader().logicalIndexAt(0):
+            mark = QColor(theme.get_token("motion_focus"))
+            mark.setAlphaF(amount)
+            painter.fillRect(
+                QRect(
+                    option.rect.left(), option.rect.top() + 4, 2, max(0, option.rect.height() - 8)
+                ),
+                mark,
+            )
 
 
 class RecordsView(QTableView):
@@ -148,16 +161,56 @@ class RecordsView(QTableView):
         self.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self._previous_row = QPersistentModelIndex()
         self._selected_row = QPersistentModelIndex()
+        self._hovered_row = QPersistentModelIndex()
         self._selection_progress = 1.0
+        self._selected_start = 0.0
+        self._previous_start = 1.0
+        self._row_actions: tuple[QPushButton, ...] = ()
         self.setItemDelegate(_SelectionDelegate(self))
         self.selectionModel().currentRowChanged.connect(self._selection_changed)
+        self.setMouseTracking(True)
+        self.entered.connect(self._hover_row)
+        self.viewportEntered.connect(lambda: self._hover_row(QModelIndex()))
 
     def selected_key(self) -> str:
         index = self.currentIndex()
         return str(index.data(Qt.ItemDataRole.UserRole) or "") if index.isValid() else ""
 
+    def set_row_actions(self, *buttons: QPushButton) -> None:
+        self._row_actions = buttons
+
+    def contextMenuEvent(self, event: QContextMenuEvent) -> None:
+        if not self._row_actions:
+            super().contextMenuEvent(event)
+            return
+        index = (
+            self.currentIndex()
+            if event.reason() is QContextMenuEvent.Reason.Keyboard
+            else self.indexAt(event.pos())
+        )
+        if not index.isValid():
+            return
+        self.setCurrentIndex(index)
+        menu = QMenu(self)
+        for button in self._row_actions:
+            if button.isVisible():
+                action = menu.addAction(button.icon(), button.text(), button.click)
+                action.setEnabled(button.isEnabled())
+        if not menu.isEmpty():
+            position = (
+                self.viewport().mapToGlobal(self.visualRect(index).bottomLeft())
+                if event.reason() is QContextMenuEvent.Reason.Keyboard
+                else event.globalPos()
+            )
+            menu.exec(position)
+            event.accept()
+        menu.deleteLater()
+
     def _selection_changed(self, current: QModelIndex, previous: QModelIndex) -> None:
-        # Clear a previous retreating row if another selection interrupts the transition.
+        before = self.highlight_strength(previous)
+        arriving = self.highlight_strength(current)
+        self._previous_start = before if before is not None else 1.0
+        self._selected_start = arriving if arriving is not None else 0.0
         self._invalidate_row(self._previous_row)
         self._previous_row = QPersistentModelIndex(previous)
         self._selected_row = QPersistentModelIndex(current)
@@ -167,7 +220,7 @@ class RecordsView(QTableView):
             0.0,
             1.0,
             self._set_selection_progress,
-            motion.HOVER,
+            DURATIONS.selection,
             channel="row-selection",
             retarget=False,
         )
@@ -180,19 +233,36 @@ class RecordsView(QTableView):
             self._previous_row = QPersistentModelIndex()
 
     def _invalidate_row(self, index: QPersistentModelIndex) -> None:
-        if index.isValid():
+        if index.isValid() and self.isVisible():
             row = index.row()
-            self.viewport().update(
-                QRect(
-                    0, self.rowViewportPosition(row), self.viewport().width(), self.rowHeight(row)
-                )
+            region = QRect(
+                0, self.rowViewportPosition(row), self.viewport().width(), self.rowHeight(row)
             )
+            viewport = self.viewport()
+            if viewport.rect().intersects(region):
+                viewport.update(region)
+
+    def _hover_row(self, index: QModelIndex) -> None:
+        if self.is_hovered(index):
+            return
+        previous = self._hovered_row
+        self._hovered_row = QPersistentModelIndex(index)
+        self._invalidate_row(previous)
+        self._invalidate_row(self._hovered_row)
+
+    def viewportEvent(self, event: QEvent) -> bool:
+        if event.type() in {QEvent.Type.Hide, QEvent.Type.Leave} and hasattr(self, "_hovered_row"):
+            self._hover_row(QModelIndex())
+        return super().viewportEvent(event)
+
+    def is_hovered(self, index: QModelIndex | QPersistentModelIndex) -> bool:
+        return self._hovered_row.isValid() and index.row() == self._hovered_row.row()
 
     def highlight_strength(self, index: QModelIndex | QPersistentModelIndex) -> float | None:
         if self._selection_progress >= 1:
             return None
         if self._selected_row.isValid() and index.row() == self._selected_row.row():
-            return self._selection_progress
+            return self._selected_start + (1.0 - self._selected_start) * self._selection_progress
         if self._previous_row.isValid() and index.row() == self._previous_row.row():
-            return 1.0 - self._selection_progress
+            return self._previous_start * (1.0 - self._selection_progress)
         return None

@@ -7,7 +7,6 @@ from collections.abc import Callable
 from PySide6.QtCore import QEvent, QObject, Qt, Signal
 from PySide6.QtGui import QKeyEvent, QResizeEvent, QShowEvent
 from PySide6.QtWidgets import (
-    QApplication,
     QButtonGroup,
     QDialog,
     QFrame,
@@ -22,9 +21,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .motion import AnimationCoordinator
+from .motion import DURATIONS, AnimationCoordinator
 from .obsidian import (
-    IconProvider,
     NotificationCenter,
     VoxButton,
     VoxEmptyState,
@@ -34,7 +32,6 @@ from .obsidian import (
     VoxSeparator,
     VoxStatusBadge,
 )
-from .theme import theme_manager
 
 PAGES = {
     "home": ("Главная", "Home", "Локальная голосовая диктовка", "Local voice dictation", "home"),
@@ -120,7 +117,7 @@ class DesktopShell(QWidget):
         self._selection_target: QPushButton | None = None
         self.pages: dict[str, QWidget] = {}
         self._context_actions: dict[str, tuple[str, Callable[[], None]]] = {}
-        self.buttons: dict[str, QPushButton] = {}
+        self.buttons: dict[str, VoxButton] = {}
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
@@ -149,6 +146,7 @@ class DesktopShell(QWidget):
             button.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
             button.setCheckable(True)
             button.setProperty("navRow", True)
+            button.set_motion_icon(PAGES[key][4], 18)
             button.clicked.connect(lambda _checked=False, page=key: self.page_requested.emit(page))
             group.addButton(button)
             self.buttons[key] = button
@@ -204,7 +202,6 @@ class DesktopShell(QWidget):
         column.addWidget(self.stack, 1)
         layout.addWidget(body, 1)
         self.notifications = NotificationCenter(self)
-        theme_manager(QApplication.instance()).theme_changed.connect(self._refresh_icons)
         self._apply_density(True)
         self._labels()
 
@@ -281,8 +278,8 @@ class DesktopShell(QWidget):
     def _labels(self) -> None:
         locale = int(self._locale == "en")
         metadata = PAGES[self.current]
-        self.title.setText(metadata[locale])
-        self.subtitle.setText(metadata[2 + locale])
+        self.title.setText("VoxType" if self.current == "home" else metadata[locale])
+        self.subtitle.setText("" if self.current == "home" else metadata[2 + locale])
         self.privacy.setText("On-device processing" if locale else "Обработка на устройстве")
         action = self._context_actions.get(self.current)
         self.context_action.setVisible(action is not None and self.width() >= 800)
@@ -315,14 +312,10 @@ class DesktopShell(QWidget):
                 self._selection.y(),
                 target,
                 lambda y: self._selection.move(9, int(y)),
-                coordinator.SELECTION,
+                DURATIONS.sidebar_selection,
                 channel="selection",
             )
         self._selection.raise_()
-
-    def _refresh_icons(self, _theme: object = None) -> None:
-        for key, button in self.buttons.items():
-            button.setIcon(IconProvider.icon(PAGES[key][4], 18, button.devicePixelRatioF()))
 
     def toggle_navigation(self) -> None:
         self._manual_collapse = not bool(self._sidebar_destination)

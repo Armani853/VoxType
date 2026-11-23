@@ -15,6 +15,12 @@ from .models import (
     snapshot_from,
     text_preview,
 )
+from .presentation import (
+    CaptureState,
+    DictationPresentation,
+    DictationPresentationResolver,
+    provisional_tail,
+)
 
 if PYSIDE6_AVAILABLE:
     from PySide6.QtCore import QPoint, QSettings, Qt, Signal
@@ -25,31 +31,14 @@ if PYSIDE6_AVAILABLE:
         QHBoxLayout,
         QLabel,
         QPlainTextEdit,
-        QPushButton,
         QVBoxLayout,
         QWidget,
     )
 
     from .motion import AnimationCoordinator
-    from .obsidian import AnimatedStatusDot, IconProvider, WaveformWidget
-    from .theme import OVERLAY_PALETTE, create_app_icon, overlay_stylesheet
-    from .widgets import ElidedLabel, rms_to_meter
-
-    _OVERLAY_STATES: dict[AppStatus, tuple[str, str]] = {
-        AppStatus.STARTING: ("Запуск", "text_tertiary"),
-        AppStatus.MODEL_LOADING: ("Модель", "primary"),
-        AppStatus.IDLE: ("Готово", "success"),
-        AppStatus.LISTENING: ("Слушаю", "primary"),
-        AppStatus.SPEECH_DETECTED: ("Речь", "success"),
-        AppStatus.TRANSCRIBING: ("Обработка", "primary"),
-        AppStatus.PAUSED_TARGET_LOST: ("Цель неактивна", "warning"),
-        AppStatus.FINISHING: ("Завершаю", "primary"),
-        AppStatus.COMPLETED: ("Готово", "success"),
-        AppStatus.ERROR_RECOVERABLE: ("Внимание", "warning"),
-        AppStatus.ERROR_FATAL: ("Ошибка", "error"),
-        AppStatus.SHUTTING_DOWN: ("Завершение", "text_tertiary"),
-        AppStatus.PAUSED: ("Пауза", "warning"),
-    }
+    from .obsidian import AnimatedStatusDot, VoxButton, VoxIconButton
+    from .theme import create_app_icon, overlay_stylesheet, state_color, theme_manager
+    from .widgets import ElidedLabel
 
     class DictationOverlay(QWidget):
         pause_requested = Signal()
@@ -98,110 +87,109 @@ if PYSIDE6_AVAILABLE:
             )
             self._mode = ""
             self._preview = ""
-            self._preview_changed = ("", -1)
+            self._preview_changed: tuple[str, int] | None = None
             self._hypothesis = ""
+            self._locale = "ru"
+            self._last_snapshot: object = self._state
             self._show_provisional = True
             self._controller_connections: list[tuple[Any, Callable[..., Any]]] = []
             self._build_ui()
+            theme_manager(QApplication.instance()).theme_changed.connect(self._apply_theme)
+            self._apply_theme()
             self._connect_ui()
             self.set_mode(self._preferred_mode, persist=False)
             self._restore_position()
             if controller is not None:
                 self.bind_controller(controller)
 
+        def _apply_theme(self, _mode: object = None) -> None:
+            mode = theme_manager(QApplication.instance()).current_theme
+            self.panel.setStyleSheet(overlay_stylesheet(self._composited, mode))
+            self.update_snapshot(self._last_snapshot)
+
+        def set_locale(self, locale: str) -> None:
+            self._locale = locale
+
         def _build_ui(self) -> None:
             outer = QVBoxLayout(self)
             outer.setContentsMargins(0, 0, 0, 0)
             self.panel = QFrame(self)
             self.panel.setObjectName("overlayPanel")
-            self.panel.setStyleSheet(overlay_stylesheet(self._composited))
             content = QVBoxLayout(self.panel)
-            content.setContentsMargins(10, 5, 10, 5)
-            content.setSpacing(2)
+            content.setContentsMargins(10, 7, 10, 7)
+            content.setSpacing(5)
             line = QHBoxLayout()
-            line.setSpacing(5)
+            line.setSpacing(4)
             self.status_dot = AnimatedStatusDot(self.panel)
             self.status_label = ElidedLabel("Готово", self.panel)
-            self.status_label.setProperty("overlayStatus", True)
             self.status_label.setObjectName("overlayStatusLabel")
-            self.processing_label = ElidedLabel("", self.panel)
-            self.processing_label.setProperty("overlayCaption", True)
-            self.language_label = QLabel("RU", self.panel)
-            self.language_label.setObjectName("overlayLanguageLabel")
-            self.timer_label = QLabel("", self.panel)
+            self.status_label.setProperty("overlayStatus", True)
+            self.timer_label = QLabel("00:00:00", self.panel)
             self.timer_label.setObjectName("overlayTimerLabel")
-            self.mini_wave = WaveformWidget(self.panel, bars=13, height=24)
-            self.stop_button = self._overlay_button("stop", "Остановить")
+            self.language_label = QLabel("RU", self.panel)
+            self.language_label.setProperty("overlayLanguage", True)
+            self.stop_button = self._overlay_button("stop", "Остановить запись")
             self.expand_button = self._overlay_button("expand", "Развернуть буфер")
+            self.expand_button.setProperty("overlayExpand", True)
             self.minimize_button = self._overlay_button("minimize", "Свернуть в трей")
             self.hide_button = self._overlay_button("close", "Скрыть окно")
+            self.hide_button.setProperty("danger", True)
             for widget in (
                 self.status_dot,
                 self.status_label,
-                self.mini_wave,
-                self.language_label,
                 self.timer_label,
+                self.language_label,
                 self.stop_button,
-                self.minimize_button,
                 self.expand_button,
+                self.minimize_button,
                 self.hide_button,
             ):
                 line.addWidget(widget, 1 if widget is self.status_label else 0)
             content.addLayout(line)
-            self.audio_meter = WaveformWidget(self.panel, bars=25, height=24)
-            middle = QHBoxLayout()
-            middle.setSpacing(5)
-            middle.addWidget(self.audio_meter)
-            middle.addWidget(self.processing_label, 1)
-            content.addLayout(middle)
+
             self.expanded_panel = QWidget(self.panel)
-            details = QHBoxLayout(self.expanded_panel)
+            details = QVBoxLayout(self.expanded_panel)
             details.setContentsMargins(0, 0, 0, 0)
-            details.setSpacing(2)
-            self.provisional_label = ElidedLabel("", self.expanded_panel)
-            self.provisional_label.setObjectName("overlayProvisionalLabel")
-            details.addWidget(self.provisional_label, 1)
+            details.setSpacing(3)
             self.result_text = QPlainTextEdit(self.expanded_panel)
             self.result_text.setObjectName("overlayResultText")
             self.result_text.setReadOnly(True)
             self.result_text.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-            self.result_text.hide()
-            self.queue_label = QLabel(self.expanded_panel)
-            self.queue_label.hide()
-            self.target_label = ElidedLabel("", self.expanded_panel)
-            self.target_label.hide()
-            self.pause_button = self._overlay_button("stop", "Пауза / продолжить")
-            details.addWidget(self.pause_button)
+            self.result_text.setPlaceholderText("Текст появится во время диктовки")
+            details.addWidget(self.result_text, 1)
+            self.provisional_label = ElidedLabel("", self.expanded_panel)
+            self.provisional_label.setProperty("muted", True)
+            details.addWidget(self.provisional_label)
+            self.processing_label = ElidedLabel("", self.expanded_panel)
+            self.processing_label.setProperty("overlayCaption", True)
+            details.addWidget(self.processing_label)
             self.result_buttons = QWidget(self.expanded_panel)
             actions = QHBoxLayout(self.result_buttons)
             actions.setContentsMargins(0, 0, 0, 0)
-            actions.setSpacing(2)
-            self.copy_all_button = self._overlay_button("snippets", "Копировать результат")
-            self.insert_button = self._overlay_button("check", "Повторить вставку")
+            actions.setSpacing(4)
+            self.copy_all_button = self._overlay_button("copy", "Скопировать распознанный текст")
+            self.insert_button = VoxButton("Вставить", self.result_buttons, overlay=True)
+            self.insert_button.setToolTip("Вставить сохранённый текст в выбранное окно")
+            self.insert_button.setMinimumHeight(32)
             self.open_buffer_button = self._overlay_button("files", "Открыть буфер")
+            self.pause_button = self._overlay_button("pause", "Пауза / продолжить")
             self.start_button = self._overlay_button("mic", "Начать новую диктовку")
             for button in (
                 self.copy_all_button,
                 self.insert_button,
                 self.open_buffer_button,
+                self.pause_button,
                 self.start_button,
             ):
                 actions.addWidget(button)
+            actions.addStretch()
             details.addWidget(self.result_buttons)
-            content.addWidget(self.expanded_panel)
-            content.addWidget(self.result_text, 1)
+            content.addWidget(self.expanded_panel, 1)
             outer.addWidget(self.panel)
 
-        def _overlay_button(self, icon: str, label: str) -> QPushButton:
-            button = QPushButton(self.panel)
+        def _overlay_button(self, icon: str, label: str) -> VoxIconButton:
+            button = VoxIconButton(icon, label, self.panel, overlay=True)
             button.setProperty("overlayIcon", True)
-            button.setIcon(
-                IconProvider._pixmap(icon, "dark", 16, button.devicePixelRatioF(), "#F2F3F8")
-            )
-            button.setAccessibleName(label)
-            button.setToolTip(label)
-            button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-            button.setFixedSize(24, 24)
             return button
 
         def _connect_ui(self) -> None:
@@ -249,139 +237,86 @@ if PYSIDE6_AVAILABLE:
                     continue
             self._controller_connections.clear()
 
-        def update_snapshot(self, snapshot: UIState | object) -> None:
-            state = snapshot_from(snapshot)
-            previous = self._state
-            self._state = state
-            text, color_role = _OVERLAY_STATES[state.state]
-            if state.readiness is not None and not state.state.active:
-                text = state.readiness.message
-            completed = state.state is AppStatus.COMPLETED
-            if completed and state.delivery_status == "queued_target_inactive":
-                text, color_role = "Ожидает вставки", "warning"
-            elif completed and state.delivery_status == "no_result":
-                text, color_role = "Нет результата", "warning"
-            self.status_label.setText(text)
-            self.status_dot.set_color(OVERLAY_PALETTE[color_role])
-            self.language_label.setText(state.language.value.upper())
-            self.timer_label.setText(format_duration(state.session_elapsed_s))
-            recording = state.state in {
-                AppStatus.LISTENING,
-                AppStatus.SPEECH_DETECTED,
-                AppStatus.TRANSCRIBING,
-            }
-            for meter in (self.audio_meter, self.mini_wave):
-                meter.set_active(recording)
-                if not meter.isHidden() and recording:
-                    meter.set_level(rms_to_meter(state.input_rms))
-            self.processing_label.setText(self._processing_text(state))
-            self.processing_label.setToolTip(self._processing_text(state))
-            live = getattr(snapshot, "live_transcript", None) if self._show_provisional else None
-            key = (live.session_id, live.revision) if live is not None else ("", -1)
-            if key != self._preview_changed:
-                self._preview_changed = key
-                self._hypothesis = (
-                    " ".join(
-                        (*[part.text for part in live.stable_segments], live.unstable_text)
-                    ).strip()
-                    if live is not None
-                    else ""
-                )
-            transcript = (
-                state.full_transcript
-                if completed
-                else (self._hypothesis or state.last_committed_text or state.provisional_text)
+        def update_snapshot(
+            self,
+            snapshot: UIState | object,
+            presentation: DictationPresentation | None = None,
+        ) -> None:
+            self._last_snapshot = snapshot
+            state = self._state = snapshot_from(snapshot)
+            display = presentation or DictationPresentationResolver.resolve(snapshot, self._locale)
+            recording = display.capture in {CaptureState.RECORDING, CaptureState.PAUSED}
+            active = recording or display.capture is CaptureState.STARTING
+            short_recording = "Запись" if self._locale == "ru" else "Recording"
+            self.status_label.setText(
+                short_recording if display.capture is CaptureState.RECORDING else display.primary
             )
-            preview = text_preview(transcript, 700)
+            self.status_dot.set_color(state_color(display.tone))
+            self.language_label.setText(display.language)
+            self.timer_label.setText(
+                format_duration(display.duration_seconds)[3:]
+                if display.duration_seconds < 3600
+                else format_duration(display.duration_seconds)
+            )
+            self.stop_button.setVisible(active)
+            self.stop_button.setEnabled(active)
+            self.stop_button.setProperty("danger", recording)
+            self.pause_button.setVisible(recording)
+            self.start_button.setVisible(
+                not active and display.capture is not CaptureState.STOPPING
+            )
+            readiness = state.readiness
+            self.start_button.setEnabled(readiness.can_record if readiness is not None else True)
+            self.processing_label.setText(display.delivery_label)
+            self.insert_button.setVisible(bool(getattr(snapshot, "pending_insertion", False)))
+            self.insert_button.setEnabled(not state.state.active)
+            self.copy_all_button.setEnabled(display.has_confirmed)
+
+            live = getattr(snapshot, "live_transcript", None) if self._show_provisional else None
+            key = (live.session_id, live.revision) if live is not None else None
+            if key is None:
+                self._preview_changed = None
+                self._hypothesis = ""
+            elif (
+                self._preview_changed is None
+                or key[0] != self._preview_changed[0]
+                or key[1] > self._preview_changed[1]
+            ):
+                self._preview_changed = key
+                self._hypothesis = provisional_tail(snapshot)
+            recent = getattr(snapshot, "confirmed_tail", "") or state.last_committed_text
+            preview = text_preview(recent if state.state.active else state.full_transcript, 700)
             if preview != self._preview:
                 self._preview = preview
-                self.provisional_label.setText(text_preview(preview, 160))
-                self.provisional_label.setToolTip(text_preview(preview, 420))
-                if self._mode != "mini":
-                    self.result_text.setPlainText(preview)
-            finishing = state.state is AppStatus.FINISHING
-            self.stop_button.setToolTip("Отменить обработку" if finishing else "Остановить")
-            self.stop_button.setAccessibleName(self.stop_button.toolTip())
-            self.stop_button.setVisible((state.state.active or finishing) and not completed)
-            self.pause_button.setVisible(state.state.active and not finishing)
-            self.pause_button.setToolTip(
-                "Продолжить"
-                if state.state in {AppStatus.PAUSED, AppStatus.PAUSED_TARGET_LOST}
-                else "Пауза"
-            )
-            self.result_buttons.setVisible(completed or state.state is AppStatus.IDLE)
-            self.copy_all_button.setEnabled(bool(transcript))
-            self.insert_button.setEnabled(
-                state.delivery_status in {"failed", "queued_target_inactive"}
-            )
-            if completed and previous.state is not AppStatus.COMPLETED:
-                self.set_mode("expanded", persist=False)
-            elif not completed and previous.state is AppStatus.COMPLETED:
-                self.set_mode(self._preferred_mode, persist=False)
-
-        @staticmethod
-        def _processing_text(state: UIState) -> str:
-            if state.error_message:
-                return state.error_message
-            if state.state is AppStatus.COMPLETED:
-                if state.delivery_status == "no_result":
-                    return state.status_message
-                if state.delivery_status in {"delivered", "submitted_unconfirmed"}:
-                    return "Команда вставки отправлена; проверьте целевое поле"
-                if state.delivery_status == "copied":
-                    return "Текст скопирован"
-                if state.delivery_status == "queued_target_inactive":
-                    return "Вернитесь в целевое окно"
-                if state.delivery_status in {"failed", "unknown", "copy_required"}:
-                    return "Текст сохранён"
-                return "Полный текст сохранён"
-            if state.queued_audio_seconds >= 10:
-                return "Обработка отстаёт"
-            if state.clipping_percentage > 0.1 or state.input_rms >= 0.98:
-                return "Слишком громко"
-            if state.state is AppStatus.PAUSED_TARGET_LOST:
-                return "Текст сохранён в очереди"
-            return "LOCAL"
-
-        @staticmethod
-        def _refresh_dynamic_style(widget: QWidget) -> None:
-            style = widget.style()
-            style.unpolish(widget)
-            style.polish(widget)
-            widget.update()
+                self.result_text.setPlainText(preview)
+                self.result_text.verticalScrollBar().setValue(
+                    self.result_text.verticalScrollBar().maximum()
+                )
+            self.provisional_label.setText(text_preview(self._hypothesis, 180))
+            self.provisional_label.setVisible(bool(self._hypothesis))
 
         def toggle_compact(self) -> None:
-            self.set_mode("expanded" if self._mode == "standard" else "standard")
+            self.set_compact(not self._compact)
 
         def minimize_panel(self) -> None:
-            self.set_mode("mini")
             self.hide_for_user()
 
         def set_compact(self, compact: bool, *, persist: bool = True) -> None:
-            self.set_mode("standard" if compact else "expanded", persist=persist)
+            self.set_mode("mini" if compact else "expanded", persist=persist)
 
         def set_mode(self, mode: str, *, persist: bool = True) -> None:
-            self._mode = mode
             self._compact = mode != "expanded"
-            self.mini_wave.setVisible(mode == "mini")
-            self.status_label.show()
-            self.language_label.setVisible(mode != "mini")
-            self.timer_label.setVisible(mode == "expanded")
-            self.audio_meter.setVisible(mode != "mini")
-            self.processing_label.setVisible(mode != "mini")
-            self.stop_button.setVisible(self._state.state.active)
-            self.result_buttons.setVisible(
-                self._state.state in {AppStatus.IDLE, AppStatus.COMPLETED}
-            )
-            self.pause_button.setVisible(self._state.state.active)
-            self.expanded_panel.setVisible(mode != "mini")
-            self.result_text.setVisible(mode != "mini")
-            if mode != "mini":
-                self.result_text.setPlainText(self._preview)
+            self._mode = "mini" if self._compact else "expanded"
+            expanded = not self._compact
+            label = "Свернуть буфер" if expanded else "Развернуть буфер"
+            self.expand_button.set_icon_name("restore" if expanded else "expand")
+            self.expand_button.setAccessibleName(label)
+            self.expand_button.setToolTip(label)
+            self.expanded_panel.setVisible(expanded)
             self._resize_to_screen()
             if persist:
-                self._preferred_mode = mode
-                self._settings.setValue("ui/overlayMode", mode)
+                self._preferred_mode = self._mode
+                self._settings.setValue("ui/overlayMode", self._mode)
                 self._settings.setValue("ui/overlayCompact", self._compact)
             self._restore_position()
             self.compact_changed.emit(self._compact)
@@ -390,9 +325,7 @@ if PYSIDE6_AVAILABLE:
             return self._compact
 
         def _resize_to_screen(self) -> None:
-            width, height = {"mini": (300, 64), "standard": (420, 180), "expanded": (520, 330)}[
-                self._mode
-            ]
+            width, height = (320, 56) if self._compact else (440, 174)
             screen = QApplication.screenAt(self.pos()) or QApplication.primaryScreen()
             if screen is not None:
                 area = screen.availableGeometry()

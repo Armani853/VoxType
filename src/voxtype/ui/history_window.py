@@ -17,7 +17,6 @@ if PYSIDE6_AVAILABLE:
         QLabel,
         QLineEdit,
         QMessageBox,
-        QPushButton,
         QSplitter,
         QStackedLayout,
         QTextEdit,
@@ -129,8 +128,8 @@ if PYSIDE6_AVAILABLE:
                 field.setPlaceholderText(placeholder)
                 setattr(self, attr, field)
                 details.addWidget(field)
-            self.previous_page = QPushButton("Назад", self)
-            self.next_page = QPushButton("Далее", self)
+            self.previous_page = VoxButton("Назад", self)
+            self.next_page = VoxButton("Далее", self)
             self.page_label = QLabel("1", self)
             for widget in (self.previous_page, self.page_label, self.next_page):
                 details.addWidget(widget)
@@ -180,16 +179,23 @@ if PYSIDE6_AVAILABLE:
             self.warning_label.setWordWrap(True)
             self.warning_label.setStyleSheet(f"color: {state_color('warning')};")
             actions = QHBoxLayout()
-            self.copy_button = QPushButton("Копировать", detail)
-            self.insert_button = QPushButton("Вставить снова", detail)
-            self.export_button = QPushButton("Экспорт…", detail)
-            self.recover_button = QPushButton("Восстановить", detail)
+            self.copy_button = VoxButton("Копировать", detail)
+            self.insert_button = VoxButton("Вставить снова", detail)
+            self.export_button = VoxButton("Экспорт…", detail)
+            self.recover_button = VoxButton("Восстановить", detail)
             self.recover_button.setToolTip(
                 "Повторно отправить сохранённый текст незавершённой сессии в её целевое окно"
             )
-            self.delete_button = QPushButton("Удалить", detail)
+            self.delete_button = VoxButton("Удалить", detail)
             self.delete_button.setToolTip("Безвозвратно удалить выбранную локальную запись")
             self.delete_button.setProperty("danger", True)
+            self.table.set_row_actions(
+                self.copy_button,
+                self.insert_button,
+                self.export_button,
+                self.recover_button,
+                self.delete_button,
+            )
             actions.addWidget(self.copy_button)
             actions.addWidget(self.insert_button)
             actions.addWidget(self.export_button)

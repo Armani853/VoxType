@@ -74,11 +74,14 @@ def test_settings_save_only_reconfigures_changed_services(monkeypatch, change_th
 
 def _view_app() -> DesktopApplication:
     app = object.__new__(DesktopApplication)
+    app.runtime = SimpleNamespace(settings=AppSettings())
     app._last_rendered_snapshot = None
     app._header_profile_id = None
     app._settings_window = None
     app._practice = None
     app.controller = MagicMock()
+    app.controller.profiles.default_id = "general"
+    app.controller._session_profile = SimpleNamespace(id="general", name="General")
     app.main = MagicMock()
     app.tray = MagicMock()
     app._overlay = None
@@ -91,17 +94,17 @@ def test_identical_snapshots_do_not_rewrite_all_views() -> None:
     app = _view_app()
     app._overlay = MagicMock()
 
-    app._update_views_if_changed(("IDLE", "RU", 0.0))
-    app._update_views_if_changed(("IDLE", "RU", 0.0))
-    app._update_views_if_changed(("LISTENING", "RU", 0.05))
+    idle = SimpleNamespace(state="IDLE")
+    active = SimpleNamespace(state="LISTENING", capture_open=True, session_elapsed_s=0.05)
+    app._update_views_if_changed(idle)
+    app._update_views_if_changed(idle)
+    app._update_views_if_changed(active)
 
+    expected = app.main.update_snapshot.call_args.args[1]
+    assert expected.capture.value == "recording"
     for view in (app.main, app.tray, app._overlay):
         assert view.update_snapshot.call_count == 2
-        assert view.update_snapshot.call_args_list[1].args[0] == (
-            "LISTENING",
-            "RU",
-            0.05,
-        )
+        assert view.update_snapshot.call_args.args == (active, expected)
     app.main.set_profile_name.assert_called_once()
 
 

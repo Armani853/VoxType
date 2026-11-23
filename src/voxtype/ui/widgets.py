@@ -19,9 +19,10 @@ def rms_to_meter(value: float) -> float:
 
 
 if PYSIDE6_AVAILABLE:
-    from PySide6.QtCore import Property, QRectF, QSize, Qt, Signal
+    from PySide6.QtCore import Property, QRect, QRectF, QSize, Qt, Signal
     from PySide6.QtGui import QColor, QPainter, QPen
     from PySide6.QtWidgets import (
+        QApplication,
         QButtonGroup,
         QFrame,
         QHBoxLayout,
@@ -32,7 +33,8 @@ if PYSIDE6_AVAILABLE:
         QWidget,
     )
 
-    from .theme import LIGHT_PALETTE, SPACING
+    from .motion import DURATIONS, AnimationCoordinator
+    from .theme import LIGHT_PALETTE, SPACING, theme_manager
 
     class Card(QFrame):
         def __init__(self, parent: QWidget | None = None, *, spacing: int = 10) -> None:
@@ -163,6 +165,7 @@ if PYSIDE6_AVAILABLE:
             super().__init__(parent)
             self.setProperty("segmented", True)
             self.setAccessibleName("Язык диктовки")
+            self._indicator = QRect()
             layout = QHBoxLayout(self)
             layout.setContentsMargins(3, 3, 3, 3)
             layout.setSpacing(2)
@@ -174,16 +177,61 @@ if PYSIDE6_AVAILABLE:
             layout.addWidget(self.en_button)
             self.ru_button.setChecked(True)
             self.group.buttonClicked.connect(self._emit_language)
+            self.group.buttonToggled.connect(self._update_selection)
 
         def _button(self, text: str, language: str) -> QPushButton:
-            button = QPushButton(text, self)
+            from .obsidian import VoxButton
+
+            button = VoxButton(text, self, variant="segment")
+            button.setMinimumHeight(30)
             button.setCheckable(True)
-            button.setProperty("segment", True)
+            button.setProperty("groupIndicator", True)
             button.setProperty("language", language)
             button.setAccessibleName(f"Язык {text}")
             button.setMinimumWidth(54)
             self.group.addButton(button)
             return button
+
+        def _update_selection(self, button: QPushButton, checked: bool) -> None:
+            if checked:
+                AnimationCoordinator.instance().animate_value(
+                    self,
+                    self._indicator,
+                    button.geometry(),
+                    self._set_indicator,
+                    DURATIONS.selection,
+                    channel="language-indicator",
+                )
+
+        def _set_indicator(self, rect: QRect) -> None:
+            dirty = self._indicator.united(rect)
+            self._indicator = rect
+            if self.isVisible():
+                self.update(dirty)
+
+        def resizeEvent(self, event: Any) -> None:
+            super().resizeEvent(event)
+            self._align_indicator()
+
+        def showEvent(self, event: Any) -> None:
+            super().showEvent(event)
+            self._align_indicator()
+
+        def _align_indicator(self) -> None:
+            selected = self.group.checkedButton()
+            if selected is not None:
+                AnimationCoordinator.instance().cancel(self, "language-indicator")
+                self._set_indicator(selected.geometry())
+
+        def paintEvent(self, event: Any) -> None:
+            super().paintEvent(event)
+            if self._indicator.isValid():
+                painter = QPainter(self)
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+                manager = theme_manager(QApplication.instance())
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QColor(manager.get_token("motion_selected")))
+                painter.drawRoundedRect(QRectF(self._indicator), 8, 8)
 
         def _emit_language(self, button: QPushButton) -> None:
             self.language_changed.emit(str(button.property("language")))

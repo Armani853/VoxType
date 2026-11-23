@@ -53,10 +53,10 @@ def test_overlay_is_nonactivating_and_has_both_modes(qtbot) -> None:  # type: ig
             input_rms=0.4,
         )
     )
-    assert overlay.status_label.full_text() == "Обработка"
+    assert overlay.status_label.full_text() == "Запись"
     assert overlay.language_label.text() == "EN"
-    assert overlay.timer_label.text() == "00:00:12"
-    assert overlay.processing_label.text() == "LOCAL"
+    assert overlay.timer_label.text() == "00:12"
+    assert overlay.processing_label.full_text() == "Текст остаётся в VoxType"
 
     overlay.set_compact(False)
     assert not overlay.is_compact()
@@ -102,17 +102,18 @@ def test_completed_overlay_persists_full_result_and_exposes_actions(qtbot) -> No
             delivery_status="queued_target_inactive",
         )
     )
+    overlay.set_compact(False, persist=False)
     overlay.show_without_activating()
     qtbot.waitUntil(overlay.isVisible)
-    assert overlay.status_label.full_text() == "Ожидает вставки"
+    assert overlay.status_label.full_text() == "Диктовка завершена"
     assert overlay.result_text.toPlainText() == "полный подтверждённый результат"
     assert overlay.result_buttons.isVisible()
     assert overlay.copy_all_button.isEnabled()
-    assert overlay.copy_all_button.accessibleName() == "Копировать результат"
-    assert overlay.insert_button.isEnabled()
-    assert (overlay.width(), overlay.height()) == (520, 330)
-    assert overlay.provisional_label.full_text() == "полный подтверждённый результат"
-    assert overlay.processing_label.full_text() == "Вернитесь в целевое окно"
+    assert overlay.copy_all_button.accessibleName() == "Скопировать распознанный текст"
+    assert overlay.insert_button.isHidden()
+    assert (overlay.width(), overlay.height()) == (440, 174)
+    assert overlay.provisional_label.isHidden()
+    assert overlay.processing_label.full_text() == "Вставка приостановлена · текст в VoxType"
     assert not overlay.pause_button.isVisible()
     assert not overlay.stop_button.isVisible()
 

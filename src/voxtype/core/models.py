@@ -198,3 +198,12 @@ class ControllerSnapshot:
     live_committed_length: int = 0
     audio_quality: AudioQualitySnapshot | None = None
     pending_insertion: bool = False
+    capture_open: bool = False
+    microphone_available: bool | None = None
+    microphone_failure: str = ""
+    capture_generation: int = 0
+    automatic_delivery: bool = False
+    target_lost: bool = False
+    target_unsafe: bool = False
+    target_application: str = ""
+    confirmed_tail: str = ""

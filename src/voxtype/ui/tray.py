@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any, cast
+from typing import Any
 
 from ._optional import PYSIDE6_AVAILABLE, require_pyside6
 from .models import AppStatus, DictationLanguage, UIState, snapshot_from
+from .presentation import DictationPresentation, DictationPresentationResolver
 
 if PYSIDE6_AVAILABLE:
     from PySide6.QtCore import QObject, Signal
-    from PySide6.QtGui import QAction, QActionGroup, QIcon
+    from PySide6.QtGui import QAction, QActionGroup
     from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
     from .obsidian import IconProvider
@@ -22,6 +23,7 @@ if PYSIDE6_AVAILABLE:
         language_change_requested = Signal(str)
         open_window_requested = Signal()
         open_overlay_requested = Signal()
+        open_buffer_requested = Signal()
         settings_requested = Signal()
         quit_requested = Signal()
 
@@ -67,6 +69,8 @@ if PYSIDE6_AVAILABLE:
             self.settings_action = QAction("Настройки", self.menu)
             self.overlay_action = QAction("Показать окно диктовки", self.menu)
             self.menu.addAction(self.overlay_action)
+            self.buffer_action = QAction("Открыть буфер диктовки", self.menu)
+            self.menu.addAction(self.buffer_action)
             self.settings_action.setObjectName("traySettingsAction")
             self.menu.insertAction(self.toggle_action, self.open_action)
             self.menu.insertSeparator(self.toggle_action)
@@ -89,6 +93,7 @@ if PYSIDE6_AVAILABLE:
             self.language_group.triggered.connect(self._language_triggered)
             self.open_action.triggered.connect(self.open_window_requested)
             self.overlay_action.triggered.connect(self.open_overlay_requested)
+            self.buffer_action.triggered.connect(self.open_buffer_requested)
             self.settings_action.triggered.connect(self.settings_requested)
             self.quit_action.triggered.connect(self.quit_requested)
             self.icon.activated.connect(self._activated)
@@ -100,6 +105,7 @@ if PYSIDE6_AVAILABLE:
             for action, symbol in (
                 (self.open_action, "home"),
                 (self.overlay_action, "expand"),
+                (self.buffer_action, "files"),
                 (self.toggle_action, "stop" if active else "mic"),
                 (self.pause_action, "pause"),
                 (self.settings_action, "settings"),
@@ -149,7 +155,11 @@ if PYSIDE6_AVAILABLE:
             elif reason is QSystemTrayIcon.ActivationReason.MiddleClick:
                 self.dictation_toggle_requested.emit()
 
-        def update_snapshot(self, snapshot: UIState | object) -> None:
+        def update_snapshot(
+            self,
+            snapshot: UIState | object,
+            presentation: DictationPresentation | None = None,
+        ) -> None:
             state = snapshot_from(snapshot)
             self._state = state
             active = state.state.active
@@ -166,31 +176,10 @@ if PYSIDE6_AVAILABLE:
             self.pause_action.setText("Продолжить" if paused else "Пауза")
             self.ru_action.setChecked(state.language is DictationLanguage.RU)
             self.en_action.setChecked(state.language is DictationLanguage.EN)
-            status = {
-                AppStatus.IDLE: "готово",
-                AppStatus.LISTENING: "слушаю",
-                AppStatus.SPEECH_DETECTED: "слышу речь",
-                AppStatus.TRANSCRIBING: "распознаю",
-                AppStatus.PAUSED: "пауза",
-                AppStatus.PAUSED_TARGET_LOST: "цель неактивна",
-                AppStatus.FINISHING: "завершаю",
-                AppStatus.ERROR_RECOVERABLE: "требуется внимание",
-                AppStatus.ERROR_FATAL: "ошибка",
-            }.get(state.state, state.state.value.lower())
-            if readiness is not None and not active:
-                status = readiness.message
-            self.icon.setToolTip(f"VoxType — {status} · {state.language.value.upper()}")
-            self.icon.setIcon(self._icon_for_state(state.state))
-
-        @staticmethod
-        def _icon_for_state(state: AppStatus) -> QIcon:
-            if state in {AppStatus.ERROR_FATAL, AppStatus.ERROR_RECOVERABLE}:
-                return cast(QIcon, create_app_icon(color=state_color("error")))
-            if state in {AppStatus.PAUSED, AppStatus.PAUSED_TARGET_LOST}:
-                return cast(QIcon, create_app_icon(color=state_color("warning")))
-            if state.active:
-                return cast(QIcon, create_app_icon(color=state_color("success")))
-            return cast(QIcon, create_app_icon())
+            display = presentation or DictationPresentationResolver.resolve(snapshot)
+            self.icon.setToolTip(f"VoxType — {display.primary} · {display.language}")
+            color = state_color(display.tone)
+            self.icon.setIcon(create_app_icon(color=color))
 
         def show(self) -> bool:
             if not QSystemTrayIcon.isSystemTrayAvailable():

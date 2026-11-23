@@ -41,6 +41,7 @@ from voxtype.audio.models import AudioQueueStats
 from voxtype.audio.quality import AudioQualityMonitor, AudioQualitySnapshot
 from voxtype.audio.spool import AudioQueueLease, DiskSpool, LosslessAudioQueue, SpoolError
 from voxtype.core.compute_budget import ComputeBudget, ResourcePhase
+from voxtype.core.exceptions import MicrophoneAccessDenied
 from voxtype.core.feedback import FAILURES, FailureCode
 from voxtype.core.gestures import DictationMode, SilenceAutoStopSettings
 from voxtype.core.models import (
@@ -158,6 +159,7 @@ class ApplicationController:
         self.spool_root.mkdir(parents=True, exist_ok=True)
         self.microphone_name = microphone_name
         self._microphone_available = True
+        self._microphone_failure = ""
         self._model_available = True
         self._initialized = False
         self._model_switch_active = False
@@ -389,6 +391,7 @@ class ApplicationController:
             ):
                 return False
             self._start_cancelled.clear()
+            self._microphone_failure = ""
             self._processing_cancelled.clear()
             self._live_session = None
             self._live_transcript = None
@@ -692,7 +695,10 @@ class ApplicationController:
             if warm:
                 assert isinstance(capture, AudioCaptureService)
                 capture.arm_pre_roll()
-                capture.start(cancel=self._start_cancelled)
+                try:
+                    capture.start(cancel=self._start_cancelled)
+                except PermissionError as exc:
+                    raise MicrophoneAccessDenied() from exc
             if not self._start_cancelled.is_set():
                 started = time.perf_counter()
                 try:
@@ -719,7 +725,10 @@ class ApplicationController:
             # PortAudio can block inside a driver. Never hold the controller lock
             # while opening the stream: the GUI needs that lock for snapshot().
             if not warm:
-                capture.start()
+                try:
+                    capture.start()
+                except PermissionError as exc:
+                    raise MicrophoneAccessDenied() from exc
             journal = self._journal
             if journal is not None and not self._start_cancelled.is_set():
                 journal.append("capture_started", {"pre_roll": warm})
@@ -2474,11 +2483,19 @@ class ApplicationController:
             capture.stop(drain_timeout=2.0)
 
     def set_recording_availability(
-        self, *, microphone: bool | None = None, model: bool | None = None
+        self,
+        *,
+        microphone: bool | None = None,
+        model: bool | None = None,
+        microphone_failure: str = "",
     ) -> None:
         with self._lock:
             if microphone is not None:
                 self._microphone_available = microphone
+                if microphone:
+                    self._microphone_failure = ""
+                elif microphone_failure:
+                    self._microphone_failure = microphone_failure
             if model is not None:
                 self._model_available = model
 
@@ -2726,6 +2743,35 @@ class ApplicationController:
                 live_committed_length=self.merger.committed_length if live is not None else 0,
                 audio_quality=self._audio_quality,
                 pending_insertion=bool(self._pending_insertion_count),
+                capture_open=bool(capture and capture.running) and not self._system_unavailable,
+                microphone_available=self._microphone_available if self._initialized else None,
+                microphone_failure=self._microphone_failure,
+                capture_generation=self._professional_session_number,
+                automatic_delivery=not self._local_only
+                and (
+                    self._live_insertion
+                    if live is not None
+                    else (
+                        self.settings.dictation.live_insertion
+                        if self.settings.dictation.live_preview
+                        else self.settings.dictation.auto_insert
+                    )
+                ),
+                target_lost=(
+                    self._live_delivery_halted
+                    or self._target_reselect_required
+                    or self._delivery_status == "queued_target_inactive"
+                ),
+                target_unsafe=bool(
+                    self._input_context
+                    and (
+                        self._input_context.is_password
+                        or self._input_context.is_read_only is True
+                        or (self._terminal_input and self._live_insertion)
+                    )
+                ),
+                target_application=target.process_name if target is not None else "",
+                confirmed_tail="" if self._system_unavailable else self.merger.recent_text[-700:],
             )
 
     def resource_counters(self) -> dict[str, int | float | bool]:
@@ -2814,6 +2860,9 @@ class ApplicationController:
                 else FailureCode.MODEL_MISSING
             )
             user_message = FAILURES[code].text()
+        elif isinstance(error, MicrophoneAccessDenied):
+            code = FailureCode.AUDIO_CAPTURE_FAILED
+            user_message = "Нет доступа к микрофону."
         elif (
             isinstance(error, AudioIngressOverflowError) or type(error).__name__ == "PortAudioError"
         ):
@@ -2827,6 +2876,18 @@ class ApplicationController:
             user_message = "Обработка отменена"
         with self._lock:
             self._error_message = user_message
+            if code in {FailureCode.AUDIO_CAPTURE_FAILED, FailureCode.MICROPHONE_BUSY}:
+                if isinstance(error, MicrophoneAccessDenied):
+                    self._microphone_failure = "microphone_permission_denied"
+                elif code is FailureCode.MICROPHONE_BUSY:
+                    self._microphone_failure = code.value
+                elif type(error).__name__ == "PortAudioError":
+                    self._microphone_failure = (
+                        "microphone_disconnected"
+                        if getattr(self._capture, "running", False)
+                        and not self._microphone_available
+                        else "microphone_open_failed"
+                    )
             self._status_message = (
                 "Накопленный текст сохранён в журнале"
                 if self._journal is not None and self._journal.persist_text
@@ -3260,6 +3321,10 @@ class ApplicationController:
                     return False
             with self._lock:
                 self._target_reselect_required = False
+                self._live_delivery_halted = False
+                if self._delivery_status in {"queued_target_inactive", "copy_required"}:
+                    self._delivery_status = "pending"
+                    self._error_message = ""
             return True
         finally:
             with self._lock:

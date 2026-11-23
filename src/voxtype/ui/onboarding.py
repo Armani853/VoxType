@@ -14,11 +14,8 @@ if PYSIDE6_AVAILABLE:
     from PySide6.QtGui import QFont, QTextCursor
     from PySide6.QtWidgets import (
         QAbstractButton,
-        QCheckBox,
-        QComboBox,
         QHBoxLayout,
         QLabel,
-        QLineEdit,
         QPlainTextEdit,
         QProgressBar,
         QPushButton,
@@ -28,6 +25,7 @@ if PYSIDE6_AVAILABLE:
         QWizardPage,
     )
 
+    from .obsidian import VoxButton, VoxCheckBox, VoxComboBox, VoxTextField
     from .theme import SPACING, create_app_icon, state_color
     from .widgets import AudioLevelMeter, Card, rms_to_meter
 
@@ -120,14 +118,14 @@ if PYSIDE6_AVAILABLE:
             mic_layout = QVBoxLayout(self.microphone_page)
             mic_layout.setSpacing(SPACING.space_4)
             mic_card = Card(self.microphone_page)
-            self.microphone_combo = QComboBox(mic_card)
+            self.microphone_combo = VoxComboBox(mic_card)
             self.microphone_combo.setObjectName("onboardingMicrophoneCombo")
             self.live_meter = AudioLevelMeter(mic_card)
             self.live_meter.setObjectName("onboardingMicrophoneMeter")
             self.microphone_status = QLabel("Ищу устройства записи…", mic_card)
             self.microphone_status.setProperty("muted", True)
             self.microphone_status.setWordWrap(True)
-            self.refresh_microphones_button = QPushButton("Обновить список", mic_card)
+            self.refresh_microphones_button = VoxButton("Обновить список", mic_card)
             self.refresh_microphones_button.setProperty("flat", True)
             self.refresh_microphones_button.clicked.connect(self.microphone_refresh_requested)
             mic_card.content_layout.addWidget(QLabel("Устройство записи", mic_card))
@@ -161,14 +159,14 @@ if PYSIDE6_AVAILABLE:
             self.calibration_progress = QProgressBar(calibration_card)
             self.calibration_progress.setRange(0, 100)
             self.calibration_progress.setValue(0)
-            self.calibration_button = QPushButton("Начать калибровку", calibration_card)
+            self.calibration_button = VoxButton("Начать калибровку", calibration_card)
             self.calibration_button.setProperty("primary", True)
             self.calibration_button.clicked.connect(self._request_calibration)
             self.calibration_details = QLabel("", calibration_card)
             self.calibration_details.setProperty("muted", True)
             self.calibration_details.setWordWrap(True)
             self.calibration_details.hide()
-            self.calibration_details_button = QPushButton("Подробнее", calibration_card)
+            self.calibration_details_button = VoxButton("Подробнее", calibration_card)
             self.calibration_details_button.setProperty("flat", True)
             self.calibration_details_button.hide()
             self.calibration_details_button.clicked.connect(
@@ -178,11 +176,11 @@ if PYSIDE6_AVAILABLE:
             )
             calibration_actions = QHBoxLayout()
             calibration_actions.addWidget(self.calibration_button)
-            self.choose_microphone_button = QPushButton("Выбрать другой микрофон", calibration_card)
+            self.choose_microphone_button = VoxButton("Выбрать другой микрофон", calibration_card)
             self.choose_microphone_button.clicked.connect(self._choose_another_microphone)
             self.choose_microphone_button.hide()
             calibration_actions.addWidget(self.choose_microphone_button)
-            self.continue_anyway_button = QPushButton("Продолжить всё равно", calibration_card)
+            self.continue_anyway_button = VoxButton("Продолжить всё равно", calibration_card)
             self.continue_anyway_button.clicked.connect(
                 lambda: self.calibration_page.set_complete(True)
             )
@@ -208,7 +206,7 @@ if PYSIDE6_AVAILABLE:
             self.hardware_status.setWordWrap(True)
             self.recommended_profile_label = QLabel("", hardware_card)
             self.recommended_profile_label.setProperty("sectionHeading", True)
-            self.retry_hardware_button = QPushButton("Проверить снова", hardware_card)
+            self.retry_hardware_button = VoxButton("Проверить снова", hardware_card)
             self.retry_hardware_button.hide()
             self.retry_hardware_button.clicked.connect(self._request_hardware_probe)
             hardware_card.content_layout.addWidget(self.hardware_status)
@@ -222,7 +220,7 @@ if PYSIDE6_AVAILABLE:
             language_page.setTitle("Язык диктовки")
             language_page.setSubTitle("Язык по умолчанию можно изменить в любой момент.")
             language_layout = QVBoxLayout(language_page)
-            self.dictation_language = QComboBox(language_page)
+            self.dictation_language = VoxComboBox(language_page)
             self.dictation_language.addItem("Русский", "ru")
             self.dictation_language.addItem("English", "en")
             language_layout.addWidget(self.dictation_language)
@@ -236,7 +234,7 @@ if PYSIDE6_AVAILABLE:
             model_layout = QVBoxLayout(self.model_page)
             model_layout.setSpacing(SPACING.space_4)
             model_card = Card(self.model_page)
-            self.model_combo = QComboBox(model_card)
+            self.model_combo = VoxComboBox(model_card)
             self.model_combo.addItem("Быстро — меньше нагрузка", "fast")
             self.model_combo.addItem("Баланс — выше нагрузка", "balanced")
             self.model_combo.addItem("Максимальная точность", "accurate")
@@ -246,7 +244,7 @@ if PYSIDE6_AVAILABLE:
             self.model_progress = QProgressBar(model_card)
             self.model_progress.setRange(0, 100)
             self.model_progress.setValue(0)
-            self.download_button = QPushButton("Проверить и скачать", model_card)
+            self.download_button = VoxButton("Проверить и скачать", model_card)
             self.download_button.setProperty("primary", True)
             self.download_button.clicked.connect(
                 lambda: self.model_download_requested.emit(str(self.model_combo.currentData()))
@@ -299,7 +297,7 @@ if PYSIDE6_AVAILABLE:
             self.insertion_edit.setPlaceholderText("Тестовый текст появится здесь")
             self.insertion_status = QLabel("Тест ещё не выполнен", insertion_card)
             self.insertion_status.setProperty("muted", True)
-            self.insertion_button = QPushButton("Проверить вставку", insertion_card)
+            self.insertion_button = VoxButton("Проверить вставку", insertion_card)
             self.insertion_button.clicked.connect(self._request_insertion_test)
             self.insertion_edit.textChanged.connect(self._check_insertion)
             insertion_card.content_layout.addWidget(self.insertion_edit)
@@ -320,10 +318,10 @@ if PYSIDE6_AVAILABLE:
             shortcut_font.setPointSize(18)
             shortcut_font.setWeight(QFont.Weight.DemiBold)
             shortcut.setFont(shortcut_font)
-            self.hotkey_edit = QLineEdit("Ctrl+Alt+Space", finish_card)
+            self.hotkey_edit = VoxTextField("Ctrl+Alt+Space", finish_card)
             self.hotkey_edit.setObjectName("onboardingHotkey")
             self.hotkey_edit.setToolTip("Сочетание можно позже изменить в настройках")
-            self.autostart_check = QCheckBox(
+            self.autostart_check = VoxCheckBox(
                 "Запускать VoxType вместе с Windows для работы горячей клавиши", finish_card
             )
             self.autostart_check.setObjectName("onboardingAutostart")
@@ -397,7 +395,7 @@ if PYSIDE6_AVAILABLE:
             result = QLabel("Не проверено", card)
             result.setProperty("muted", True)
             result.setWordWrap(True)
-            button = QPushButton(f"Произнести {language}", card)
+            button = VoxButton(f"Произнести {language}", card)
             button.setObjectName(f"test{language}PhraseButton")
             card.content_layout.addWidget(title)
             card.content_layout.addWidget(result)

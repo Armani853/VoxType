@@ -23,14 +23,29 @@ from .models import (
     snapshot_from,
     text_preview,
 )
+from .presentation import (
+    CaptureState,
+    DictationPresentation,
+    DictationPresentationResolver,
+    provisional_tail,
+)
+
+_LOGGER = logging.getLogger(__name__)
 
 if PYSIDE6_AVAILABLE:
     from PySide6.QtCore import QByteArray, QEvent, QObject, QSettings, QSize, Qt, QTimer, Signal
-    from PySide6.QtGui import QCloseEvent, QGuiApplication, QMoveEvent, QResizeEvent, QTextCursor
+    from PySide6.QtGui import (
+        QCloseEvent,
+        QColor,
+        QGuiApplication,
+        QMoveEvent,
+        QResizeEvent,
+        QTextCharFormat,
+        QTextCursor,
+    )
     from PySide6.QtWidgets import (
         QApplication,
         QFrame,
-        QGridLayout,
         QHBoxLayout,
         QLabel,
         QMainWindow,
@@ -38,7 +53,6 @@ if PYSIDE6_AVAILABLE:
         QPushButton,
         QScrollArea,
         QSizePolicy,
-        QSpacerItem,
         QStackedWidget,
         QVBoxLayout,
         QWidget,
@@ -63,23 +77,6 @@ if PYSIDE6_AVAILABLE:
         rms_to_meter,
     )
 
-    _STATUS_PRESENTATION: dict[AppStatus, tuple[str, str]] = {
-        AppStatus.STARTING: ("starting", "neutral"),
-        AppStatus.MODEL_LOADING: ("model_loading", "primary"),
-        AppStatus.IDLE: ("ready", "success"),
-        AppStatus.LISTENING: ("listening", "primary"),
-        AppStatus.SPEECH_DETECTED: ("speech", "success"),
-        AppStatus.TRANSCRIBING: ("transcribing", "primary"),
-        AppStatus.PAUSED_TARGET_LOST: ("target_lost", "warning"),
-        AppStatus.FINISHING: ("finishing", "primary"),
-        AppStatus.COMPLETED: ("ready", "success"),
-        AppStatus.ERROR_RECOVERABLE: ("recoverable_error", "warning"),
-        AppStatus.ERROR_FATAL: ("fatal_error", "error"),
-        AppStatus.SHUTTING_DOWN: ("shutting_down", "neutral"),
-        AppStatus.PAUSED: ("paused", "warning"),
-    }
-    _LOGGER = logging.getLogger("voxtype.ui.main_window")
-
     class MainWindow(QMainWindow):
         first_paint = Signal(float)
         dictation_toggle_requested = Signal()
@@ -94,6 +91,9 @@ if PYSIDE6_AVAILABLE:
         hidden_to_tray = Signal()
         exit_requested = Signal()
         copy_result_requested = Signal()
+        save_result_requested = Signal()
+        audio_settings_requested = Signal()
+        overlay_requested = Signal()
         edit_result_requested = Signal()
         copy_pending_requested = Signal()
         insert_result_requested = Signal()
@@ -136,7 +136,7 @@ if PYSIDE6_AVAILABLE:
             self._build_ui()
             self._connect_ui()
             self.retranslate_ui()
-            self.update_snapshot(self._state)
+            self.update_snapshot(getattr(self, "_last_snapshot", self._state))
             if controller is not None:
                 self.bind_controller(controller)
 
@@ -158,10 +158,10 @@ if PYSIDE6_AVAILABLE:
             outer.setSpacing(16)
 
             self.title_label = VoxSectionHeader("Готов к диктовке", canvas, role="hero")
-            outer.addWidget(self.title_label)
+            self.title_label.hide()
             self.subtitle_label = QLabel("Профиль по умолчанию", canvas)
             self.subtitle_label.setProperty("muted", True)
-            outer.addWidget(self.subtitle_label)
+            self.subtitle_label.hide()
             self.local_badge = self.shell.privacy
             self.history_button = self._header_button("История", "historyButton")
             self.diagnostics_button = self._header_button("Диагностика", "diagnosticsButton")
@@ -185,16 +185,18 @@ if PYSIDE6_AVAILABLE:
             self.error_label = QLabel("", self.error_banner)
             self.error_label.setWordWrap(True)
             banner_layout.addWidget(self.error_label, 1)
-            self.copy_text_button = QPushButton("Скопировать текст", self.error_banner)
-            self.retry_button = QPushButton("Повторить", self.error_banner)
-            self.error_diagnostics_button = QPushButton("Диагностика", self.error_banner)
+            self.copy_text_button = VoxButton("Скопировать текст", self.error_banner)
+            self.retry_button = VoxButton("Повторить", self.error_banner)
+            self.error_diagnostics_button = VoxButton("Диагностика", self.error_banner)
             banner_layout.addWidget(self.copy_text_button)
             banner_layout.addWidget(self.retry_button)
             banner_layout.addWidget(self.error_diagnostics_button)
+            self.choose_microphone_button = VoxButton("Выбрать другой", self.error_banner)
+            self.choose_microphone_button.clicked.connect(self.audio_settings_requested)
+            banner_layout.addWidget(self.choose_microphone_button)
             outer.addWidget(self.error_banner)
 
             hero = VoxCard(canvas, spacing=10)
-            hero.setMaximumWidth(660)
             hero.setObjectName("statusCard")
             status_row = QHBoxLayout()
             self.status_dot = AnimatedStatusDot(hero)
@@ -204,6 +206,12 @@ if PYSIDE6_AVAILABLE:
             self.status_label.setProperty("heading", True)
             status_row.addWidget(self.status_label)
             status_row.addStretch(1)
+            self.elapsed_label = QLabel("00:00:00", hero)
+            self.elapsed_label.setObjectName("dictationElapsed")
+            status_row.addWidget(self.elapsed_label)
+            self.session_profile_label = QLabel(hero)
+            self.session_profile_label.setProperty("caption", True)
+            status_row.addWidget(self.session_profile_label)
             self.language_control = SegmentedLanguageControl(hero)
             self.language_control.setObjectName("languageControl")
             status_row.addWidget(self.language_control)
@@ -216,20 +224,19 @@ if PYSIDE6_AVAILABLE:
             self.status_detail_label.setProperty("muted", True)
             self.status_detail_label.setWordWrap(True)
             self.status_detail_label.setMinimumHeight(32)
-            hero.content_layout.addWidget(self.status_detail_label)
-            self.dictation_button = VoxButton("", hero, variant="primary")
+            self.status_detail_label.hide()
+            self.dictation_button = VoxButton("Начать диктовку", hero, variant="primary")
             self.dictation_button.setObjectName("dictationButton")
-            self.dictation_button.setProperty("voiceControl", True)
-            self.dictation_button.setFixedSize(72, 72)
-            self.dictation_button.setIconSize(QSize(24, 24))
+            self.dictation_button.setIconSize(QSize(18, 18))
             self.dictation_button.setAccessibleDescription("Запускает или останавливает диктовку")
-            from .obsidian import VoiceHalo
-
-            self.voice_halo = VoiceHalo(self.dictation_button, hero)
-            hero.content_layout.addWidget(self.voice_halo, 0, Qt.AlignmentFlag.AlignHCenter)
-            self.voice_action_label = QLabel("Начать диктовку", hero)
-            hero.content_layout.addWidget(self.voice_action_label, 0, Qt.AlignmentFlag.AlignHCenter)
+            actions_card = VoxCard(canvas, spacing=8)
+            record_actions = QHBoxLayout()
+            record_actions.addWidget(self.dictation_button)
+            self.voice_action_label = QLabel("Начать диктовку", actions_card)
+            self.voice_action_label.hide()
             self.voice_activity = QStackedWidget(hero)
+            self.voice_activity.setMinimumWidth(88)
+            self.voice_activity.setMaximumWidth(180)
             self.voice_activity.setFixedHeight(42)
             self.audio_meter = WaveformWidget(self.voice_activity)
             self.audio_meter.setObjectName("audioMeter")
@@ -241,39 +248,23 @@ if PYSIDE6_AVAILABLE:
             self.processing = VoxBusyIndicator("Обрабатываем речь", processing_panel)
             processing_layout.addWidget(self.processing)
             self.voice_activity.addWidget(processing_panel)
-            hero.content_layout.addWidget(self.voice_activity)
-            self.live_panel = QWidget(hero)
-            live_layout = QVBoxLayout(self.live_panel)
-            live_layout.setContentsMargins(0, 0, 0, 0)
-            self.live_stable = QLabel(self.live_panel)
-            self.live_unstable = QLabel(self.live_panel)
-            self.live_unstable.setProperty("muted", True)
-            for label in (self.live_stable, self.live_unstable):
-                label.setWordWrap(True)
-                label.setTextFormat(Qt.TextFormat.PlainText)
-                live_layout.addWidget(label)
-            self.live_panel.setAccessibleName("Предварительный текст")
-            self.live_panel.hide()
             self._live_key: tuple[str, int] | None = None
-            self.cancel_button = VoxButton("Отменить обработку", hero)
-            size_policy = self.cancel_button.sizePolicy()
-            size_policy.setRetainSizeWhenHidden(True)
-            self.cancel_button.setSizePolicy(size_policy)
+            self._preview_start: int | None = None
+            self._preview_text = ""
+            self.cancel_button = VoxButton("Отменить обработку", actions_card)
             self.cancel_button.hide()
             self.cancel_button.clicked.connect(self.cancel_processing_requested)
-            hero.content_layout.addWidget(self.cancel_button, 0, Qt.AlignmentFlag.AlignHCenter)
-            self.hotkey_label = VoxShortcutBadge(self._toggle_hotkey, hero)
-            hero.content_layout.addWidget(self.hotkey_label, 0, Qt.AlignmentFlag.AlignHCenter)
-            centered = QHBoxLayout()
-            centered.addStretch()
-            centered.addWidget(hero, 1)
-            centered.addStretch()
-            outer.addLayout(centered)
+            record_actions.addWidget(self.cancel_button)
+            record_actions.addStretch()
+            self.hotkey_label = VoxShortcutBadge(self._toggle_hotkey, actions_card)
+            record_actions.addWidget(self.hotkey_label)
+            overlay_button = VoxButton("Мини-панель", actions_card, variant="flat")
+            overlay_button.clicked.connect(self.overlay_requested)
+            record_actions.addWidget(overlay_button)
+            actions_card.content_layout.addLayout(record_actions)
+            outer.addWidget(hero)
             theme_manager(QApplication.instance()).theme_changed.connect(self._refresh_voice_icon)
 
-            device_grid = QGridLayout()
-            device_grid.setHorizontalSpacing(16)
-            device_grid.setVerticalSpacing(16)
             microphone = Card(canvas, spacing=7)
             microphone.setObjectName("microphoneCard")
             self.microphone_title = QLabel("Микрофон", microphone)
@@ -287,7 +278,10 @@ if PYSIDE6_AVAILABLE:
             microphone.content_layout.addWidget(self.microphone_title)
             microphone.content_layout.addWidget(self.microphone_label)
             microphone.content_layout.addWidget(self.audio_hint)
-            device_grid.addWidget(microphone, 0, 0)
+            mic_row = QHBoxLayout()
+            mic_row.addWidget(microphone, 1)
+            mic_row.addWidget(self.voice_activity)
+            actions_card.content_layout.addLayout(mic_row)
 
             model = Card(canvas, spacing=7)
             model.setObjectName("modelCard")
@@ -303,10 +297,7 @@ if PYSIDE6_AVAILABLE:
             model.content_layout.addWidget(self.model_label)
             model.content_layout.addWidget(self.profile_label)
             model.content_layout.addStretch(1)
-            device_grid.addWidget(model, 0, 1)
-            device_grid.setColumnStretch(0, 3)
-            device_grid.setColumnStretch(1, 2)
-            outer.addLayout(device_grid)
+            model.hide()
 
             metrics = QHBoxLayout()
             metrics.setSpacing(12)
@@ -321,13 +312,12 @@ if PYSIDE6_AVAILABLE:
             metrics.addWidget(self.target_tile, 2)
             self.metrics_panel = QWidget(canvas)
             self.metrics_panel.setLayout(metrics)
-            outer.addWidget(self.metrics_panel)
             self.metrics_panel.hide()
 
             fragment = Card(canvas, spacing=8)
             fragment.setObjectName("lastFragmentCard")
-            self.fragment_title = QLabel("Последний фрагмент", fragment)
-            self.fragment_title.setProperty("caption", True)
+            self.fragment_title = QLabel("Текст диктовки", fragment)
+            self.fragment_title.setProperty("sectionHeading", True)
             self.fragment_label = QLabel("Распознанный текст появится здесь", fragment)
             self.fragment_label.setObjectName("lastFragmentLabel")
             self.fragment_label.setWordWrap(True)
@@ -338,13 +328,14 @@ if PYSIDE6_AVAILABLE:
             fragment.content_layout.addWidget(self.fragment_title)
             self.fragment_label.hide()
             self.result_editor = QPlainTextEdit(fragment)
-            self.result_editor.setAccessibleName("Последний окончательный текст")
-            self.result_editor.setPlaceholderText("Здесь появится подтверждённый текст")
-            self.result_editor.setMaximumHeight(130)
+            self.result_editor.setAccessibleName("Текст диктовки")
+            self.result_editor.setMinimumHeight(160)
+            self.result_editor.setSizePolicy(
+                QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+            )
             self.result_editor.setReadOnly(True)
             self.result_editor.textChanged.connect(self._update_result_actions)
-            fragment.content_layout.addWidget(self.result_editor)
-            fragment.content_layout.addWidget(self.live_panel)
+            fragment.content_layout.addWidget(self.result_editor, 1)
             self.new_text_label = QLabel("Новый текст", fragment)
             self.new_text_label.setProperty("muted", True)
             self.new_text_label.hide()
@@ -355,34 +346,39 @@ if PYSIDE6_AVAILABLE:
             self.result_copy_pending = VoxButton("Скопировать ожидающее", fragment)
             self.result_copy_pending.clicked.connect(self.copy_pending_requested)
             self.result_copy_pending.hide()
-            self.result_edit = VoxButton("Исправить текст", fragment)
+            self.result_edit = VoxButton("Править", fragment)
+            self.result_save = VoxButton("Сохранить", fragment)
+            self.result_save.clicked.connect(self.save_result_requested)
             self.result_edit.setEnabled(False)
             self.result_edit.clicked.connect(self.edit_result_requested)
-            self.result_insert = VoxButton("Повторить вставку", fragment)
+            self.result_insert = VoxButton("Вставить", fragment)
             self.result_clear = VoxButton("Очистить", fragment, variant="flat")
             self.result_target = VoxButton("Выбрать окно", fragment)
             self.result_clear.clicked.connect(self.clear_result_requested)
             self.result_target.clicked.connect(self.select_target_requested)
-            history = VoxButton("Открыть историю", fragment, variant="flat")
             self.result_copy.clicked.connect(self.copy_result_requested)
             self.result_insert.clicked.connect(self.insert_result_requested)
-            history.clicked.connect(self.history_requested)
             for button in (
                 self.result_copy,
-                self.result_copy_pending,
                 self.result_edit,
+                self.result_save,
                 self.result_insert,
                 self.result_clear,
-                self.result_target,
-                history,
             ):
                 result_actions.addWidget(button)
             result_actions.addStretch()
             fragment.content_layout.addLayout(result_actions)
-            outer.addWidget(fragment)
-            outer.addItem(
-                QSpacerItem(0, 0, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding)
-            )
+            outer.addWidget(fragment, 1)
+            delivery = QHBoxLayout()
+            self.delivery_label = QLabel(actions_card)
+            self.delivery_label.setWordWrap(True)
+            self.delivery_label.setProperty("muted", True)
+            delivery.addWidget(self.delivery_label, 1)
+            delivery.addWidget(self.result_copy_pending)
+            delivery.addWidget(self.result_target)
+            actions_card.content_layout.addLayout(delivery)
+            outer.addWidget(actions_card)
+            outer.addWidget(self.metrics_panel)
 
         def eventFilter(self, watched: QObject, event: QEvent) -> bool:
             dashboard = getattr(self, "_dashboard_scroll", None)
@@ -415,7 +411,7 @@ if PYSIDE6_AVAILABLE:
                 if theme_manager(QApplication.instance()).current_theme.value == "dark"
                 else "surface"
             )
-            if self.dictation_button.property("voiceMode") == "processing":
+            if self.dictation_button.property("voiceMode") in {"starting", "processing"}:
                 token = "text_secondary"
             self.dictation_button.setIcon(
                 IconProvider.icon(
@@ -426,17 +422,48 @@ if PYSIDE6_AVAILABLE:
         def _update_result_actions(self) -> None:
             if not hasattr(self, "result_target"):
                 return
-            available = not self._state.state.active and not self.result_editor.document().isEmpty()
-            for button in (
-                self.result_copy,
-                self.result_insert,
-                self.result_clear,
-                self.result_target,
-            ):
-                button.setEnabled(available)
+            available = (
+                self._preview_start > 0
+                if self._preview_start is not None
+                else not self.result_editor.document().isEmpty()
+            )
+            active = self._state.state.active
+            self.result_copy.setEnabled(available)
+            self.result_insert.setEnabled(available and not active)
+            self.result_save.setEnabled(available and not active)
+            self.result_clear.setEnabled(available and not active)
+            self.result_target.setEnabled(not active)
 
         def result_text(self) -> str:
-            return self.result_editor.toPlainText()
+            if self._preview_start is None:
+                return self.result_editor.toPlainText()
+            cursor = QTextCursor(self.result_editor.document())
+            cursor.setPosition(self._preview_start, QTextCursor.MoveMode.KeepAnchor)
+            return cursor.selectedText().replace("\u2029", "\n").replace("\u2028", "\n")
+
+        def _clear_preview(self) -> None:
+            if self._preview_start is None:
+                return
+            document = self.result_editor.document()
+            position, self._preview_start = self._preview_start, None
+            self._preview_text = ""
+            if position <= document.characterCount() - 1:
+                cursor = QTextCursor(document)
+                cursor.setPosition(position)
+                cursor.movePosition(QTextCursor.MoveOperation.End, QTextCursor.MoveMode.KeepAnchor)
+                cursor.removeSelectedText()
+
+        def _add_preview(self, text: str) -> None:
+            if not text:
+                return
+            cursor = QTextCursor(self.result_editor.document())
+            cursor.movePosition(QTextCursor.MoveOperation.End)
+            self._preview_start = cursor.position()
+            self._preview_text = text
+            scheme = theme_manager(QApplication.instance())
+            style = QTextCharFormat()
+            style.setForeground(QColor(scheme.get_token("text_secondary")))
+            cursor.insertText((" " if self._preview_start else "") + text, style)
 
         def set_live_text_source(self, source: Callable[[str, int, int], str]) -> None:
             self._live_source = source
@@ -446,7 +473,7 @@ if PYSIDE6_AVAILABLE:
                 self._live_key = None
             self._show_live_provisional = show_provisional
             if not show_provisional:
-                self.live_panel.hide()
+                self._clear_preview()
             self._live_auto_scroll = auto_scroll
 
         def _hide_new_text_at_end(self, position: int) -> None:
@@ -458,27 +485,49 @@ if PYSIDE6_AVAILABLE:
             active = state.state.active
             if active and session is not None and self._live_source is not None:
                 if session != self._live_document_session:
+                    self._clear_preview()
                     self.result_editor.clear()
                     self.result_editor.document().setModified(False)
                     self._live_document_session = session
                     self._live_cursor_offset = 0
+                    self._live_key = None
+                live = getattr(snapshot, "live_transcript", None)
+                key = (live.session_id, live.revision) if live is not None else None
+                if key is None or key != self._live_key:
+                    if key is None or self._live_key is None or key[1] > self._live_key[1]:
+                        self._live_key = key
+                        wanted = provisional_tail(snapshot) if self._show_live_provisional else ""
+                    else:
+                        wanted = self._preview_text
+                else:
+                    wanted = self._preview_text
                 length = getattr(snapshot, "live_committed_length", 0)
-                delta = self._live_source(session, self._live_cursor_offset, length)
-                if delta:
+                delta = (
+                    self._live_source(session, self._live_cursor_offset, length)
+                    if length > self._live_cursor_offset
+                    else ""
+                )
+                if delta or wanted != self._preview_text:
                     scroll = self.result_editor.verticalScrollBar()
                     previous_position = scroll.value()
                     following = self._live_auto_scroll and previous_position == scroll.maximum()
                     document = self.result_editor.document()
                     edited = document.isModified()
+                    self._clear_preview()
                     cursor = QTextCursor(document)
                     cursor.movePosition(QTextCursor.MoveOperation.End)
-                    cursor.insertText(delta)
+                    cursor.insertText(delta, QTextCharFormat())
+                    self._live_cursor_offset += len(delta)
+                    self._add_preview(wanted)
                     document.setModified(edited)
                     scroll.setValue(scroll.maximum() if following else previous_position)
                     self.new_text_label.setVisible(scroll.value() < scroll.maximum())
-                    self._live_cursor_offset += len(delta)
-                self.result_editor.setReadOnly(False)
+                self.result_editor.setReadOnly(True)
                 return
+            document = self.result_editor.document()
+            edited = document.isModified()
+            self._clear_preview()
+            document.setModified(edited)
             finalized = state.full_transcript if not active else ""
             if self._live_document_session is not None:
                 edited = self.result_editor.document().isModified()
@@ -499,6 +548,7 @@ if PYSIDE6_AVAILABLE:
         def set_profile_name(self, name: str) -> None:
             if self.shell.profile.text() == name:
                 return
+            self.session_profile_label.setText(name)
             self.shell.profile.setText(name)
             self.subtitle_label.setText(
                 ("Профиль · " if self._interface_language == "ru" else "Profile · ") + name
@@ -527,7 +577,7 @@ if PYSIDE6_AVAILABLE:
                 self._geometry_timer.start()
 
         def _header_button(self, text: str, name: str) -> QPushButton:
-            button = QPushButton(text, self)
+            button = VoxButton(text, self)
             button.setObjectName(name)
             button.setProperty("flat", True)
             return button
@@ -562,7 +612,7 @@ if PYSIDE6_AVAILABLE:
 
         def set_model_available(self, available: bool) -> None:
             self._model_available = bool(available)
-            self.update_snapshot(self._state)
+            self.update_snapshot(getattr(self, "_last_snapshot", self._state))
 
         def bind_controller(self, controller: object) -> None:
             """Bind the four stable controller commands without importing core."""
@@ -596,85 +646,45 @@ if PYSIDE6_AVAILABLE:
             self._controller_connections.clear()
             self._controller = None
 
-        def update_snapshot(self, snapshot: UIState | object) -> None:
+        def update_snapshot(
+            self,
+            snapshot: UIState | object,
+            presentation: DictationPresentation | None = None,
+        ) -> None:
+            state = snapshot_from(snapshot)
+            self._last_snapshot = snapshot
+            self._state = state
+            display = presentation or DictationPresentationResolver.resolve(
+                snapshot, self._interface_language
+            )
+            is_ru = self._interface_language == "ru"
             recognition = getattr(snapshot, "recognition_result", None)
             self.result_copy_pending.setVisible(
-                bool(
-                    getattr(snapshot, "pending_insertion", False)
-                    and getattr(snapshot, "state", "") in {"COMPLETED", "IDLE", "ERROR_RECOVERABLE"}
-                )
+                bool(getattr(snapshot, "pending_insertion", False) and not state.state.active)
             )
             self.result_edit.setEnabled(
-                bool(
-                    recognition
-                    and recognition.raw_text
-                    and getattr(snapshot, "full_transcript", "")
-                )
+                bool(recognition and recognition.raw_text and state.full_transcript)
             )
-            live = getattr(snapshot, "live_transcript", None)
-            if (
-                not self._show_live_provisional
-                or live is None
-                or getattr(snapshot, "live_final", None) is not None
-            ):
-                self.live_panel.hide()
-            elif (
-                self._live_key is None
-                or self._live_key[0] != live.session_id
-                or live.revision > self._live_key[1]
-            ):
-                self._live_key = (live.session_id, live.revision)
-                stable = " ".join(segment.text for segment in live.stable_segments)
-                for label, text in (
-                    (self.live_stable, stable),
-                    (self.live_unstable, live.unstable_text),
-                ):
-                    label.setVisible(bool(text))
-                    if label.text() != text:
-                        label.setText(text)
-                self.live_panel.setVisible(bool(stable or live.unstable_text))
-            state = snapshot_from(snapshot)
-            self._state = state
-            key, color_role = _STATUS_PRESENTATION[state.state]
-            needs_model = not self._model_available and state.state in {
-                AppStatus.IDLE,
-                AppStatus.COMPLETED,
-            }
-            if state.readiness is not None:
-                needs_model = state.readiness.reason == "model_missing"
-            awaiting_target = (
-                state.state is AppStatus.COMPLETED
-                and state.delivery_status == "queued_target_inactive"
-            )
-            no_result = state.state is AppStatus.COMPLETED and state.delivery_status == "no_result"
-            self.status_dot.set_color(
-                state_color(
-                    "warning" if needs_model or awaiting_target or no_result else color_role
-                )
-            )
-            status_text = ui_text(key, self._interface_language)
-            is_ru = self._interface_language == "ru"
-            if needs_model:
+            needs_model = bool(
+                state.readiness is not None and state.readiness.reason == "model_missing"
+            ) or (not self._model_available and not state.state.active)
+            status_text = display.primary
+            if needs_model and state.readiness is None:
                 status_text = "Требуется модель" if is_ru else "Model required"
-            elif awaiting_target:
-                status_text = "Ожидает вставки" if is_ru else "Waiting to insert"
-            elif no_result:
-                status_text = "Нет результата" if is_ru else "No result"
-            elif state.readiness is not None and state.readiness.reason == "microphone_missing":
-                status_text = "Микрофон недоступен" if is_ru else "Microphone unavailable"
+            self.status_dot.set_color(state_color(display.tone))
             self.status_label.setText(status_text)
-            detail = state.error_message or state.status_message
-            if state.readiness is not None and state.readiness.reason == "microphone_missing":
-                detail = "Выберите доступный микрофон в настройках"
-            if awaiting_target and not state.error_message:
-                detail = (
-                    "Нажмите «Повторить вставку» и вернитесь в целевое окно"
-                    if self._interface_language == "ru"
-                    else "Choose Insert again, then return to the target window"
+            self.elapsed_label.setText(format_duration(display.duration_seconds))
+            self.delivery_label.setText(display.delivery_label)
+            self.status_detail_label.setText("")
+            self.result_editor.setPlaceholderText(
+                ("Говорите — текст появится здесь." if is_ru else "Speak to see text here.")
+                if state.state.active
+                else (
+                    "Нажмите «Начать диктовку», чтобы говорить.\nТекст будет появляться здесь во время записи."
+                    if is_ru
+                    else "Select Start dictation to speak.\nYour words will appear here as you record."
                 )
-            if not detail:
-                detail = self._default_status_detail(state)
-            self.status_detail_label.setText(detail)
+            )
             selected_language = state.configured_language or state.language
             self.language_control.set_language(selected_language.value)
             current_label = "Язык текущей записи" if is_ru else "Current recording language"
@@ -686,38 +696,35 @@ if PYSIDE6_AVAILABLE:
             )
             self.microphone_label.setText(state.microphone_name or "—")
             self.microphone_label.setToolTip(state.microphone_name)
-            recording = state.state in {
-                AppStatus.LISTENING,
-                AppStatus.SPEECH_DETECTED,
-                AppStatus.TRANSCRIBING,
-            }
-            self.audio_meter.set_active(recording)
-            self.voice_halo.set_recording(recording)
-            if recording:
+            mic = display.microphone
+            recording = display.capture is CaptureState.RECORDING
+            self.audio_meter.set_active(recording and mic.capture_open)
+            if recording and mic.capture_open:
                 self.audio_meter.set_level(rms_to_meter(state.input_rms))
-            processing = state.state is AppStatus.FINISHING or (
-                state.readiness is not None
-                and state.readiness.phase.value == "processing"
-                and not recording
-            )
-            self.voice_activity.setCurrentIndex(int(processing))
-            self.cancel_button.setVisible(
-                state.readiness.can_cancel
-                if state.readiness is not None
-                else state.state is AppStatus.FINISHING
-            )
+            processing = display.capture is CaptureState.STOPPING
+            starting = display.capture is CaptureState.STARTING
+            self.voice_activity.setCurrentIndex(int(starting or processing))
+            self.processing.setAccessibleName(status_text)
+            self.cancel_button.setVisible(bool(state.readiness and state.readiness.can_cancel))
             self.metrics_panel.setVisible(self.shell.current == "dictation")
-            quality = getattr(snapshot, "audio_quality", None)
-            if quality is not None and state.state.active:
-                if quality.clipping_detected:
-                    hint = "Клиппинг: уменьшите усиление микрофона"
-                elif quality.low_signal:
-                    hint = "Речь тихая: говорите ближе к микрофону"
-                else:
-                    hint = f"Уровень {quality.rms_dbfs:.0f} dBFS"
-                self.audio_hint.setText(hint)
+            if mic.capture_open:
+                signal_labels = {
+                    "quiet": ("Тихий сигнал", "Quiet signal"),
+                    "clipping": ("Слишком громко", "Clipping"),
+                }
+                signal = signal_labels.get(mic.signal_quality, ("", ""))[0 if is_ru else 1]
+                detail = "Микрофон работает" if is_ru else "Microphone active"
+                if signal:
+                    detail = f"{detail} · {signal}"
+                self.audio_hint.setText(detail)
+                self.audio_hint.setToolTip(
+                    f"{mic.signal_dbfs:.0f} dBFS" if mic.signal_dbfs is not None else ""
+                )
             else:
-                self.audio_hint.setText(self._audio_hint(state))
+                self.audio_hint.setText(
+                    ("Открываем микрофон" if is_ru else "Opening microphone") if starting else ""
+                )
+                self.audio_hint.setToolTip("")
             self.model_label.setText(self._profile_text(state.model_profile))
             model_label = state.model_name or "не загружена"
             if not self._model_available:
@@ -740,10 +747,13 @@ if PYSIDE6_AVAILABLE:
             self.voice_action_label.setText(
                 ("Настроить модель" if self._interface_language == "ru" else "Set up model")
                 if needs_model
+                else status_text
+                if starting
                 else ("Обрабатываем речь" if is_ru else "Processing speech")
                 if processing
                 else ui_text("stop" if active else "start", self._interface_language)
             )
+            self.dictation_button.setText(self.voice_action_label.text())
             self.dictation_button.setAccessibleName(self.voice_action_label.text())
             self.dictation_button.setToolTip(self.voice_action_label.text())
             self.title_label.setText(
@@ -753,12 +763,14 @@ if PYSIDE6_AVAILABLE:
                 and (state.readiness is None or state.readiness.can_record)
                 else status_text
             )
-            self.shell.engine.setText(status_text)
+            self.shell.engine.hide()
             self.shell.model.setText(model_label)
             self._update_result_editor(snapshot, state)
             self._update_result_actions()
             mode = (
-                "processing"
+                "starting"
+                if starting
+                else "processing"
                 if processing
                 else "error"
                 if state.state in {AppStatus.ERROR_RECOVERABLE, AppStatus.ERROR_FATAL}
@@ -790,60 +802,45 @@ if PYSIDE6_AVAILABLE:
                     AppStatus.ERROR_FATAL,
                 }
             )
-            has_error = state.state in {
-                AppStatus.ERROR_RECOVERABLE,
-                AppStatus.ERROR_FATAL,
-            } or (
-                state.state in {AppStatus.FINISHING, AppStatus.PAUSED_TARGET_LOST}
-                and bool(state.error_message)
+            failure = display.microphone.error_code
+            detail = ""
+            if failure:
+                mic_messages = {
+                    "microphone_missing": (
+                        "Выбранный микрофон недоступен.",
+                        "The selected microphone is unavailable.",
+                    ),
+                    "microphone_busy": (
+                        "Микрофон занят другим приложением.",
+                        "Another app is using the microphone.",
+                    ),
+                    "microphone_disconnected": (
+                        "Микрофон отключён.",
+                        "The microphone was disconnected.",
+                    ),
+                    "microphone_permission_denied": (
+                        "Нет доступа к микрофону.",
+                        "Microphone permission denied.",
+                    ),
+                    "microphone_open_failed": (
+                        "Не удалось открыть микрофон.",
+                        "Could not open the microphone.",
+                    ),
+                }
+                detail = mic_messages.get(
+                    failure, ("Не удалось проверить микрофон.", "Could not check the microphone.")
+                )[0 if is_ru else 1]
+            elif display.capture is CaptureState.FAILED:
+                detail = state.error_message
+            self.error_banner.setVisible(bool(detail))
+            self.error_label.setText(detail)
+            self.choose_microphone_button.setVisible(bool(failure))
+            self.error_diagnostics_button.setVisible(not bool(failure))
+            self.retry_button.setVisible(
+                bool(failure or (state.readiness and state.readiness.can_retry))
             )
-            missing_microphone = (
-                state.readiness is not None and state.readiness.reason == "microphone_missing"
-            )
-            self.error_banner.setVisible(has_error or missing_microphone)
-            if has_error or missing_microphone:
-                self.error_label.setText(
-                    "Микрофон недоступен. Подключите его и нажмите «Повторить»."
-                    if missing_microphone
-                    else state.error_message
-                    or "Не удалось продолжить диктовку. Текст сохранён локально."
-                )
-                self.retry_button.setVisible(
-                    missing_microphone
-                    or (
-                        state.readiness.can_retry
-                        if state.readiness is not None
-                        else state.state is AppStatus.ERROR_RECOVERABLE
-                    )
-                )
-                self.copy_text_button.setEnabled(bool(state.last_committed_text))
-
-        def _default_status_detail(self, state: UIState) -> str:
-            if not self._model_available and state.state in {AppStatus.IDLE, AppStatus.COMPLETED}:
-                return (
-                    "Сначала установите локальную модель в мастере настройки"
-                    if self._interface_language == "ru"
-                    else "Install a local model in the setup wizard first"
-                )
-            if state.state is AppStatus.IDLE:
-                return (
-                    f"Нажмите кнопку или {self._toggle_hotkey}, чтобы начать"
-                    if self._toggle_hotkey
-                    else "Нажмите кнопку, чтобы начать"
-                )
-            if state.state in {AppStatus.LISTENING, AppStatus.SPEECH_DETECTED}:
-                return state.target_title or "Говорите обычным голосом"
-            if state.state is AppStatus.TRANSCRIBING:
-                return ui_text("processing_ok", self._interface_language)
-            if state.state is AppStatus.PAUSED_TARGET_LOST:
-                return "Вернитесь в целевое приложение — накопленный текст не потерян"
-            if state.state is AppStatus.FINISHING:
-                return "Обрабатываю оставшееся аудио и сохраняю результат"
-            if state.state is AppStatus.COMPLETED:
-                return "Результат сохранён; его можно скопировать или вставить повторно"
-            if state.state is AppStatus.PAUSED:
-                return "Запись приостановлена"
-            return "VoxType работает полностью на этом компьютере"
+            self.copy_text_button.setVisible(display.has_confirmed)
+            self.copy_text_button.setEnabled(display.has_confirmed)
 
         @staticmethod
         def _profile_text(profile: ModelProfile) -> str:
@@ -897,7 +894,7 @@ if PYSIDE6_AVAILABLE:
         def set_interface_language(self, locale: str) -> None:
             self._interface_language = "en" if locale == "en" else "ru"
             self.retranslate_ui()
-            self.update_snapshot(self._state)
+            self.update_snapshot(getattr(self, "_last_snapshot", self._state))
 
         def retranslate_ui(self) -> None:
             locale = self._interface_language
@@ -911,14 +908,16 @@ if PYSIDE6_AVAILABLE:
             self.duration_tile.title_label.setText(ui_text("duration", locale))
             self.backlog_tile.title_label.setText(ui_text("backlog", locale))
             self.target_tile.title_label.setText(ui_text("target", locale))
-            self.fragment_title.setText(ui_text("last_fragment", locale))
+            self.fragment_title.setText(
+                "Текст диктовки" if locale == "ru" else "Dictation transcript"
+            )
             self.hotkey_label.setText(getattr(self, "_dictation_mode_hint", self._toggle_hotkey))
 
         def set_toggle_hotkey(self, specification: str, mode_label: str = "") -> None:
             self._toggle_hotkey = specification
             self._dictation_mode_hint = " · ".join(filter(None, (mode_label, specification)))
             self.hotkey_label.setText(self._dictation_mode_hint)
-            self.update_snapshot(self._state)
+            self.update_snapshot(getattr(self, "_last_snapshot", self._state))
 
         def set_minimize_to_tray(self, enabled: bool) -> None:
             self._minimize_to_tray = bool(enabled)

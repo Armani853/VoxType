@@ -14,21 +14,19 @@ if PYSIDE6_AVAILABLE:
     from PySide6.QtCore import QTimer, Signal
     from PySide6.QtGui import QColor, QGuiApplication, QHideEvent, QShowEvent
     from PySide6.QtWidgets import (
-        QCheckBox,
         QDialog,
         QHBoxLayout,
         QHeaderView,
         QLabel,
         QPlainTextEdit,
         QProgressBar,
-        QPushButton,
         QTableWidget,
         QTableWidgetItem,
-        QTabWidget,
         QVBoxLayout,
         QWidget,
     )
 
+    from .obsidian import VoxButton, VoxCheckBox, VoxTabs
     from .theme import SPACING, state_color
 
     class DiagnosticsWindow(QDialog):
@@ -95,17 +93,17 @@ if PYSIDE6_AVAILABLE:
             heading_column.addWidget(self.summary_label)
             header.addLayout(heading_column)
             header.addStretch(1)
-            self.refresh_button = QPushButton("Обновить", self)
+            self.refresh_button = VoxButton("Обновить", self)
             self.refresh_button.setProperty("flat", True)
-            self.self_test_button = QPushButton("Выполнить self-test", self)
+            self.self_test_button = VoxButton("Выполнить self-test", self)
             self.self_test_button.setProperty("compactPrimary", True)
             header.addWidget(self.refresh_button)
             header.addWidget(self.self_test_button)
-            self.updates_button = QPushButton("Обновления", self)
+            self.updates_button = VoxButton("Обновления", self)
             self.updates_button.clicked.connect(lambda: self.updates_requested.emit())
             header.addWidget(self.updates_button)
             root.addLayout(header)
-            self.live_resources = QCheckBox("Показывать нагрузку в реальном времени", self)
+            self.live_resources = VoxCheckBox("Показывать нагрузку в реальном времени", self)
             self.resource_label = QLabel(self)
             self.resource_label.setWordWrap(True)
             self.resource_label.setProperty("muted", True)
@@ -117,7 +115,7 @@ if PYSIDE6_AVAILABLE:
             self.progress.setTextVisible(False)
             self.progress.hide()
             root.addWidget(self.progress)
-            self.tabs = QTabWidget(self)
+            self.tabs = VoxTabs(self)
             self.tabs.setObjectName("diagnosticsTabs")
             self.overview_tab = QWidget(self.tabs)
             overview_layout = QVBoxLayout(self.overview_tab)
@@ -165,10 +163,10 @@ if PYSIDE6_AVAILABLE:
             root.addWidget(self.tabs, 1)
 
             actions = QHBoxLayout()
-            self.open_log_button = QPushButton("Открыть полный лог", self)
-            self.copy_button = QPushButton("Копировать отчёт", self)
-            self.export_button = QPushButton("Экспортировать…", self)
-            self.close_button = QPushButton("Закрыть", self)
+            self.open_log_button = VoxButton("Открыть полный лог", self)
+            self.copy_button = VoxButton("Копировать отчёт", self)
+            self.export_button = VoxButton("Экспортировать…", self)
+            self.close_button = VoxButton("Закрыть", self)
             self.close_button.setProperty("flat", True)
             actions.addWidget(self.open_log_button)
             actions.addWidget(self.copy_button)
@@ -226,7 +224,7 @@ if PYSIDE6_AVAILABLE:
                 if item is not None and (widget := item.widget()) is not None:
                     widget.deleteLater()
             for finding in findings:
-                button = QPushButton(finding.label, self.overview_tab)
+                button = VoxButton(finding.label, self.overview_tab)
                 button.setToolTip(finding.detail)
                 button.setAccessibleDescription(finding.detail)
                 button.clicked.connect(

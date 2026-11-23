@@ -10,11 +10,10 @@ from itertools import chain, repeat
 from typing import ClassVar
 
 from PySide6.QtCore import (
-    QDynamicPropertyChangeEvent,
-    QEasingCurve,
     QEvent,
     QPoint,
     QPointF,
+    QRect,
     QRectF,
     QSize,
     Qt,
@@ -24,7 +23,6 @@ from PySide6.QtGui import (
     QBrush,
     QColor,
     QEnterEvent,
-    QFocusEvent,
     QFont,
     QFontDatabase,
     QHideEvent,
@@ -53,12 +51,15 @@ from PySide6.QtWidgets import (
     QPushButton,
     QStyle,
     QStyleOptionButton,
+    QStyleOptionComboBox,
+    QTabBar,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
-from .motion import AnimationCoordinator
-from .theme import theme_manager, typography
+from .motion import DURATIONS, TOGGLE, AnimationCoordinator, InteractionVisualState, blend
+from .theme import DARK, LIGHT, ThemeMode, theme_manager, typography
 from .widgets import Card, StatusDot
 
 
@@ -80,6 +81,8 @@ class IconProvider:
         "close": "\ue711",
         "minimize": "\ue921",
         "expand": "\ue922",
+        "restore": "\ue923",
+        "copy": "\ue8c8",
         "check": "\ue73e",
         "warning": "\ue7ba",
         "pause": "\ue769",
@@ -150,6 +153,14 @@ class IconProvider:
             paint.drawLine(4, 10, 16, 10)
         elif name == "expand":
             paint.drawRect(QRectF(4, 4, 12, 12))
+        elif name == "restore":
+            paint.drawRect(QRectF(4, 7, 9, 9))
+            paint.drawLine(7, 4, 16, 4)
+            paint.drawLine(16, 4, 16, 13)
+        elif name == "copy":
+            paint.drawRoundedRect(QRectF(7, 6, 9, 11), 1.5, 1.5)
+            paint.drawLine(4, 13, 4, 3)
+            paint.drawLine(4, 3, 12, 3)
         elif name == "menu":
             for y in (5, 10, 15):
                 paint.drawLine(3, y, 17, y)
@@ -172,85 +183,104 @@ class IconProvider:
             paint.drawLine(7, 12, 13, 12)
 
 
+@lru_cache(maxsize=48)
+def _motion_color(theme: ThemeMode, token: str) -> QColor:
+    return QColor((DARK if theme is ThemeMode.DARK else LIGHT)[token])
+
+
 class VoxButton(QPushButton):
-    def __init__(self, text: str, parent: QWidget | None = None, *, variant: str = "") -> None:
+    def __init__(
+        self,
+        text: str,
+        parent: QWidget | None = None,
+        *,
+        variant: str = "",
+        overlay: bool = False,
+    ) -> None:
         super().__init__(text, parent)
-        self._fill = QColor()
         self._ripple = 1.0
         self._ripple_origin = QPointF()
         self._press_origin: QPointF | None = None
+        self._motion_icon: tuple[str, int] | None = None
+        self._bright_icon = QIcon()
+        self._overlay_button = overlay
+        self._visual = InteractionVisualState(
+            self,
+            pointer=True,
+            hover_duration=DURATIONS.border if variant == "primary" else DURATIONS.hover_enter,
+        )
         self.setAccessibleName(text)
-        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        self.setMinimumHeight(40)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus if overlay else Qt.FocusPolicy.StrongFocus)
+        if not overlay:
+            self.setMinimumHeight(44 if variant == "primary" else 40)
         if variant:
             self.setProperty(variant, True)
-        if variant == "primary":
-            self.setMinimumHeight(44)
         self.pressed.connect(self._press)
         self.released.connect(self._release)
-        self.toggled.connect(self._refresh_color)
+        self.toggled.connect(self._visual.set_selected)
         theme_manager(QApplication.instance()).theme_changed.connect(self._theme_changed)
         self._theme_changed()
 
     def _theme_changed(self, _theme: object = None) -> None:
-        AnimationCoordinator.instance().cancel(self, "_fill")
-        self._fill = self._target_color()
-        self.update()
+        self._theme = theme_manager(QApplication.instance()).current_theme
+        self._refresh_motion_icon()
+        if self.isVisible():
+            self.update()
 
     def set_voice_mode(self, mode: str) -> None:
         if self.property("voiceMode") != mode:
             self.setProperty("voiceMode", mode)
-            self._refresh_color()
+            if mode in {"starting", "processing"}:
+                AnimationCoordinator.instance().cancel(self, "ripple", settle=True)
+            self.update()
 
-    def _target_color(self) -> QColor:
-        theme = theme_manager(QApplication.instance())
-        mode = self.property("voiceMode")
-        primary = bool(self.property("primary"))
-        if not self.isEnabled() or mode == "processing":
-            token = "surface_raised"
-        elif mode == "error" or self.property("danger"):
-            token = "danger" if primary else "surface_hover" if self.underMouse() else "surface"
-        elif primary:
-            token = (
-                "accent_pressed"
-                if self.isDown()
-                else "accent_hover"
-                if self.underMouse()
-                else "accent_pressed"
-                if mode == "recording"
-                else "accent"
-            )
-        elif self.property("navRow") and self.isChecked():
-            token = "accent_soft"
-        elif self.isDown():
-            token = "surface_raised"
-        elif self.underMouse():
-            token = "surface_hover"
-        elif self.property("navRow") or self.property("flat"):
-            return QColor(0, 0, 0, 0)
-        else:
-            token = "surface"
-        return QColor(theme.get_token(token))
+    def set_motion_icon(self, name: str, size: int) -> None:
+        self._motion_icon = (name, size)
+        self._refresh_motion_icon()
 
-    def _refresh_color(self, *_args: object) -> None:
-        coordinator = AnimationCoordinator.instance()
-        coordinator.animate_color(
-            self,
-            "_fill",
-            self._fill,
-            self._target_color(),
-            coordinator.PRESS if self.isDown() else coordinator.HOVER,
-            easing=QEasingCurve.Type.OutQuad if self.isDown() else QEasingCurve.Type.OutCubic,
+    def _refresh_motion_icon(self) -> None:
+        if self._motion_icon is None:
+            return
+        name, size = self._motion_icon
+        dpr = self.devicePixelRatioF()
+        self.setIconSize(QSize(size, size))
+        tokens = DARK if self._theme is ThemeMode.DARK else LIGHT
+        self.setIcon(
+            IconProvider._pixmap(name, self._theme.value, size, dpr, tokens["text_secondary"])
+        )
+        self._bright_icon = IconProvider._pixmap(
+            name, self._theme.value, size, dpr, tokens["text_primary"]
         )
 
+    def event(self, event: QEvent) -> bool:
+        handled = super().event(event)
+        if event.type() == QEvent.Type.DevicePixelRatioChange and hasattr(self, "_motion_icon"):
+            self._refresh_motion_icon()
+        return handled
+
+    def _paint_icon(self, painter: QPainter, rect: QRect, emphasis: float) -> None:
+        icon = self.icon()
+        if not self.isEnabled():
+            icon.paint(painter, rect, Qt.AlignmentFlag.AlignCenter, QIcon.Mode.Disabled)
+            return
+        painter.save()
+        icon.paint(painter, rect)
+        if emphasis and not self._bright_icon.isNull():
+            painter.setOpacity(painter.opacity() * emphasis)
+            self._bright_icon.paint(painter, rect)
+        painter.restore()
+
     def _press(self) -> None:
-        self._refresh_color()
+        self._visual.set_pressed(True)
         coordinator = AnimationCoordinator.instance()
         point = self._press_origin
         self._press_origin = None
         if (
-            self.property("primary") or self.property("navRow")
-        ) and not coordinator.reduced_motion_enabled():
+            self.isEnabled()
+            and (self.property("primary") or self.property("navRow"))
+            and self.property("voiceMode") not in {"starting", "processing"}
+            and not coordinator.reduced_motion_enabled()
+        ):
             if point is None or not self.rect().contains(point.toPoint()):
                 point = QPointF(self.rect().center())
             self._ripple_origin = point
@@ -265,121 +295,199 @@ class VoxButton(QPushButton):
             )
 
     def _release(self) -> None:
-        self._refresh_color()
+        self._visual.set_pressed(False)
 
     def _set_ripple(self, value: float) -> None:
         self._ripple = value
-        self.update()
+        if self.isVisible():
+            self.update()
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         self._press_origin = event.position()
         super().mousePressEvent(event)
         self._press_origin = None
 
-    def enterEvent(self, event: QEnterEvent) -> None:
-        super().enterEvent(event)
-        self._refresh_color()
-
-    def leaveEvent(self, event: QEvent) -> None:
-        super().leaveEvent(event)
-        self._refresh_color()
-
     def changeEvent(self, event: QEvent) -> None:
         super().changeEvent(event)
-        if event.type() == QEvent.Type.EnabledChange and hasattr(self, "_fill"):
-            self._refresh_color()
-
-    def event(self, event: QEvent) -> bool:
         if (
-            isinstance(event, QDynamicPropertyChangeEvent)
-            and hasattr(self, "_fill")
-            and event.propertyName() in (b"primary", b"danger", b"flat", b"navRow")
+            event.type() == QEvent.Type.EnabledChange
+            and hasattr(self, "_visual")
+            and not self.isEnabled()
         ):
-            self._refresh_color()
-        return super().event(event)
+            AnimationCoordinator.instance().cancel(self, "ripple", settle=True)
 
     def showEvent(self, event: QShowEvent) -> None:
         super().showEvent(event)
-        self._theme_changed()
+        self._visual.set_selected(self.isChecked())
 
     def paintEvent(self, _event: QPaintEvent) -> None:
         options = QStyleOptionButton()
         self.initStyleOption(options)
-        theme = theme_manager(QApplication.instance())
+        options.state &= ~(QStyle.StateFlag.State_Sunken | QStyle.StateFlag.State_On)
         voice = bool(self.property("voiceControl"))
         nav = bool(self.property("navRow"))
-        primary = bool(self.property("primary"))
+        primary = bool(self.property("primary") or self.property("compactPrimary"))
+        danger = bool(self.property("danger"))
         flat = bool(self.property("flat"))
+        segment = bool(self.property("segment"))
+        mode = self.property("voiceMode")
+        hover, press, selected, focus = self._visual.values
+        busy = mode in {"starting", "processing"}
+        if busy:
+            hover = press = 0.0
+
+        def color(token: str) -> QColor:
+            return _motion_color(self._theme, token)
+
+        clear = QColor(0, 0, 0, 0)
+        fill = clear if nav or flat or segment else color("surface")
+        edge = clear if nav or flat or segment else color("motion_border")
+        ink = color("text_secondary" if nav or segment else "text_primary")
+        enabled = self.isEnabled()
+        if not enabled:
+            ink = color("text_muted")
+            if not (nav or flat or segment):
+                fill = color("surface_raised")
+        elif primary and not busy:
+            ink = color("canvas") if self._theme is ThemeMode.DARK else QColor("white")
+            if mode == "error":
+                fill = blend(color("danger"), color("motion_danger_hover"), hover)
+                fill = blend(fill, color("danger"), press)
+            else:
+                accent = "motion_accent_pressed" if mode == "recording" else "accent"
+                fill = blend(color(accent), color("motion_accent_hover"), hover)
+                fill = blend(fill, color("motion_accent_pressed"), press)
+            edge = blend(clear, color("motion_focus"), hover * 0.75)
+        else:
+            if busy:
+                fill = color("surface_raised")
+            elif segment and self.property("groupIndicator"):
+                fill = blend(fill, color("motion_hover"), hover * (1.0 - selected))
+            elif self.property("overlayExpand"):
+                fill = blend(fill, color("motion_selected"), hover)
+            else:
+                fill = blend(fill, color("motion_selected"), selected)
+                fill = blend(fill, color("motion_hover"), hover * (1.0 - 0.7 * selected))
+            fill = blend(fill, color("motion_danger_fill" if danger else "motion_pressed"), press)
+            if danger:
+                fill = blend(fill, color("motion_danger_fill"), hover * 0.85)
+                ink = blend(ink, color("motion_danger_hover"), max(hover, press))
+            else:
+                ink = blend(ink, color("text_primary"), max(hover, selected))
+                if segment:
+                    ink = blend(ink, color("accent"), selected)
+            edge = blend(
+                edge,
+                color("motion_border_hover"),
+                max(press, hover) * (0.5 if nav or flat else 1.0),
+            )
+
         radius = 36 if voice else 8
         paint = QPainter(self)
         paint.setRenderHint(QPainter.RenderHint.Antialiasing)
-        bounds = QRectF(self.rect()).adjusted(1, 1, -1, -1)
+        bounds = QRectF(self.rect()).adjusted(1.25, 1.25, -1.25, -1.25)
         outline = QPainterPath()
         outline.addRoundedRect(bounds, radius, radius)
-        paint.fillPath(outline, self._fill)
-        if self._ripple < 1:
+        paint.fillPath(outline, fill)
+        if enabled and self._ripple < 1:
             paint.save()
             paint.setClipPath(outline)
-            tint = QColor(theme.get_token("text_primary" if nav else "canvas"))
-            tint.setAlphaF(0.19 * (1 - self._ripple))
+            tint = QColor(color("text_primary" if nav else "canvas"))
+            tint.setAlphaF(0.14 * (1 - self._ripple))
             paint.setPen(Qt.PenStyle.NoPen)
             paint.setBrush(tint)
             radius_now = max(self.width(), self.height()) * (0.18 + 0.94 * self._ripple)
             paint.drawEllipse(self._ripple_origin, radius_now, radius_now)
             paint.restore()
-        if self.hasFocus() or not (nav or flat or primary):
-            paint.setPen(
-                QPen(
-                    QColor(theme.get_token("accent" if self.hasFocus() else "border")),
-                    2 if self.hasFocus() else 1,
-                )
-            )
-            paint.setBrush(Qt.BrushStyle.NoBrush)
+        paint.setBrush(Qt.BrushStyle.NoBrush)
+        paint.setPen(QPen(edge, 1))
+        paint.drawPath(outline)
+        if focus:
+            ring = QColor(color("motion_focus"))
+            ring.setAlphaF(focus)
+            paint.setPen(QPen(ring, 2))
             paint.drawPath(outline)
 
-        contrasting = primary and self.isEnabled() and self.property("voiceMode") != "processing"
-        color = QColor(theme.get_token("text_primary" if self.isEnabled() else "text_muted"))
-        if contrasting:
-            color = QColor(
-                theme.get_token("canvas") if theme.current_theme.value == "dark" else "#FFFFFF"
-            )
-        elif self.property("danger") and self.isEnabled():
-            color = QColor(theme.get_token("danger"))
-        options.palette.setColor(QPalette.ColorRole.ButtonText, color)
+        for group in (
+            QPalette.ColorGroup.Active,
+            QPalette.ColorGroup.Inactive,
+            QPalette.ColorGroup.Disabled,
+        ):
+            options.palette.setColor(group, QPalette.ColorRole.ButtonText, ink)
         if nav and self.text():
             inset = 11
-            icon = self.icon()
-            icon.paint(paint, inset, (self.height() - 18) // 2, 18, 18)
-            paint.setPen(color)
+            emphasis = max(hover, selected) if self._motion_icon is not None else 0.0
+            self._paint_icon(paint, QRect(inset, (self.height() - 18) // 2, 18, 18), emphasis)
+            paint.setPen(ink)
             text_rect = self.rect().adjusted(inset + 27, 0, -6, 0)
             paint.drawText(
                 text_rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, self.text()
             )
+        elif self._motion_icon is not None and not self.text():
+            icon_size = self.iconSize()
+            icon_rect = QRect(QPoint(), icon_size)
+            icon_rect.moveCenter(self.rect().center())
+            self._paint_icon(paint, icon_rect, max(hover, selected, focus * 0.6))
         else:
             self.style().drawControl(QStyle.ControlElement.CE_PushButtonLabel, options, paint, self)
 
 
 class VoxIconButton(VoxButton):
-    def __init__(self, icon: str, label: str, parent: QWidget | None = None) -> None:
-        super().__init__("", parent, variant="flat")
+    def __init__(
+        self, icon: str, label: str, parent: QWidget | None = None, *, overlay: bool = False
+    ) -> None:
+        super().__init__("", parent, variant="flat", overlay=overlay)
         self.icon_name = icon
         self.setToolTip(label)
         self.setAccessibleName(label)
-        self.setFixedSize(38, 38)
-        theme_manager(QApplication.instance()).theme_changed.connect(self.refresh_icon)
+        side = 32 if overlay else 38
+        self.setFixedSize(side, side)
         self.refresh_icon()
 
     def refresh_icon(self, _theme: object = None) -> None:
-        self.setIcon(IconProvider.icon(self.icon_name, 18, self.devicePixelRatioF()))
+        size = 16 if self._overlay_button else 18
+        self.set_motion_icon(self.icon_name, size)
 
-    def event(self, event: QEvent) -> bool:
-        handled = super().event(event)
-        if event.type() == QEvent.Type.DevicePixelRatioChange and hasattr(self, "icon_name"):
+    def set_icon_name(self, icon: str) -> None:
+        if self.icon_name != icon:
+            self.icon_name = icon
             self.refresh_icon()
-        return handled
 
 
-VoxCard = Card
+class VoxCard(Card):
+    def __init__(
+        self, parent: QWidget | None = None, *, spacing: int = 10, emphasis: bool = False
+    ) -> None:
+        super().__init__(parent, spacing=spacing)
+        self._emphasis = (
+            InteractionVisualState(self, hover_duration=DURATIONS.card_emphasis)
+            if emphasis
+            else None
+        )
+
+    def set_selected(self, selected: bool) -> None:
+        if self._emphasis is not None:
+            self._emphasis.set_selected(selected)
+
+    def paintEvent(self, event: QPaintEvent) -> None:
+        if self._emphasis is None:
+            super().paintEvent(event)
+            return
+        hover, _press, selected, _focus = self._emphasis.values
+        mode = theme_manager(QApplication.instance()).current_theme
+        base = _motion_color(mode, "surface")
+        fill = blend(base, _motion_color(mode, "motion_selected"), selected * 0.65)
+        fill = blend(fill, _motion_color(mode, "motion_hover"), hover * 0.45)
+        edge = blend(
+            _motion_color(mode, "motion_border"),
+            _motion_color(mode, "motion_focus" if selected else "motion_border_hover"),
+            max(selected * 0.75, hover * 0.5),
+        )
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(QPen(edge, 1))
+        painter.setBrush(fill)
+        painter.drawRoundedRect(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), 12, 12)
 
 
 class VoxSectionHeader(QLabel):
@@ -414,12 +522,21 @@ class VoxToggle(QCheckBox):
         self.setAccessibleName(text)
         self.setMinimumHeight(38)
         self._position = 0.0
+        self._visual = InteractionVisualState(self, pointer=True)
+        self.pressed.connect(lambda: self._visual.set_pressed(True))
+        self.released.connect(lambda: self._visual.set_pressed(False))
         self.toggled.connect(self._transition)
 
     def _transition(self, checked: bool) -> None:
         motion = AnimationCoordinator.instance()
         motion.animate_value(
-            self, self._position, float(checked), self._move_thumb, motion.SWITCH, channel="thumb"
+            self,
+            self._position,
+            float(checked),
+            self._move_thumb,
+            DURATIONS.toggle,
+            channel="thumb",
+            easing=TOGGLE,
         )
 
     def sizeHint(self) -> QSize:
@@ -438,22 +555,22 @@ class VoxToggle(QCheckBox):
         paint = QPainter(self)
         paint.setRenderHint(QPainter.RenderHint.Antialiasing)
         y = (self.height() - 18) / 2
-        accent = QColor(manager.get_token("accent_hover" if self.underMouse() else "accent"))
-        track = QColor(manager.get_token("surface_raised"))
+        hover, press, _selected, focus = self._visual.values
+        mode = manager.current_theme
+        accent = blend(
+            _motion_color(mode, "accent"), _motion_color(mode, "motion_accent_hover"), hover
+        )
+        track = blend(
+            _motion_color(mode, "surface_raised"), _motion_color(mode, "motion_hover"), hover
+        )
         mix = self._position if self.isEnabled() else 0.0
-        paint.setBrush(
-            QColor.fromRgbF(
-                track.redF() * (1 - mix) + accent.redF() * mix,
-                track.greenF() * (1 - mix) + accent.greenF() * mix,
-                track.blueF() * (1 - mix) + accent.blueF() * mix,
-            )
+        fill = blend(track, accent, mix)
+        paint.setBrush(blend(fill, _motion_color(mode, "motion_pressed"), press * 0.25))
+        edge = blend(
+            _motion_color(mode, "motion_border"), _motion_color(mode, "motion_border_hover"), hover
         )
-        paint.setPen(
-            QPen(
-                QColor(manager.get_token("accent" if self.hasFocus() else "border")),
-                2 if self.hasFocus() else 1,
-            )
-        )
+        edge = blend(edge, _motion_color(mode, "motion_focus"), max(focus, mix * 0.35))
+        paint.setPen(QPen(edge, 1 + focus))
         paint.drawRoundedRect(QRectF(1, y, 32, 18), 9, 9)
         paint.setPen(Qt.PenStyle.NoPen)
         paint.setBrush(
@@ -467,61 +584,138 @@ class VoxToggle(QCheckBox):
         return self.rect().contains(position)
 
 
+def _paint_input_frame(widget: QWidget, visual: InteractionVisualState, paint: QPainter) -> None:
+    hover, _press, invalid, focus = visual.values
+    mode = theme_manager(QApplication.instance()).current_theme
+    normal = _motion_color(mode, "motion_border")
+    edge = blend(normal, _motion_color(mode, "motion_border_hover"), hover)
+    edge = blend(edge, _motion_color(mode, "motion_focus"), focus)
+    edge = blend(edge, _motion_color(mode, "danger"), invalid)
+    paint.setRenderHint(QPainter.RenderHint.Antialiasing)
+    paint.setBrush(Qt.BrushStyle.NoBrush)
+    rect = QRectF(widget.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+    paint.setPen(QPen(edge, 1))
+    paint.drawRoundedRect(rect, 8, 8)
+    if focus:
+        ring = QColor(_motion_color(mode, "motion_focus"))
+        ring.setAlphaF(focus * 0.85)
+        paint.setPen(QPen(ring, 1))
+        paint.drawRoundedRect(rect.adjusted(1.4, 1.4, -1.4, -1.4), 7, 7)
+
+
 class VoxComboBox(QComboBox):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setMinimumHeight(38)
         self.setMaxVisibleItems(9)
         self.view().setMaximumHeight(360)
-
-
-class VoxTextField(QLineEdit):
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.setMinimumHeight(38)
         self.setProperty("animatedFocus", True)
-        self._focus_border = QColor()
-        theme_manager(QApplication.instance()).theme_changed.connect(self._update_border)
-        self._update_border()
-
-    def set_invalid(self, message: str = "") -> None:
-        desired = bool(message)
-        self.setAccessibleDescription(message)
-        if bool(self.property("invalid")) != desired:
-            self.setProperty("invalid", desired)
-            self._update_border()
-
-    def _update_border(self, *_args: object) -> None:
-        theme = theme_manager(QApplication.instance())
-        target = QColor(
-            theme.get_token(
-                "danger" if self.property("invalid") else "accent" if self.hasFocus() else "border"
-            )
-        )
-        if not self._focus_border.isValid():
-            self._focus_border = target
-        coordinator = AnimationCoordinator.instance()
-        coordinator.animate_color(
-            self, "_focus_border", self._focus_border, target, coordinator.HOVER
-        )
-
-    def focusInEvent(self, event: QFocusEvent) -> None:
-        super().focusInEvent(event)
-        self._update_border()
-
-    def focusOutEvent(self, event: QFocusEvent) -> None:
-        super().focusOutEvent(event)
-        self._update_border()
+        self._visual = InteractionVisualState(self, mouse_focus=True)
 
     def paintEvent(self, event: QPaintEvent) -> None:
         super().paintEvent(event)
-        if not self.isEnabled():
-            return
+        paint = QPainter(self)
+        if self.isEnabled():
+            _paint_input_frame(self, self._visual, paint)
+        option = QStyleOptionComboBox()
+        self.initStyleOption(option)
+        arrow = self.style().subControlRect(
+            QStyle.ComplexControl.CC_ComboBox, option, QStyle.SubControl.SC_ComboBoxArrow, self
+        )
+        if arrow.isValid():
+            mode = theme_manager(QApplication.instance()).current_theme
+            hover, _press, _invalid, focus = self._visual.values
+            ink = (
+                blend(
+                    _motion_color(mode, "text_secondary"),
+                    _motion_color(mode, "text_primary"),
+                    max(hover, focus),
+                )
+                if self.isEnabled()
+                else _motion_color(mode, "text_muted")
+            )
+            pen = QPen(ink, 1.5)
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            paint.setRenderHint(QPainter.RenderHint.Antialiasing)
+            paint.setPen(pen)
+            x, y = arrow.center().x(), arrow.center().y()
+            paint.drawLine(QPointF(x - 3.5, y - 1.5), QPointF(x, y + 2))
+            paint.drawLine(QPointF(x, y + 2), QPointF(x + 3.5, y - 1.5))
+
+
+class VoxTextField(QLineEdit):
+    def __init__(self, text: str | QWidget | None = None, parent: QWidget | None = None) -> None:
+        super().__init__(
+            text if isinstance(text, str) else "", text if isinstance(text, QWidget) else parent
+        )
+        self.setMinimumHeight(38)
+        self.setProperty("animatedFocus", True)
+        self._visual = InteractionVisualState(self, mouse_focus=True)
+
+    def set_invalid(self, message: str = "") -> None:
+        self.setAccessibleDescription(message)
+        if bool(self.property("invalid")) != bool(message):
+            self.setProperty("invalid", bool(message))
+            self._visual.set_selected(bool(message))
+
+    def paintEvent(self, event: QPaintEvent) -> None:
+        super().paintEvent(event)
+        if self.isEnabled():
+            paint = QPainter(self)
+            _paint_input_frame(self, self._visual, paint)
+
+
+class VoxCheckBox(QCheckBox):
+    """Keep the native choice and label while painting the indicator in place."""
+
+    def __init__(self, text: str | QWidget | None = None, parent: QWidget | None = None) -> None:
+        super().__init__(
+            text if isinstance(text, str) else "", text if isinstance(text, QWidget) else parent
+        )
+        self._visual = InteractionVisualState(self, pointer=True)
+        self.pressed.connect(lambda: self._visual.set_pressed(True))
+        self.released.connect(lambda: self._visual.set_pressed(False))
+        self.toggled.connect(self._visual.set_selected)
+
+    def paintEvent(self, _event: QPaintEvent) -> None:
+        option = QStyleOptionButton()
+        self.initStyleOption(option)
+        style = self.style()
+        indicator = style.subElementRect(QStyle.SubElement.SE_CheckBoxIndicator, option, self)
+        contents = style.subElementRect(QStyle.SubElement.SE_CheckBoxContents, option, self)
+        hover, press, marked, focus = self._visual.values
+        partial = self.checkState() is Qt.CheckState.PartiallyChecked
+        marked = max(marked, float(partial)) if self.isEnabled() else 0.0
+        mode = theme_manager(QApplication.instance()).current_theme
+        fill = blend(_motion_color(mode, "surface"), _motion_color(mode, "accent"), marked)
+        fill = blend(fill, _motion_color(mode, "motion_pressed"), press * 0.45)
+        edge = blend(
+            _motion_color(mode, "motion_border"), _motion_color(mode, "motion_border_hover"), hover
+        )
+        edge = blend(edge, _motion_color(mode, "motion_focus"), max(focus, marked))
         paint = QPainter(self)
         paint.setRenderHint(QPainter.RenderHint.Antialiasing)
-        paint.setPen(QPen(self._focus_border, 1))
-        paint.setBrush(Qt.BrushStyle.NoBrush)
-        paint.drawRoundedRect(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), 8, 8)
+        paint.setBrush(fill)
+        paint.setPen(QPen(edge, 1 + focus))
+        bounds = QRectF(indicator).adjusted(1, 1, -1, -1)
+        paint.drawRoundedRect(bounds, 3, 3)
+        strength = marked if self.isEnabled() else (0.6 if self.isChecked() else 0)
+        if strength:
+            ink = QColor("white" if mode is ThemeMode.LIGHT else "#101116")
+            if not self.isEnabled():
+                ink = QColor(_motion_color(mode, "text_secondary"))
+            ink.setAlphaF(strength)
+            pen = QPen(ink, 1.6)
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            paint.setPen(pen)
+            x, y = bounds.center().x(), bounds.center().y()
+            paint.drawLine(
+                QPointF(x - 3.5, y), QPointF(x + 3.5, y) if partial else QPointF(x - 1, y + 2.5)
+            )
+            if not partial:
+                paint.drawLine(QPointF(x - 1, y + 2.5), QPointF(x + 3.5, y - 2.5))
+        option.rect = contents
+        style.drawControl(QStyle.ControlElement.CE_CheckBoxLabel, option, paint, self)
 
 
 class VoxSearchField(VoxTextField):
@@ -530,6 +724,134 @@ class VoxSearchField(VoxTextField):
         self.setPlaceholderText(placeholder)
         self.setAccessibleName(placeholder)
         self.setClearButtonEnabled(True)
+
+
+class _MotionTabBar(QTabBar):
+    def __init__(self, parent: QWidget) -> None:
+        super().__init__(parent)
+        self.setProperty("animatedIndicator", True)
+        self._indicator = QRect()
+        self._indicator_index = -1
+        self._visual = InteractionVisualState(self)
+        self._hover_index = -1
+        self._leaving_index = -1
+        self._hover_start = self._leaving_start = self._hover_progress = 0.0
+        self.setMouseTracking(True)
+        self.currentChanged.connect(self._active_tab_changed)
+
+    def _target(self, index: int) -> QRect:
+        tab = self.tabRect(index)
+        return (
+            QRect(tab.left() + 8, tab.bottom() - 2, max(0, tab.width() - 16), 2)
+            if tab.isValid()
+            else QRect()
+        )
+
+    def _active_tab_changed(self, index: int) -> None:
+        self._indicator_index = index
+        target = self._target(index)
+        motion = AnimationCoordinator.instance()
+        if not self._indicator.isValid() or not target.isValid():
+            motion.cancel(self, "tab-indicator")
+            self._set_indicator(target)
+            return
+        motion.animate_value(
+            self,
+            self._indicator,
+            target,
+            self._set_indicator,
+            DURATIONS.tab_indicator,
+            channel="tab-indicator",
+        )
+
+    def _set_indicator(self, rect: QRect) -> None:
+        dirty = self._indicator.united(rect).adjusted(-1, -1, 1, 1)
+        self._indicator = rect
+        if self.isVisible():
+            self.update(dirty)
+
+    def tabLayoutChange(self) -> None:
+        super().tabLayoutChange()
+        if getattr(self, "_indicator_index", -1) == self.currentIndex() and hasattr(
+            self, "_indicator"
+        ):
+            AnimationCoordinator.instance().cancel(self, "tab-indicator")
+            self._set_indicator(self._target(self.currentIndex()))
+
+    def _hover_strength(self, index: int) -> float:
+        if index == self._hover_index and index >= 0:
+            return self._hover_start + (1 - self._hover_start) * self._hover_progress
+        if index == self._leaving_index and index >= 0:
+            return self._leaving_start * (1 - self._hover_progress)
+        return 0.0
+
+    def _hover_tab(self, index: int) -> None:
+        if index == self._hover_index:
+            return
+        stale = self._leaving_index
+        self._hover_start = self._hover_strength(index)
+        self._leaving_start = self._hover_strength(self._hover_index)
+        self._leaving_index, self._hover_index = self._hover_index, index
+        self.update(self.tabRect(stale))
+        AnimationCoordinator.instance().animate_value(
+            self,
+            0.0,
+            1.0,
+            self._set_hover_progress,
+            DURATIONS.hover_enter if index >= 0 else DURATIONS.hover_leave,
+            channel="tab-hover",
+            retarget=False,
+        )
+
+    def _set_hover_progress(self, progress: float) -> None:
+        self._hover_progress = progress
+        if self.isVisible():
+            for index in (self._hover_index, self._leaving_index):
+                if index >= 0:
+                    self.update(self.tabRect(index))
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        super().mouseMoveEvent(event)
+        index = self.tabAt(event.position().toPoint())
+        self._hover_tab(index if index >= 0 and self.isTabEnabled(index) else -1)
+
+    def leaveEvent(self, event: QEvent) -> None:
+        super().leaveEvent(event)
+        self._hover_tab(-1)
+
+    def hideEvent(self, event: QHideEvent) -> None:
+        AnimationCoordinator.instance().cancel(self, "tab-hover")
+        self._hover_index = self._leaving_index = -1
+        super().hideEvent(event)
+
+    def paintEvent(self, event: QPaintEvent) -> None:
+        super().paintEvent(event)
+        if not self._indicator.isValid():
+            return
+        painter = QPainter(self)
+        mode = theme_manager(QApplication.instance()).current_theme
+        for index in (self._leaving_index, self._hover_index):
+            amount = self._hover_strength(index)
+            if amount and self.isTabEnabled(index):
+                tint = QColor(_motion_color(mode, "motion_border_hover"))
+                tint.setAlphaF(amount * 0.18)
+                painter.setBrush(tint)
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.drawRoundedRect(self.tabRect(index).adjusted(2, 2, -2, -3), 6, 6)
+        painter.fillRect(self._indicator, _motion_color(mode, "motion_focus"))
+        focus = self._visual.values[3]
+        if focus:
+            ring = QColor(_motion_color(mode, "motion_focus"))
+            ring.setAlphaF(focus)
+            painter.setPen(QPen(ring, 2))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRoundedRect(self.tabRect(self.currentIndex()).adjusted(2, 2, -2, -3), 6, 6)
+
+
+class VoxTabs(QTabWidget):
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setTabBar(_MotionTabBar(self))
 
 
 class VoxBusyIndicator(QProgressBar):
@@ -562,7 +884,7 @@ class VoxSettingRow(QWidget):
     def __init__(self, title: str, control: QWidget, *, detail: str = "") -> None:
         super().__init__()
         self.setMinimumHeight(56)
-        self._highlight = QColor(0, 0, 0, 0)
+        self._visual = InteractionVisualState(self)
         row = QHBoxLayout(self)
         row.setContentsMargins(10, 6, 10, 6)
         row.setSpacing(16)
@@ -584,24 +906,16 @@ class VoxSettingRow(QWidget):
         row.addLayout(captions, 1)
         row.addWidget(control, 1)
 
-    def enterEvent(self, event: QEnterEvent) -> None:
-        super().enterEvent(event)
-        shade = QColor(theme_manager(QApplication.instance()).get_token("surface_hover"))
-        shade.setAlpha(150)
-        self._fade(shade)
-
-    def leaveEvent(self, event: QEvent) -> None:
-        super().leaveEvent(event)
-        self._fade(QColor(0, 0, 0, 0))
-
-    def _fade(self, color: QColor) -> None:
-        motion = AnimationCoordinator.instance()
-        motion.animate_color(self, "_highlight", self._highlight, color, motion.HOVER)
-
     def paintEvent(self, _event: QPaintEvent) -> None:
+        hover = self._visual.values[0]
+        if not hover:
+            return
+        mode = theme_manager(QApplication.instance()).current_theme
+        shade = QColor(_motion_color(mode, "motion_hover"))
+        shade.setAlphaF(0.55 * hover)
         paint = QPainter(self)
         paint.setRenderHint(QPainter.RenderHint.Antialiasing)
-        paint.setBrush(self._highlight)
+        paint.setBrush(shade)
         paint.setPen(Qt.PenStyle.NoPen)
         paint.drawRoundedRect(QRectF(self.rect()), 8, 8)
 
@@ -797,12 +1111,65 @@ class VoiceHalo(QWidget):
 class _ToastSlot(QWidget):
     def __init__(self, parent: QWidget) -> None:
         super().__init__(parent)
-        self.card = VoxCard(self)
+        self.card = VoxCard(self, emphasis=True)
         self.card.content_layout.setContentsMargins(14, 10, 12, 10)
         policy = self.sizePolicy()
         policy.setHeightForWidth(True)
         self.setSizePolicy(policy)
         self._offset = 0
+        self._timer: QTimer | None = None
+        self._remaining_ms = 0
+        self._lifetime_ms = 0
+        self._pointer_inside = False
+
+    def set_timer(self, timer: QTimer) -> None:
+        self._timer = timer
+        self._lifetime_ms = timer.interval()
+        self.restart_timeout()
+
+    def restart_timeout(self) -> None:
+        if self._timer is not None:
+            self._timer.stop()
+            self._remaining_ms = self._lifetime_ms
+            self._resume_timeout()
+
+    def stop_timeout(self) -> None:
+        self._remaining_ms = 0
+        if self._timer is not None:
+            self._timer.stop()
+
+    def _pause_timeout(self) -> None:
+        if self._timer is not None and self._timer.isActive():
+            self._remaining_ms = max(1, self._timer.remainingTime())
+            self._timer.stop()
+
+    def _resume_timeout(self) -> None:
+        if (
+            self._timer is not None
+            and self._remaining_ms
+            and self.isVisible()
+            and not self._pointer_inside
+        ):
+            self._timer.start(self._remaining_ms)
+
+    def enterEvent(self, event: QEnterEvent) -> None:
+        super().enterEvent(event)
+        self._pointer_inside = True
+        self._pause_timeout()
+
+    def leaveEvent(self, event: QEvent) -> None:
+        super().leaveEvent(event)
+        self._pointer_inside = False
+        self._resume_timeout()
+
+    def hideEvent(self, event: QHideEvent) -> None:
+        self._pause_timeout()
+        self._pointer_inside = False
+        super().hideEvent(event)
+
+    def showEvent(self, event: QShowEvent) -> None:
+        super().showEvent(event)
+        self._resume_timeout()
 
     def sizeHint(self) -> QSize:
         return self.card.sizeHint()
@@ -817,12 +1184,12 @@ class _ToastSlot(QWidget):
 
     def set_offset(self, value: int) -> None:
         self._offset = value
-        self.card.move(self._offset, 0)
+        self.card.move(0, self._offset)
 
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
         self.card.resize(self.size())
-        self.card.move(self._offset, 0)
+        self.card.move(0, self._offset)
 
 
 class NotificationCenter(QWidget):
@@ -858,7 +1225,7 @@ class NotificationCenter(QWidget):
             if more is not None:
                 more.setVisible(bool(details))
             if key in self.timers:
-                self.timers[key].start()
+                slot.restart_timeout()
             if key in self._exiting:
                 self._exiting.remove(key)
                 motion.animate_opacity(slot.card, 0.0, 1.0, motion.TOAST_ENTER)
@@ -917,7 +1284,7 @@ class NotificationCenter(QWidget):
                 timer = QTimer(slot, interval=4000, singleShot=True)
                 self.timers[key] = timer
                 timer.timeout.connect(lambda: self.dismiss(key))
-                timer.start()
+                slot.set_timer(timer)
             self.show()
             slot.show()
             motion.animate_value(slot, 10, 0, slot.set_offset, motion.TOAST_ENTER, channel="slide")
@@ -928,8 +1295,7 @@ class NotificationCenter(QWidget):
         slot = self.items.get(key)
         if slot is None:
             return
-        if key in self.timers:
-            self.timers[key].stop()
+        slot.stop_timeout()
         motion = AnimationCoordinator.instance()
         if immediate:
             motion.cancel_all(slot)

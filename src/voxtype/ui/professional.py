@@ -16,7 +16,6 @@ from uuid import uuid4
 from PySide6.QtCore import QIODevice, QSaveFile, Qt, QTimer, Signal
 from PySide6.QtGui import QResizeEvent
 from PySide6.QtWidgets import (
-    QCheckBox,
     QComboBox,
     QDialog,
     QFileDialog,
@@ -34,7 +33,6 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QSplitter,
     QStackedWidget,
-    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -76,11 +74,13 @@ from voxtype.windows.selection import SelectedText, SelectionUnavailable
 from .obsidian import (
     VoxButton,
     VoxCard,
+    VoxCheckBox,
     VoxComboBox,
     VoxDialog,
     VoxEmptyState,
     VoxSearchField,
     VoxSectionHeader,
+    VoxTabs,
     VoxTextField,
     VoxToggle,
     confirm_delete,
@@ -116,7 +116,7 @@ class ProfessionalWindow(QDialog):
         self.setWindowTitle("Профессиональные инструменты VoxType")
         self.resize(720, 560)
         root = QVBoxLayout(self)
-        self.tabs = QTabWidget(self)
+        self.tabs = VoxTabs(self)
         root.addWidget(self.tabs)
         self.feedback = QLabel(self)
         self.feedback.setWordWrap(True)
@@ -149,7 +149,7 @@ class ProfessionalWindow(QDialog):
         self.profile_splitter.setStretchFactor(1, 2)
         form = QFormLayout(details)
         form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
-        self.profile = QComboBox(page)
+        self.profile = VoxComboBox(page)
         self.profile.hide()
         self.name = VoxTextField(page)
         self.language = self._choices(("Язык настроек", "", "Русский", "ru", "English", "en"))
@@ -175,9 +175,9 @@ class ProfessionalWindow(QDialog):
         )
         self.enabled = VoxToggle("Профиль активен", page)
         self.rules = QPlainTextEdit(page)
-        self.vocabulary_id = QLineEdit(page)
-        self.command_set_id = QLineEdit(page)
-        self.snippet_set_id = QLineEdit(page)
+        self.vocabulary_id = VoxTextField(page)
+        self.command_set_id = VoxTextField(page)
+        self.snippet_set_id = VoxTextField(page)
         self.rules.setPlaceholderText("app.exe | *заголовок* | 10 | 1\nC:\\Apps\\app.exe | | 5 | 0")
         for label, widget in (
             ("Название", self.name),
@@ -245,7 +245,7 @@ class ProfessionalWindow(QDialog):
         page = QWidget(self)
         layout = QVBoxLayout(page)
         row = QHBoxLayout()
-        self.stats_period = QComboBox(page)
+        self.stats_period = VoxComboBox(page)
         self.stats_period.addItem("По дням (UTC)", False)
         self.stats_period.addItem("По неделям (UTC)", True)
         row.addWidget(self.stats_period)
@@ -334,7 +334,7 @@ class ProfessionalWindow(QDialog):
         )
         if find_spec("llama_cpp") is not None and self.controller.policy.permits_ai:
             row = QHBoxLayout()
-            self.ai_operation = QComboBox(page)
+            self.ai_operation = VoxComboBox(page)
             for operation, title in OPERATIONS.items():
                 self.ai_operation.addItem(title, operation)
             row.addWidget(self.ai_operation)
@@ -875,7 +875,7 @@ class ProfessionalWindow(QDialog):
         dialog = VoxDialog(self)
         dialog.setWindowTitle("Совместимость приложения")
         form = QFormLayout(dialog)
-        exe = QLineEdit(previous.executable if previous else "", dialog)
+        exe = VoxTextField(previous.executable if previous else "", dialog)
         exe.setPlaceholderText("Имя EXE или полный путь")
         form.addRow("Приложение", exe)
         strategy = self._choices(
@@ -903,10 +903,10 @@ class ProfessionalWindow(QDialog):
         formatting = self._choices(
             ("Настройки профиля", "profile", "Сохранять технический текст", "preserve")
         )
-        strict = QCheckBox("Проверять исходное поле", dialog)
-        multiline = QCheckBox("Подтверждать многострочную вставку", dialog)
-        unicode = QCheckBox("Предпочитать Unicode", dialog)
-        automatic = QCheckBox("Разрешать автоматическую вставку", dialog)
+        strict = VoxCheckBox("Проверять исходное поле", dialog)
+        multiline = VoxCheckBox("Подтверждать многострочную вставку", dialog)
+        unicode = VoxCheckBox("Предпочитать Unicode", dialog)
+        automatic = VoxCheckBox("Разрешать автоматическую вставку", dialog)
         for label, widget in (("Способ", strategy), ("Буфер", restore), ("Формат", formatting)):
             form.addRow(label, widget)
         for checkbox in (strict, multiline, unicode, automatic):
@@ -1178,7 +1178,9 @@ class ProfessionalWindow(QDialog):
             self._button("Активация…", self._edit_processing_options, row)
         else:
             self._button("Добавить запись", lambda: self._edit_collection_item(key, new=True), row)
-            self._button("Изменить", lambda: self._edit_collection_item(key, new=False), row)
+            edit = self._button("Изменить", lambda: self._edit_collection_item(key, new=False), row)
+            if key in self.collection_tables:
+                self.collection_tables[key].set_row_actions(edit)
         if key == "dictionary":
             self._button("Размер подсказки…", self._edit_processing_options, row)
             clear = self._button("Очистить словарь", self._clear_dictionary, row)
@@ -1353,7 +1355,7 @@ class ProfessionalWindow(QDialog):
         dialog = VoxDialog(self)
         dialog.setWindowTitle("Параметры обработки")
         form = QFormLayout(dialog)
-        activation = QLineEdit(settings.activation, dialog)
+        activation = VoxTextField(settings.activation, dialog)
         activation.setMaxLength(64)
         if self.controller.policy.allow_voice_commands:
             form.addRow("Фраза активации команд", activation)
@@ -1416,19 +1418,19 @@ class ProfessionalWindow(QDialog):
         dialog = VoxDialog(self)
         dialog.setWindowTitle("Голосовая команда")
         form = QFormLayout(dialog)
-        trigger = QLineEdit(entry.get("trigger", ""), dialog)
-        command_set = QLineEdit(entry.get("command_set_id", ""), dialog)
-        action = QComboBox(dialog)
+        trigger = VoxTextField(entry.get("trigger", ""), dialog)
+        command_set = VoxTextField(entry.get("command_set_id", ""), dialog)
+        action = VoxComboBox(dialog)
         action.addItems(VOICE_ACTION_TYPES)
         action.setCurrentText(entry["action_type"])
         parameter = QPlainTextEdit(dialog)
         parameter.setPlainText(next(iter(entry["payload"].values()), ""))
-        panel = QComboBox(dialog)
+        panel = VoxComboBox(dialog)
         panel.addItems(("settings", "dictionary", "snippets", "commands", "replacements"))
         panel.setCurrentText(entry["payload"].get("panel", "settings"))
-        enabled = QCheckBox(dialog)
+        enabled = VoxCheckBox(dialog)
         enabled.setChecked(bool(entry.get("enabled", True)))
-        confirm = QCheckBox(dialog)
+        confirm = VoxCheckBox(dialog)
         confirm.setChecked(entry.get("confirmation_required", False))
         for label, widget in (
             ("Фраза", trigger),
@@ -1577,10 +1579,10 @@ class ProfessionalWindow(QDialog):
                 if field == "content":
                     widget.setPlaceholderText("{date}, {time}, {input:client_name}")
             else:
-                widget = QLineEdit(value, dialog)
+                widget = VoxTextField(value, dialog)
             widgets[field] = widget
             form.addRow(label, widget)
-        enabled = QCheckBox(dialog)
+        enabled = VoxCheckBox(dialog)
         enabled.setChecked(bool(entry.get("enabled", True)))
         form.addRow("Включена", enabled)
         priority = QSpinBox(dialog)
@@ -1588,13 +1590,13 @@ class ProfessionalWindow(QDialog):
         priority.setValue(int(entry.get("priority", 0)))
         if key != "snippets":
             form.addRow("Приоритет", priority)
-        match_mode = QComboBox(dialog)
+        match_mode = VoxComboBox(dialog)
         match_mode.addItems(("word", "case_sensitive", "literal"))
         match_mode.setCurrentText(entry.get("match_mode", "word"))
-        case_policy = QComboBox(dialog)
+        case_policy = VoxComboBox(dialog)
         case_policy.addItems(("canonical", "preserve"))
         case_policy.setCurrentText(entry.get("case_policy", "canonical"))
-        case_sensitive, whole_word = QCheckBox(dialog), QCheckBox(dialog)
+        case_sensitive, whole_word = VoxCheckBox(dialog), VoxCheckBox(dialog)
         case_sensitive.setChecked(bool(entry.get("case_sensitive", False)))
         whole_word.setChecked(bool(entry.get("whole_word", True)))
         if key == "dictionary":
@@ -1791,7 +1793,7 @@ class ProfessionalWindow(QDialog):
         self.edit_preview = QPlainTextEdit(page)
         self.edit_preview.setPlaceholderText("Предпросмотр")
         self.edit_preview.setReadOnly(True)
-        self.edit_operation = QComboBox(page)
+        self.edit_operation = VoxComboBox(page)
         self.edit_operation.addItems(
             (
                 "Uppercase",
@@ -1803,9 +1805,9 @@ class ProfessionalWindow(QDialog):
                 "Normalize line breaks",
             )
         )
-        self.edit_source = QLineEdit(page)
+        self.edit_source = VoxTextField(page)
         self.edit_source.setPlaceholderText("Исходная фраза для замены")
-        self.edit_replacement = QLineEdit(page)
+        self.edit_replacement = VoxTextField(page)
         self.edit_replacement.setPlaceholderText("Новая фраза")
         for widget in (
             self.edit_operation,

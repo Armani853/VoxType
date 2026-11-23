@@ -9,6 +9,7 @@ from PySide6.QtCore import QEvent, Qt
 
 from voxtype.ui.main_window import MainWindow
 from voxtype.ui.models import AppStatus, DictationLanguage, ModelProfile, UIState
+from voxtype.ui.presentation import CaptureState, DictationPresentationResolver, TargetState
 
 
 class _Controller:
@@ -34,6 +35,39 @@ def test_dashboard_viewport_reports_first_paint(qtbot) -> None:  # type: ignore[
     assert not window._first_content_paint_seen
     window.eventFilter(window._dashboard_scroll.viewport(), paint)
     assert window._first_content_paint_seen
+
+
+def test_live_buffer_preserves_capture_status_and_excludes_provisional_from_copy(qtbot) -> None:  # type: ignore[no-untyped-def]
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.set_live_text_source(lambda _session, start, end: "Текст"[start:end])
+    update = SimpleNamespace(
+        state=AppStatus.PAUSED_TARGET_LOST,
+        capture_open=True,
+        microphone_available=False,
+        microphone_failure="microphone_missing",
+        input_rms=10 ** (-69 / 20),
+        automatic_delivery=True,
+        target_lost=True,
+        live_session_id="current",
+        live_committed_length=5,
+        live_transcript=SimpleNamespace(
+            session_id="current", revision=2, stable_segments=(), unstable_text="но ещё рано"
+        ),
+    )
+    display = DictationPresentationResolver.resolve(update)
+    assert display.capture is CaptureState.RECORDING
+    assert display.target is TargetState.LOST
+    assert not display.microphone.error_code
+    window.update_snapshot(update, display)
+    assert window.status_label.text() == "Запись идёт"
+    assert "Тихий сигнал" in window.audio_hint.text()
+    assert window.error_banner.isHidden()
+    assert window.result_editor.toPlainText() == "Текст но ещё рано"
+    assert window.result_text() == "Текст"
+    update.live_transcript = None
+    window.update_snapshot(update)
+    assert window.result_editor.toPlainText() == "Текст"
 
 
 def test_confirmed_deltas_preserve_edits_through_finalization(qtbot) -> None:  # type: ignore[no-untyped-def]
@@ -79,7 +113,7 @@ def test_main_window_renders_snapshot_and_routes_commands(qtbot) -> None:  # typ
         )
     )
 
-    assert window.status_label.text() == "Слушаю"
+    assert window.status_label.text() == "Запись идёт"
     assert window.voice_action_label.text() == "Остановить"
     assert window.duration_tile.value_label.text() == "00:01:05"
     assert window.backlog_tile.value_label.text() == "2.2 с"
@@ -129,7 +163,7 @@ def test_main_window_visual_state_matrix_is_complete(qtbot) -> None:  # type: ig
             )
         )
         assert window.status_label.text()
-        assert window.status_detail_label.text()
+        assert window.delivery_label.text()
 
 
 def test_main_window_minimizes_to_tray_and_can_force_close(qtbot) -> None:  # type: ignore[no-untyped-def]
@@ -178,7 +212,7 @@ def test_main_window_completed_state_shows_full_transcript_and_new_start(qtbot) 
             delivery_status="delivered",
         )
     )
-    assert window.status_label.text() == "Готово"
+    assert window.status_label.text() == "Диктовка завершена"
     assert window.fragment_label.text() == "весь завершённый текст"
     assert window.voice_action_label.text() == "Начать диктовку"
     assert window.dictation_button.isEnabled()
@@ -195,8 +229,10 @@ def test_completed_text_waiting_for_target_has_clear_recovery_instruction(qtbot)
             delivery_status="queued_target_inactive",
         )
     )
-    assert window.status_label.text() == "Ожидает вставки"
-    assert "Повторить вставку" in window.status_detail_label.text()
+    assert window.status_label.text() == "Диктовка завершена"
+    assert window.delivery_label.text() == "Вставка приостановлена · текст в VoxType"
+    assert window.result_target.isEnabled()
+    assert window.result_copy.isEnabled()
 
 
 def test_missing_model_is_not_presented_as_ready_and_opens_setup(qtbot) -> None:  # type: ignore[no-untyped-def]
@@ -211,5 +247,5 @@ def test_missing_model_is_not_presented_as_ready_and_opens_setup(qtbot) -> None:
         qtbot.mouseClick(window.dictation_button, Qt.MouseButton.LeftButton)
 
     window.set_model_available(True)
-    assert window.status_label.text() == "Готово"
+    assert window.status_label.text() == "Готов к диктовке"
     assert window.voice_action_label.text() == "Начать диктовку"

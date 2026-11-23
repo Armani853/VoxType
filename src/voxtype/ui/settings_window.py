@@ -19,7 +19,6 @@ if PYSIDE6_AVAILABLE:
     from PySide6.QtGui import QHideEvent, QKeySequence, QStandardItemModel
     from PySide6.QtWidgets import (
         QApplication,
-        QCheckBox,
         QComboBox,
         QDialog,
         QDialogButtonBox,
@@ -33,7 +32,6 @@ if PYSIDE6_AVAILABLE:
         QMessageBox,
         QPlainTextEdit,
         QProgressBar,
-        QPushButton,
         QScrollArea,
         QSizePolicy,
         QSlider,
@@ -49,6 +47,8 @@ if PYSIDE6_AVAILABLE:
     from .motion import AnimationCoordinator, MotionPreference
     from .obsidian import (
         VoxButton,
+        VoxCard,
+        VoxCheckBox,
         VoxComboBox,
         VoxDisclosure,
         VoxEmptyState,
@@ -59,7 +59,7 @@ if PYSIDE6_AVAILABLE:
         confirm_delete,
     )
     from .theme import SPACING, state_color
-    from .widgets import AudioLevelMeter, Card, rms_to_meter
+    from .widgets import AudioLevelMeter, rms_to_meter
 
     class _SettingsForm(QFormLayout):
         _details: ClassVar[dict[str, str]] = {
@@ -141,7 +141,7 @@ if PYSIDE6_AVAILABLE:
             heading.setProperty("heading", True)
             header.addWidget(heading)
             header.addStretch(1)
-            self.onboarding_button = QPushButton("Повторить первый запуск", self)
+            self.onboarding_button = VoxButton("Повторить первый запуск", self)
             header.addWidget(self.onboarding_button)
             root.addLayout(header)
 
@@ -292,24 +292,24 @@ if PYSIDE6_AVAILABLE:
                 ),
                 page,
             )
-            self.voice_commands_check = QCheckBox("Распознавать голосовые команды", page)
+            self.voice_commands_check = VoxCheckBox("Распознавать голосовые команды", page)
             self.vocabulary_edit = QPlainTextEdit(page)
             self.vocabulary_edit.setPlaceholderText(
                 "По одному имени, термину или сокращению на строку (до 200)"
             )
             self.vocabulary_edit.setMaximumHeight(110)
-            self.live_preview_check = QCheckBox("Потоковый текст во время диктовки", page)
+            self.live_preview_check = VoxToggle("Потоковый текст во время диктовки", page)
             self.live_preview_check.setToolTip(
                 "Текст по мере распознавания добавляется в буфер VoxType."
             )
-            self.live_insertion_check = QCheckBox("Потоковая вставка в выбранное поле", page)
+            self.live_insertion_check = VoxToggle("Потоковая вставка в выбранное поле", page)
             self.live_insertion_check.setToolTip(
                 "Подтверждённый текст будет добавляться в выбранное поле по мере распознавания. "
                 "Голосовые действия в этом режиме отключены."
             )
-            self.live_provisional_check = QCheckBox("Показывать предварительный текст", page)
-            self.live_auto_scroll_check = QCheckBox("Прокручивать буфер за новым текстом", page)
-            self.confirm_overlay_close_check = QCheckBox(
+            self.live_provisional_check = VoxToggle("Показывать предварительный текст", page)
+            self.live_auto_scroll_check = VoxToggle("Прокручивать буфер за новым текстом", page)
+            self.confirm_overlay_close_check = VoxCheckBox(
                 "Спрашивать перед закрытием плавающего окна во время записи", page
             )
             self.streaming_speed_combo = self._combo(
@@ -321,15 +321,17 @@ if PYSIDE6_AVAILABLE:
                 page,
             )
             self.live_preview_check.toggled.connect(self._update_streaming_controls)
-            self.auto_insert_check = QCheckBox("Автоматически вставлять подтверждённый текст", page)
+            self.auto_insert_check = VoxCheckBox(
+                "Автоматически вставлять подтверждённый текст", page
+            )
             self._update_streaming_controls(self.live_preview_check.isChecked())
-            self.copy_complete_check = QCheckBox(
+            self.copy_complete_check = VoxCheckBox(
                 "Копировать весь текст в буфер после завершения", page
             )
-            self.auto_hide_result_check = QCheckBox(
+            self.auto_hide_result_check = VoxCheckBox(
                 "Автоматически скрывать результат после завершения", page
             )
-            self.safe_clipboard_check = QCheckBox("Безопасный режим буфера обмена", page)
+            self.safe_clipboard_check = VoxCheckBox("Безопасный режим буфера обмена", page)
             self.target_policy_combo = self._combo(
                 (("Закрепить окно при старте", "locked"), ("Следовать за фокусом", "follow_focus")),
                 page,
@@ -338,9 +340,9 @@ if PYSIDE6_AVAILABLE:
             self.insertion_delay_spin.setRange(0, 5000)
             self.insertion_delay_spin.setSingleStep(50)
             self.insertion_delay_spin.setSuffix(" мс")
-            self.spacing_check = QCheckBox("Добавлять пробел между фрагментами", page)
-            self.capitalize_check = QCheckBox("Начинать предложение с заглавной буквы", page)
-            self.text_transformations_check = QCheckBox(
+            self.spacing_check = VoxCheckBox("Добавлять пробел между фрагментами", page)
+            self.capitalize_check = VoxCheckBox("Начинать предложение с заглавной буквы", page)
+            self.text_transformations_check = VoxCheckBox(
                 "Применять личный словарь и правила замены", page
             )
             form.addRow("Язык по умолчанию", self.default_language_combo)
@@ -351,7 +353,7 @@ if PYSIDE6_AVAILABLE:
             _, form = self._page(
                 "Вставка", "Целевое окно, буфер обмена и форматирование фрагментов."
             )
-            self.dictation_mode_combo = QComboBox(page)
+            self.dictation_mode_combo = VoxComboBox(page)
             for label, mode in (
                 ("По нажатию", "toggle"),
                 ("При удержании", "push_to_talk"),
@@ -360,7 +362,7 @@ if PYSIDE6_AVAILABLE:
             ):
                 self.dictation_mode_combo.addItem(label, mode)
             form.addRow("Режим записи", self.dictation_mode_combo)
-            self.auto_stop_enabled = QCheckBox("Включить остановку по тишине в этом режиме", page)
+            self.auto_stop_enabled = VoxCheckBox("Включить остановку по тишине в этом режиме", page)
             form.addRow(self.auto_stop_enabled)
             self.auto_stop_limits = []
             for label, low, high, value in (
@@ -374,11 +376,13 @@ if PYSIDE6_AVAILABLE:
                 limit.setSuffix(" мс")
                 self.auto_stop_limits.append(limit)
                 form.addRow(label, limit)
-            self.safe_terminal_check = QCheckBox("Предпочитать безопасный ввод в терминалах", page)
+            self.safe_terminal_check = VoxCheckBox(
+                "Предпочитать безопасный ввод в терминалах", page
+            )
             form.addRow(self.safe_terminal_check)
-            self.caret_overlay_check = QCheckBox("Размещать индикатор рядом с курсором", page)
+            self.caret_overlay_check = VoxCheckBox("Размещать индикатор рядом с курсором", page)
             form.addRow(self.caret_overlay_check)
-            compatibility = QPushButton("Совместимость приложений…", page)
+            compatibility = VoxButton("Совместимость приложений…", page)
             compatibility.clicked.connect(lambda: self.input_compatibility_requested.emit())
             form.addRow(compatibility)
             form.addRow(self.live_preview_check)
@@ -402,11 +406,18 @@ if PYSIDE6_AVAILABLE:
             self.live_provisional_check.setEnabled(enabled)
             self.live_auto_scroll_check.setEnabled(enabled)
             self.auto_insert_check.setEnabled(not enabled)
+            hint = "" if enabled else "Включите потоковый текст во время диктовки."
+            for control in (
+                self.streaming_speed_combo,
+                self.live_provisional_check,
+                self.live_auto_scroll_check,
+            ):
+                control.setToolTip(hint)
 
         def _build_audio_page(self) -> None:
             page, form = self._page("Аудио", "Микрофон и осторожная обработка сигнала.")
             self._audio_page = page
-            self.audio_device_combo = QComboBox(page)
+            self.audio_device_combo = VoxComboBox(page)
             self.audio_device_combo.setObjectName("audioDeviceCombo")
             self.audio_device_combo.setSizeAdjustPolicy(
                 QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
@@ -445,13 +456,15 @@ if PYSIDE6_AVAILABLE:
             if isinstance(model, QStandardItemModel) and (enhanced := model.item(3)) is not None:
                 enhanced.setEnabled(False)
                 enhanced.setToolTip("Требуется совместимый модуль шумоподавления.")
-            self.noise_suppression_check = QCheckBox("Умеренное шумоподавление", page)
-            self.startup_pre_roll_check = QCheckBox("Первые звуки во время подготовки модели", page)
+            self.noise_suppression_check = VoxCheckBox("Умеренное шумоподавление", page)
+            self.startup_pre_roll_check = VoxCheckBox(
+                "Первые звуки во время подготовки модели", page
+            )
             self.startup_pre_roll_check.setToolTip(
                 "Микрофон открывается после команды записи. Последние 350 мс подготовки хранятся в памяти. "
                 "При сохранении аудио функция отключена."
             )
-            self.normalization_check = QCheckBox("Безопасная нормализация громкости", page)
+            self.normalization_check = VoxCheckBox("Безопасная нормализация громкости", page)
             self.mic_meter = AudioLevelMeter(page)
             self.mic_status_label = QLabel("Нажмите «Тест микрофона»", page)
             self.mic_status_label.setProperty("muted", True)
@@ -467,7 +480,7 @@ if PYSIDE6_AVAILABLE:
             )
             self.audio_quality_label.setProperty("muted", True)
             meter_layout.addWidget(self.audio_quality_label)
-            self.test_microphone_button = QPushButton("Тест микрофона", page)
+            self.test_microphone_button = VoxButton("Тест микрофона", page)
             form.addRow("Устройство записи", self.audio_device_combo)
             form.addRow("Чувствительность речи", vad_row)
             form.addRow("Предобработка", self.preprocessing_mode_combo)
@@ -537,9 +550,9 @@ if PYSIDE6_AVAILABLE:
             page, form = self._page(
                 "Модели", "Установленные локальные модели и вычислительный профиль."
             )
-            self.model_combo = QComboBox(page)
+            self.model_combo = VoxComboBox(page)
             self.model_cards = QVBoxLayout()
-            self._model_widgets: dict[str, tuple[Card, QLabel, QLabel, VoxButton]] = {}
+            self._model_widgets: dict[str, tuple[VoxCard, QLabel, QLabel, VoxButton]] = {}
             self._models_installed: dict[str, bool] = {}
             self._model_empty = VoxEmptyState(
                 "files",
@@ -553,9 +566,9 @@ if PYSIDE6_AVAILABLE:
             model_actions = QWidget(page)
             actions = QHBoxLayout(model_actions)
             actions.setContentsMargins(0, 0, 0, 0)
-            self.download_model_button = QPushButton("Скачать", model_actions)
-            self.delete_model_button = QPushButton("Удалить", model_actions)
-            self.benchmark_button = QPushButton("Benchmark", model_actions)
+            self.download_model_button = VoxButton("Скачать", model_actions)
+            self.delete_model_button = VoxButton("Удалить", model_actions)
+            self.benchmark_button = VoxButton("Benchmark", model_actions)
             actions.addWidget(self.download_model_button)
             actions.addWidget(self.delete_model_button)
             actions.addWidget(self.benchmark_button)
@@ -568,30 +581,30 @@ if PYSIDE6_AVAILABLE:
             self.cpu_threads_spin = QSpinBox(page)
             self.cpu_threads_spin.setRange(0, 128)
             self.cpu_threads_spin.setSpecialValueText("Авто · по профилю")
-            self.power_mode_combo = QComboBox(page)
+            self.power_mode_combo = VoxComboBox(page)
             self.power_mode_combo.addItem("Экономия энергии", "energy")
             self.power_mode_combo.addItem("Баланс", "balanced")
             self.power_mode_combo.addItem("Автоматически (Windows)", "automatic")
             self.power_mode_combo.addItem("Максимальная производительность", "maximum")
-            self.decoding_preset_combo = QComboBox(page)
+            self.decoding_preset_combo = VoxComboBox(page)
             self.decoding_preset_combo.addItem("Быстро", "fast")
             self.decoding_preset_combo.addItem("Стандартное", "balanced")
             self.decoding_preset_combo.addItem("Точнее (выше нагрузка)", "accurate")
-            self.memory_policy_combo = QComboBox(page)
+            self.memory_policy_combo = VoxComboBox(page)
             self.memory_policy_combo.addItem("Оставлять модель в памяти", "keep_loaded")
             self.memory_policy_combo.addItem("Выгружать после простоя", "unload_after_idle")
             self.memory_policy_combo.addItem("Выгружать по запросу", "explicit")
             self.idle_unload_spin = QSpinBox(page)
             self.idle_unload_spin.setRange(1, 120)
             self.idle_unload_spin.setSuffix(" мин")
-            self.release_models_button = QPushButton("Выгрузить модель сейчас", page)
+            self.release_models_button = VoxButton("Выгрузить модель сейчас", page)
             self.memory_policy_combo.currentIndexChanged.connect(
                 lambda: self.idle_unload_spin.setEnabled(
                     self.memory_policy_combo.currentData() == "unload_after_idle"
                 )
             )
             self.idle_unload_spin.setEnabled(False)
-            self.gpu_experimental_check = QCheckBox("Экспериментальный GPU backend", page)
+            self.gpu_experimental_check = VoxCheckBox("Экспериментальный GPU backend", page)
             form.addRow("Активная модель", self.model_combo)
             form.addRow("Управление", model_actions)
             form.addRow("Загрузка", self.model_progress)
@@ -664,7 +677,7 @@ if PYSIDE6_AVAILABLE:
             ) in items:
                 fields = self._model_widgets.get(identifier)
                 if fields is None:
-                    card = Card(self)
+                    card = VoxCard(self, emphasis=True)
                     card.content_layout.addWidget(VoxSectionHeader(identifier, card))
                     detail = QLabel(card)
                     detail.setWordWrap(True)
@@ -679,7 +692,8 @@ if PYSIDE6_AVAILABLE:
                     card.content_layout.addWidget(action, alignment=Qt.AlignmentFlag.AlignLeft)
                     self.model_cards.addWidget(card)
                     fields = self._model_widgets[identifier] = (card, detail, label, action)
-                _card, detail, label, action = fields
+                card, detail, label, action = fields
+                card.set_selected(active and installed)
                 self._models_installed[identifier] = installed
                 detail.setText(f"Whisper · RU / EN · {size}\n{description}")
                 label.setText(state if usable else f"{state} · ограничено политикой")
@@ -709,19 +723,19 @@ if PYSIDE6_AVAILABLE:
                 "Приватность",
                 "Речь обрабатывается на этом устройстве. История и запись аудио включаются отдельно.",
             )
-            self.save_history_check = QCheckBox("Сохранять текст истории", page)
-            self.recover_drafts_check = QCheckBox(
+            self.save_history_check = VoxToggle("Сохранять текст истории", page)
+            self.recover_drafts_check = VoxToggle(
                 "Сохранять завершённые черновики для восстановления", page
             )
-            self.save_audio_check = QCheckBox("Сохранять исходное аудио", page)
-            self.local_api_check = QCheckBox("Разрешить локальное API Windows", page)
-            self.local_api_record_check = QCheckBox("Разрешить API запускать микрофон", page)
+            self.save_audio_check = VoxToggle("Сохранять исходное аудио", page)
+            self.local_api_check = VoxCheckBox("Разрешить локальное API Windows", page)
+            self.local_api_record_check = VoxCheckBox("Разрешить API запускать микрофон", page)
             self.local_api_record_check.setToolTip(
                 "Запрос с токеном включает микрофон. Результат остаётся в VoxType."
             )
             self.local_api_status = QLabel("Выключен", page)
             self.local_api_status.setWordWrap(True)
-            self.local_api_credentials_button = QPushButton("Канал и токен API…", page)
+            self.local_api_credentials_button = VoxButton("Канал и токен API…", page)
             self.local_api_credentials_button.clicked.connect(self.local_api_credentials_requested)
             self.local_api_check.toggled.connect(
                 lambda enabled: self.local_api_record_check.setEnabled(
@@ -734,8 +748,8 @@ if PYSIDE6_AVAILABLE:
             data_actions = QWidget(page)
             actions = QHBoxLayout(data_actions)
             actions.setContentsMargins(0, 0, 0, 0)
-            self.open_data_button = QPushButton("Открыть папку данных", data_actions)
-            self.delete_data_button = QPushButton("Удалить локальные записи", data_actions)
+            self.open_data_button = VoxButton("Открыть папку данных", data_actions)
+            self.delete_data_button = VoxButton("Удалить локальные записи", data_actions)
             self.delete_data_button.setProperty("danger", True)
             actions.addWidget(self.open_data_button)
             actions.addWidget(self.delete_data_button)
@@ -754,14 +768,14 @@ if PYSIDE6_AVAILABLE:
                 ("Экспортировать настройки…", self.export_personal_requested),
                 ("Импортировать настройки…", self.import_personal_requested),
             ):
-                button = QPushButton(title, page)
+                button = VoxButton(title, page)
                 button.clicked.connect(lambda _checked=False, signal=action: signal.emit())
                 form.addRow(button)
             for title, category in (
                 ("Экспорт истории диктовок…", "history"),
                 ("Экспорт транскриптов файлов…", "transcripts"),
             ):
-                button = QPushButton(title, page)
+                button = VoxButton(title, page)
                 button.clicked.connect(
                     lambda _checked=False, selected=category: self.export_archive_requested.emit(
                         selected
@@ -832,11 +846,11 @@ if PYSIDE6_AVAILABLE:
             page, form = self._page(
                 "Диагностика", "Логи не содержат продиктованный текст или PCM-аудио."
             )
-            self.open_log_button = QPushButton("Открыть технический лог", page)
-            self.export_diagnostics_button = QPushButton("Экспортировать отчёт", page)
-            self.self_test_button = QPushButton("Выполнить self-test", page)
-            self.show_versions_button = QPushButton("Показать версии библиотек", page)
-            self.check_updates_button = QPushButton("Проверить обновления", page)
+            self.open_log_button = VoxButton("Открыть технический лог", page)
+            self.export_diagnostics_button = VoxButton("Экспортировать отчёт", page)
+            self.self_test_button = VoxButton("Выполнить self-test", page)
+            self.show_versions_button = VoxButton("Показать версии библиотек", page)
+            self.check_updates_button = VoxButton("Проверить обновления", page)
             self.check_updates_button.clicked.connect(lambda: self.updates_requested.emit())
             self.diagnostics_status_label = QLabel("Проверки ещё не запускались", page)
             self.diagnostics_status_label.setProperty("muted", True)
@@ -844,7 +858,7 @@ if PYSIDE6_AVAILABLE:
             form.addRow(self.export_diagnostics_button)
             form.addRow(self.self_test_button)
             form.addRow(self.show_versions_button)
-            self.update_channel_combo = QComboBox(page)
+            self.update_channel_combo = VoxComboBox(page)
             self.update_channel_combo.addItem("Стабильный", "stable")
             self.update_channel_combo.addItem("Бета", "beta")
             form.addRow("Канал обновлений", self.update_channel_combo)

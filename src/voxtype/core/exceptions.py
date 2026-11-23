@@ -13,6 +13,10 @@ class AudioDeviceError(VoxTypeError):
     """Raised when an input device cannot be opened or disappears."""
 
 
+class MicrophoneAccessDenied(AudioDeviceError):
+    """Raised when opening the microphone is explicitly denied."""
+
+
 class ModelUnavailableError(VoxTypeError):
     """Raised when the selected local model cannot be used."""
 
