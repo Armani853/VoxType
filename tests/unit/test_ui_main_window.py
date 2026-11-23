@@ -65,9 +65,16 @@ def test_live_buffer_preserves_capture_status_and_excludes_provisional_from_copy
     assert window.error_banner.isHidden()
     assert window.result_editor.toPlainText() == "Текст но ещё рано"
     assert window.result_text() == "Текст"
+    window.result_edit.click()
+    assert not window.result_editor.isReadOnly()
+    assert window.result_editor.toPlainText() == "Текст"
+    window.result_editor.setPlainText("Правка")
+    window.result_edit.click()
+    assert window.result_editor.isReadOnly()
+    assert window.result_text() == "Правка"
     update.live_transcript = None
     window.update_snapshot(update)
-    assert window.result_editor.toPlainText() == "Текст"
+    assert window.result_editor.toPlainText() == "Правка"
 
 
 def test_confirmed_deltas_preserve_edits_through_finalization(qtbot) -> None:  # type: ignore[no-untyped-def]

@@ -262,6 +262,13 @@ if PYSIDE6_AVAILABLE:
             self.stop_button.setEnabled(active)
             self.stop_button.setProperty("danger", recording)
             self.pause_button.setVisible(recording)
+            pause_label = (
+                "Продолжить запись"
+                if display.capture is CaptureState.PAUSED
+                else "Приостановить запись"
+            )
+            self.pause_button.setAccessibleName(pause_label)
+            self.pause_button.setToolTip(pause_label)
             self.start_button.setVisible(
                 not active and display.capture is not CaptureState.STOPPING
             )

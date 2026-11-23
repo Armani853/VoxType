@@ -65,6 +65,7 @@ class DictationPresentation:
     tone: str
     delivery_label: str
     language: str
+    profile_name: str
     model_name: str
     duration_seconds: float
     has_confirmed: bool
@@ -82,7 +83,9 @@ def provisional_tail(source: object) -> str:
 
 class DictationPresentationResolver:
     @staticmethod
-    def resolve(source: object, locale: str = "ru") -> DictationPresentation:
+    def resolve(
+        source: object, locale: str = "ru", profile_name: str = ""
+    ) -> DictationPresentation:
         state = snapshot_from(source)
         ru = locale == "ru"
         status = state.state
@@ -233,6 +236,7 @@ class DictationPresentationResolver:
             tone,
             label,
             state.language.value.upper(),
+            profile_name,
             state.model_name,
             state.session_elapsed_s,
             confirmed,

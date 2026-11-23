@@ -133,6 +133,7 @@ if PYSIDE6_AVAILABLE:
             self._live_cursor_offset = 0
             self._show_live_provisional = True
             self._live_auto_scroll = True
+            self._editing_live = False
             self._build_ui()
             self._connect_ui()
             self.retranslate_ui()
@@ -350,7 +351,7 @@ if PYSIDE6_AVAILABLE:
             self.result_save = VoxButton("Сохранить", fragment)
             self.result_save.clicked.connect(self.save_result_requested)
             self.result_edit.setEnabled(False)
-            self.result_edit.clicked.connect(self.edit_result_requested)
+            self.result_edit.clicked.connect(self._edit_result)
             self.result_insert = VoxButton("Вставить", fragment)
             self.result_clear = VoxButton("Очистить", fragment, variant="flat")
             self.result_target = VoxButton("Выбрать окно", fragment)
@@ -434,6 +435,21 @@ if PYSIDE6_AVAILABLE:
             self.result_clear.setEnabled(available and not active)
             self.result_target.setEnabled(not active)
 
+        def _edit_result(self) -> None:
+            if self._state.state.active and self._live_document_session is not None:
+                self._editing_live = not self._editing_live
+                if self._editing_live:
+                    edited = self.result_editor.document().isModified()
+                    self._clear_preview()
+                    self.result_editor.document().setModified(edited)
+                    self.result_editor.setReadOnly(False)
+                    self.result_editor.setFocus()
+                # Restore the current hypothesis when leaving local edit mode.
+                self._live_key = None
+                self.update_snapshot(self._last_snapshot)
+            else:
+                self.edit_result_requested.emit()
+
         def result_text(self) -> str:
             if self._preview_start is None:
                 return self.result_editor.toPlainText()
@@ -491,12 +507,17 @@ if PYSIDE6_AVAILABLE:
                     self._live_document_session = session
                     self._live_cursor_offset = 0
                     self._live_key = None
+                    self._editing_live = False
                 live = getattr(snapshot, "live_transcript", None)
                 key = (live.session_id, live.revision) if live is not None else None
                 if key is None or key != self._live_key:
                     if key is None or self._live_key is None or key[1] > self._live_key[1]:
                         self._live_key = key
-                        wanted = provisional_tail(snapshot) if self._show_live_provisional else ""
+                        wanted = (
+                            provisional_tail(snapshot)
+                            if self._show_live_provisional and not self._editing_live
+                            else ""
+                        )
                     else:
                         wanted = self._preview_text
                 else:
@@ -522,7 +543,7 @@ if PYSIDE6_AVAILABLE:
                     document.setModified(edited)
                     scroll.setValue(scroll.maximum() if following else previous_position)
                     self.new_text_label.setVisible(scroll.value() < scroll.maximum())
-                self.result_editor.setReadOnly(True)
+                self.result_editor.setReadOnly(not self._editing_live)
                 return
             document = self.result_editor.document()
             edited = document.isModified()
@@ -539,6 +560,7 @@ if PYSIDE6_AVAILABLE:
                     cursor.insertText(finalized[self._live_cursor_offset :])
                 self._live_document_session = None
                 self._live_cursor_offset = 0
+                self._editing_live = False
                 self.new_text_label.hide()
             elif self._observed_result != finalized:
                 self.result_editor.setPlainText(finalized)
@@ -662,9 +684,6 @@ if PYSIDE6_AVAILABLE:
             self.result_copy_pending.setVisible(
                 bool(getattr(snapshot, "pending_insertion", False) and not state.state.active)
             )
-            self.result_edit.setEnabled(
-                bool(recognition and recognition.raw_text and state.full_transcript)
-            )
             needs_model = bool(
                 state.readiness is not None and state.readiness.reason == "model_missing"
             ) or (not self._model_available and not state.state.active)
@@ -767,6 +786,15 @@ if PYSIDE6_AVAILABLE:
             self.shell.model.setText(model_label)
             self._update_result_editor(snapshot, state)
             self._update_result_actions()
+            self.result_edit.setText(
+                ("Закончить правку" if is_ru else "Finish editing")
+                if self._editing_live
+                else ("Править" if is_ru else "Edit")
+            )
+            self.result_edit.setEnabled(
+                self._live_document_session is not None
+                or bool(recognition and recognition.raw_text and state.full_transcript)
+            )
             mode = (
                 "starting"
                 if starting

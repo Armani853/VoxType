@@ -385,6 +385,7 @@ class DesktopApplication:
         self._last_state = "STARTUP"
         self._last_rendered_snapshot: object | None = None
         self._header_profile_id: str | None = None
+        self._header_profile_name = ""
         self._result_dismissed = False
         self._overlay_dismissed = False
         self._overlay_requested = False
@@ -938,14 +939,17 @@ class DesktopApplication:
                     None,
                 )
             )
-            self.main.set_profile_name(chosen.name if chosen is not None else "")
+            self._header_profile_name = chosen.name if chosen is not None else ""
+            self.main.set_profile_name(self._header_profile_name)
             self._header_profile_id = profile_id
         # Idle and completed snapshots are often identical for many polls.
         # Rewriting every Qt property also repaints the overlay and tray.
         if snapshot == self._last_rendered_snapshot:
             return
         presentation = DictationPresentationResolver.resolve(
-            snapshot, self.runtime.settings.general.ui_language
+            snapshot,
+            self.runtime.settings.general.ui_language,
+            self._header_profile_name,
         )
         self._observe_practice(snapshot)
         self._observe_scratchpad(snapshot)

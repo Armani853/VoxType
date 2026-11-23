@@ -7,7 +7,7 @@ from typing import Any
 
 from ._optional import PYSIDE6_AVAILABLE, require_pyside6
 from .models import AppStatus, DictationLanguage, UIState, snapshot_from
-from .presentation import DictationPresentation, DictationPresentationResolver
+from .presentation import CaptureState, DictationPresentation, DictationPresentationResolver
 
 if PYSIDE6_AVAILABLE:
     from PySide6.QtCore import QObject, Signal
@@ -162,6 +162,7 @@ if PYSIDE6_AVAILABLE:
         ) -> None:
             state = snapshot_from(snapshot)
             self._state = state
+            display = presentation or DictationPresentationResolver.resolve(snapshot)
             active = state.state.active
             if active != self._menu_icons_active:
                 self._refresh_menu_icons()
@@ -171,12 +172,13 @@ if PYSIDE6_AVAILABLE:
                 (active and state.state is not AppStatus.FINISHING)
                 or (readiness.can_record if readiness is not None else not active)
             )
-            self.pause_action.setEnabled(active and state.state is not AppStatus.FINISHING)
-            paused = state.state in {AppStatus.PAUSED, AppStatus.PAUSED_TARGET_LOST}
+            self.pause_action.setEnabled(
+                display.capture in {CaptureState.RECORDING, CaptureState.PAUSED}
+            )
+            paused = display.capture is CaptureState.PAUSED
             self.pause_action.setText("Продолжить" if paused else "Пауза")
             self.ru_action.setChecked(state.language is DictationLanguage.RU)
             self.en_action.setChecked(state.language is DictationLanguage.EN)
-            display = presentation or DictationPresentationResolver.resolve(snapshot)
             self.icon.setToolTip(f"VoxType — {display.primary} · {display.language}")
             color = state_color(display.tone)
             self.icon.setIcon(create_app_icon(color=color))
